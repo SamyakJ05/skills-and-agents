@@ -102,6 +102,43 @@ Regenerate after changes: `python3 scripts/build-adapters.py`
 
 _(none yet — coding assistance here is via subagents below)_
 
+## 3D skills
+
+- **animation-quality-gate** (`skills/3d/blender/animation-quality-gate`) — Validate Blender animation attempts before accepting them by rendering contact sheets, checking silhouette stability, flicker, framing, subject dominance, layer
+- **atlas-uv-fitting** (`skills/3d/blender/atlas-uv-fitting`) — Detect texture-atlas regions and map each source part to its own UV rectangle or projected UV surface. Use when a texture pack must fit a Blender model 1:1, whe
+- **blender-animation** (`skills/3d/blender/blender-animation`) — Animate objects, cameras, lights, and properties in Blender — keyframes, F-curves, easing (Bezier, Linear, Sine, Bounce, Elastic), shape keys (morph targets / b
+- **blender-cameras** (`skills/3d/blender/blender-cameras`) — Set up Blender cameras with cinematic intent — focal length, depth of field (f-stop / focus object), composition (rule of thirds, leading lines), animated camer
+- **blender-export** (`skills/3d/blender/blender-export`) — Export Blender scenes to glTF/GLB (web/AR), FBX (game engines), OBJ (universal), USD (VFX pipelines), STL (3D printing). Includes per-format settings, embed/unp
+- **blender-lighting** (`skills/3d/blender/blender-lighting`) — Light Blender scenes professionally — three-point setups, HDRI environments, studio/cinematic/dramatic configurations, light groups, color temperature, soft vs 
+- **blender-materials** (`skills/3d/blender/blender-materials`) — Create and assign PBR materials in Blender via Principled BSDF — metals, glass, plastic, fabric, skin, organics. Covers physically-based material recipes with r
+- **blender-modeling** (`skills/3d/blender/blender-modeling`) — Create and edit 3D meshes in Blender — primitives, hard-surface modeling, mesh operators, modifier stacks (Bevel, Subdivision, Boolean, Mirror, Array, Solidify)
+- **blender-pro-workflow** (`skills/3d/blender/blender-pro-workflow`) — End-to-end production workflow guidance for Blender — the order to assemble scenes (block-out → camera → light → forms → materials → detail → render → composite
+- **blender-rendering** (`skills/3d/blender/blender-rendering`) — Render Blender scenes with the right engine and settings — Cycles for photoreal, EEVEE for speed/stylized, sample counts, denoising (OptiX/OIDN), light path tun
+- **blender-skill-harmonizer** (`skills/3d/blender/blender-skill-harmonizer`) — Harmonize multiple Blender skills into a coherent pipeline with clear activation precedence, handoff artifacts, dependency gates, and conflict-resolution rules.
+- **blender-uv-texturing** (`skills/3d/blender/blender-uv-texturing`) — UV unwrap, atlas-map, project textures, use alpha decals, bake maps/lightmaps, and prepare texture-driven Blender assets for glTF/GLB export. Use whenever the u
+- **closed-surface-uv-coverage** (`skills/3d/blender/closed-surface-uv-coverage`) — Ensure textures and decals cover all visible surfaces of a closed or extruded Blender asset, especially front/back caps and sidewalls, instead of relying on par
+- **contour-to-mesh** (`skills/3d/blender/contour-to-mesh`) — Build Blender mesh surfaces directly from extracted 2D contours/masks instead of approximate primitives. Use for 1:1 mascot/logo reconstruction, exact leaf/peta
+- **fit-repair-optimizer** (`skills/3d/blender/fit-repair-optimizer`) — Turn multiview fit reports into a sequential or parallel repair queue for aligning Blender products to source-of-truth templates. Use after validation shows dis
+- **landmark-fit-repair** (`skills/3d/blender/landmark-fit-repair`) — Validate and repair source-locked Blender models using named landmarks such as leaf tips, shell corners, eyes, smile, rim thickness, aura center/radius, and vie
+- **mascot-logo-reconstruction** (`skills/3d/blender/mascot-logo-reconstruction`) — Orchestrate a fail-gated, source-locked Blender reconstruction of mascots, logos, brand avatars, and stylized flat characters from wireframes, texture packs, an
+- **multiview-constraint-solver** (`skills/3d/blender/multiview-constraint-solver`) — Determine whether front/side/back/top reference templates can be satisfied by one rigid 3D Blender model, choose a canonical source policy, and emit constraints
+- **multiview-fit-loop** (`skills/3d/blender/multiview-fit-loop`) — Closed-loop compare-adjust-repeat workflow for fitting Blender models to supplied front/side/back/top templates and originals. Use when the user asks to compare
+- **orbital-hud-motion** (`skills/3d/blender/orbital-hud-motion`) — Create tasteful circular/orbital HUD and aura animations around a Blender subject using source-derived arcs, dots, dashes, opacity, parallax, and restrained mot
+- **orthographic-registration** (`skills/3d/blender/orthographic-registration`) — Register front, side, back, and top orthographic reference views into a shared Blender coordinate contract. Use when a 3D model must match multi-view wireframes
+- **quality-refinement-autoloop** (`skills/3d/blender/quality-refinement-autoloop`) — Run a self-refinement loop when a Blender result is subpar, user expectations are not met, validation fails, or repeated issues reveal missing skill depth. The 
+- **reference-analysis-validator** (`skills/3d/blender/reference-analysis-validator`) — Measure and validate supplied reference images, wireframes, texture atlases, and Blender renders before declaring a reconstruction 1:1. Use when an asset must m
+- **reference-look-calibration** (`skills/3d/blender/reference-look-calibration`) — Calibrate Blender materials, lighting, camera crop, emission/glow, color management, and aura/HUD styling against supplied original/reference images using measu
+- **reference-to-3d** (`skills/3d/blender/reference-to-3d`) — Reconstruct Blender models from supplied reference sheets, branding templates, texture atlases, orthographic front/side/back/top views, or mascot/logo art where
+- **source-part-segmentation** (`skills/3d/blender/source-part-segmentation`) — Segment overlapping visual parts from source images, wireframes, texture atlases, and decals before mesh reconstruction. Use when a mascot/logo/template contain
+- **text-to-blender** (`skills/3d/blender/text-to-blender`) — Drive Blender from natural language. Converts plain-English requests ("model a sword and render it with cinematic lighting", "make this glass look frosted", "se
+- **texture-driven-mesh-fitting** (`skills/3d/blender/texture-driven-mesh-fitting`) — Reshape source-locked mesh boundaries so the geometry fits texture-atlas or decal contours 1:1 before final UV/material work. Use when textures look off because
+- **texture-state-animation** (`skills/3d/blender/texture-state-animation`) — Design and validate texture-state transitions for Blender animations without ugly whole-image crossfades, texture popping, misregistered morphs, or target-engin
+- **wireframe-to-3d** (`skills/3d/blender/wireframe-to-3d`) — Convert 2D orthographic wireframe PNG drawings to 3D Blender models exported as glTF/GLB. Use this skill whenever the user provides wireframe images (technical 
+
+## Video skills
+
+- **video-shotcraft** (`skills/video/video-shotcraft`) — Create cinematic product videos from shot recipe cards, a validated template, and code/audio assets (Remotion + real page screenshots + 2.5D camera moves + beat
+
 ## Coding subagents
 
 | Name | Source | Tools | Model | Description |

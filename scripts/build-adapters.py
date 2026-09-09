@@ -159,6 +159,26 @@ def build_agents_md(skills, agents):
     if not any_coding_skill:
         lines.append("_(none yet — coding assistance here is via subagents below)_")
 
+    lines.append("\n## 3D skills\n")
+    for s in skills:
+        if s["path"].startswith("skills/3d"):
+            desc = s["description"].split("\n")[0][:160]
+            lines.append(f"- **{s['name']}** (`{s['path']}`) — {desc}")
+
+    lines.append("\n## Video skills\n")
+    for s in skills:
+        if s["path"].startswith("skills/video"):
+            desc = s["description"].split("\n")[0][:160]
+            lines.append(f"- **{s['name']}** (`{s['path']}`) — {desc}")
+
+    other_cats = {"skills/design", "skills/coding", "skills/3d", "skills/video"}
+    other = [s for s in skills if not any(s["path"].startswith(c) for c in other_cats)]
+    if other:
+        lines.append("\n## Other skills\n")
+        for s in other:
+            desc = s["description"].split("\n")[0][:160]
+            lines.append(f"- **{s['name']}** (`{s['path']}`) — {desc}")
+
     lines.append("\n## Coding subagents\n")
     lines.append("| Name | Source | Tools | Model | Description |")
     lines.append("|---|---|---|---|---|")

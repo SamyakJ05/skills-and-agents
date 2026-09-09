@@ -2,6 +2,216 @@
   "generated_by": "scripts/build-adapters.py",
   "skills": [
     {
+      "id": "3d/blender/animation-quality-gate",
+      "name": "animation-quality-gate",
+      "description": "Validate Blender animation attempts before accepting them by rendering contact sheets, checking silhouette stability, flicker, framing, subject dominance, layer separation, export compatibility, and motion-design coherence. Use after animation renders or when the user says motion/morph/outside elements look bad.",
+      "path": "skills/3d/blender/animation-quality-gate",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/atlas-uv-fitting",
+      "name": "atlas-uv-fitting",
+      "description": "Detect texture-atlas regions and map each source part to its own UV rectangle or projected UV surface. Use when a texture pack must fit a Blender model 1:1, when textures look off/stretched, when alpha decals or lightmaps are provided, or before exporting a textured GLB for a brand mascot/logo.",
+      "path": "skills/3d/blender/atlas-uv-fitting",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-animation",
+      "name": "blender-animation",
+      "description": "Animate objects, cameras, lights, and properties in Blender \u2014 keyframes, F-curves, easing (Bezier, Linear, Sine, Bounce, Elastic), shape keys (morph targets / blendshapes / visemes), drivers (Python expressions on properties), NLA actions for reuse and layering. Use whenever the user asks to \"animate this\", \"make it move / rotate / scale over time\", \"add keyframes\", \"loop / oscillate\", \"shape key / morph / blendshape\", \"visemes for lip sync\", or any time-based property change. Make sure to use this skill even if the user does not say \"animate\" \u2014 also covers \"spin it slowly\", \"make it wave\", \"fade in / out\", \"pulse\", \"facial expression\".",
+      "path": "skills/3d/blender/blender-animation",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-cameras",
+      "name": "blender-cameras",
+      "description": "Set up Blender cameras with cinematic intent \u2014 focal length, depth of field (f-stop / focus object), composition (rule of thirds, leading lines), animated cameras (orbit, dolly, push-in), tracking constraints. Use whenever the user asks to \"set up the camera\", \"frame the shot\", \"make it look cinematic / hero / portrait / wide-angle / telephoto\", \"add depth of field\", \"orbit the camera\", or any composition/framing request. Make sure to use this skill even if the user does not say \"camera\" \u2014 also covers \"hero shot\", \"close-up\", \"from above\", \"shallow focus\", \"85mm portrait look\".",
+      "path": "skills/3d/blender/blender-cameras",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-export",
+      "name": "blender-export",
+      "description": "Export Blender scenes to glTF/GLB (web/AR), FBX (game engines), OBJ (universal), USD (VFX pipelines), STL (3D printing). Includes per-format settings, embed/unpack textures, axis conversion, polygon optimization (Decimate), and target-platform validation. Use whenever the user asks to \"export this\", \"save as glTF / FBX / OBJ / STL / USD\", \"package for Unity / Unreal / Three.js / web / AR / 3D print\", or any output format conversion. Make sure to use this skill even if the user does not say \"export\" \u2014 also covers \"package this for the web\", \"make it work in Unity\", \"send to Unreal\", \"save for 3D printing\".",
+      "path": "skills/3d/blender/blender-export",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-lighting",
+      "name": "blender-lighting",
+      "description": "Light Blender scenes professionally \u2014 three-point setups, HDRI environments, studio/cinematic/dramatic configurations, light groups, color temperature, soft vs hard shadows. Use whenever the user asks to \"light the scene\", \"set up lighting\", \"make it look cinematic / dramatic / studio / outdoor / sunset\", \"add a key light\", \"use HDRI\", or any lighting-related request. Make sure to use this skill even if the user does not say \"light\" \u2014 also covers \"make it look professional\", \"studio shot\", \"moody atmosphere\", \"golden hour\", \"rim light\". Pairs with blender-materials (lighting reveals materials) and blender-cameras (lighting + composition together = shot).",
+      "path": "skills/3d/blender/blender-lighting",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-materials",
+      "name": "blender-materials",
+      "description": "Create and assign PBR materials in Blender via Principled BSDF \u2014 metals, glass, plastic, fabric, skin, organics. Covers physically-based material recipes with real-world values, Coat layer (varnish/car paint), Sheen (cloth), Subsurface scattering (skin/wax), Transmission (glass), and procedural patterns (wood grain, marble, fabric weave). Use whenever the user asks to \"make it look like X material\", \"give it a metallic finish\", \"apply a wood texture\", \"make this glass / plastic / brushed steel / leather / skin\", or any look-development request. Make sure to use this skill even if the user does not say \"material\" \u2014 also covers \"make it shiny\", \"matte finish\", \"looks like copper\", \"rough surface\". Works with any geometry; pairs with blender-lighting (materials only look right under proper lighting).",
+      "path": "skills/3d/blender/blender-materials",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-modeling",
+      "name": "blender-modeling",
+      "description": "Create and edit 3D meshes in Blender \u2014 primitives, hard-surface modeling, mesh operators, modifier stacks (Bevel, Subdivision, Boolean, Mirror, Array, Solidify), bmesh-level edits, retopology basics. Use whenever the user asks to \"make/model/create/build a 3D object\", \"shape/sculpt this\", \"add a cube/sphere/cylinder/etc.\", \"extrude/inset/bevel this face\", \"add a modifier\", or any geometry-creation request that isn't a wireframe trace. Make sure to use this skill even if the user does not say \"model\" \u2014 also covers \"make a sword\", \"build a chair\", \"add a door\", \"carve out a hole\". Pairs with blender-materials for look-dev and blender-pro-workflow for full pipelines.",
+      "path": "skills/3d/blender/blender-modeling",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-pro-workflow",
+      "name": "blender-pro-workflow",
+      "description": "End-to-end production workflow guidance for Blender \u2014 the order to assemble scenes (block-out \u2192 camera \u2192 light \u2192 forms \u2192 materials \u2192 detail \u2192 render \u2192 composite \u2192 export), critique protocols, time budgets, and recovery patterns. Use whenever the user asks to \"make a complete scene / hero shot / production-quality render\", \"what's the right order to do this\", \"set up a full pipeline\", or has a multi-step request crossing modeling + lighting + materials + rendering. Make sure to use this skill for any request that spans multiple phases of 3D work, even if the user does not say \"workflow\" \u2014 also covers \"make a final image of X\", \"produce a hero render\", \"professional-looking result\".",
+      "path": "skills/3d/blender/blender-pro-workflow",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-rendering",
+      "name": "blender-rendering",
+      "description": "Render Blender scenes with the right engine and settings \u2014 Cycles for photoreal, EEVEE for speed/stylized, sample counts, denoising (OptiX/OIDN), light path tuning, color management (AgX/Filmic), file output (PNG/EXR/MP4), animation rendering. Use whenever the user asks to \"render this\", \"produce an image\", \"render a frame / animation\", \"make a final image\", \"save the render\", or any output-generation request. Make sure to use this skill even if the user does not say \"render\" \u2014 also covers \"make a picture\", \"save the result\", \"produce a final image\", \"export as image\".",
+      "path": "skills/3d/blender/blender-rendering",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-skill-harmonizer",
+      "name": "blender-skill-harmonizer",
+      "description": "Harmonize multiple Blender skills into a coherent pipeline with clear activation precedence, handoff artifacts, dependency gates, and conflict-resolution rules. Use when a Blender task spans several skills, when reference-locked work conflicts with generic production workflow, after adding/updating skills, or when repeated failures indicate skill interference or missing inter/intra-play.",
+      "path": "skills/3d/blender/blender-skill-harmonizer",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/blender-uv-texturing",
+      "name": "blender-uv-texturing",
+      "description": "UV unwrap, atlas-map, project textures, use alpha decals, bake maps/lightmaps, and prepare texture-driven Blender assets for glTF/GLB export. Use whenever the user provides texture packs, texture atlases, decals, UV layouts, lightmaps, wants a texture to fit a mesh 1:1, or reports stretched/off textures. Pairs with reference-to-3d for template-accurate reconstruction and blender-materials for PBR values.",
+      "path": "skills/3d/blender/blender-uv-texturing",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/closed-surface-uv-coverage",
+      "name": "closed-surface-uv-coverage",
+      "description": "Ensure textures and decals cover all visible surfaces of a closed or extruded Blender asset, especially front/back caps and sidewalls, instead of relying on partial projected planes, curves, or linework overlays. Use when back textures do not fill the model, side textures are missing, spin/turntable views expose plain sidewalls, or a model needs separate UV treatment for caps and side surfaces.",
+      "path": "skills/3d/blender/closed-surface-uv-coverage",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/contour-to-mesh",
+      "name": "contour-to-mesh",
+      "description": "Build Blender mesh surfaces directly from extracted 2D contours/masks instead of approximate primitives. Use for 1:1 mascot/logo reconstruction, exact leaf/petal silhouettes, filled wireframe shapes, shallow bas-relief forms, or when the model outline must match a front template before adding depth.",
+      "path": "skills/3d/blender/contour-to-mesh",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/fit-repair-optimizer",
+      "name": "fit-repair-optimizer",
+      "description": "Turn multiview fit reports into a sequential or parallel repair queue for aligning Blender products to source-of-truth templates. Use after validation shows disalignment, when the agent must iteratively fix wireframe, texture, lighting, or projection mismatches, and when skill gaps should trigger self-refinement before another rebuild.",
+      "path": "skills/3d/blender/fit-repair-optimizer",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/landmark-fit-repair",
+      "name": "landmark-fit-repair",
+      "description": "Validate and repair source-locked Blender models using named landmarks such as leaf tips, shell corners, eyes, smile, rim thickness, aura center/radius, and view-specific depth markers. Use when bbox/IoU is insufficient and the model must align to templates at designed feature points.",
+      "path": "skills/3d/blender/landmark-fit-repair",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/mascot-logo-reconstruction",
+      "name": "mascot-logo-reconstruction",
+      "description": "Orchestrate a fail-gated, source-locked Blender reconstruction of mascots, logos, brand avatars, and stylized flat characters from wireframes, texture packs, and orthographic views. Use when the user requires a 1:1 brand/model match rather than a plausible stylized interpretation.",
+      "path": "skills/3d/blender/mascot-logo-reconstruction",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/multiview-constraint-solver",
+      "name": "multiview-constraint-solver",
+      "description": "Determine whether front/side/back/top reference templates can be satisfied by one rigid 3D Blender model, choose a canonical source policy, and emit constraints before rebuilding. Use when multiview bboxes, silhouettes, part counts, or depth ratios contradict each other.",
+      "path": "skills/3d/blender/multiview-constraint-solver",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/multiview-fit-loop",
+      "name": "multiview-fit-loop",
+      "description": "Closed-loop compare-adjust-repeat workflow for fitting Blender models to supplied front/side/back/top templates and originals. Use when the user asks to compare the product to templates/originals and adjust until it fits across all dimensions, or when all views must pass measurable bbox/centroid/silhouette/edge validation before export.",
+      "path": "skills/3d/blender/multiview-fit-loop",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/orbital-hud-motion",
+      "name": "orbital-hud-motion",
+      "description": "Create tasteful circular/orbital HUD and aura animations around a Blender subject using source-derived arcs, dots, dashes, opacity, parallax, and restrained motion. Use when decorative circles, halos, orbit markers, scanner rings, or HUD effects must correlate with a logo/mascot rather than looking like random oversized rings.",
+      "path": "skills/3d/blender/orbital-hud-motion",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/orthographic-registration",
+      "name": "orthographic-registration",
+      "description": "Register front, side, back, and top orthographic reference views into a shared Blender coordinate contract. Use when a 3D model must match multi-view wireframes/templates, when side/back/top silhouettes are off, or before adding depth to a front-locked contour model.",
+      "path": "skills/3d/blender/orthographic-registration",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/quality-refinement-autoloop",
+      "name": "quality-refinement-autoloop",
+      "description": "Run a self-refinement loop when a Blender result is subpar, user expectations are not met, validation fails, or repeated issues reveal missing skill depth. The loop diagnoses the gap, decides whether to repair the artifact or acquire/refine a generic skill, sanitizes lessons for reusable publication, updates docs/versioning, validates, and prepares stage/commit/push when explicitly requested.",
+      "path": "skills/3d/blender/quality-refinement-autoloop",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/reference-analysis-validator",
+      "name": "reference-analysis-validator",
+      "description": "Measure and validate supplied reference images, wireframes, texture atlases, and Blender renders before declaring a reconstruction 1:1. Use when an asset must match a template, when visual feedback says the output is off, when part counts must be exact, or before exporting a brand mascot/logo reconstruction. Pairs with reference-to-3d, contour-to-mesh, orthographic-registration, atlas-uv-fitting, and Blender MCP.",
+      "path": "skills/3d/blender/reference-analysis-validator",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/reference-look-calibration",
+      "name": "reference-look-calibration",
+      "description": "Calibrate Blender materials, lighting, camera crop, emission/glow, color management, and aura/HUD styling against supplied original/reference images using measurable color, brightness, saturation, bbox, and mask statistics. Use when a product must match the lighting/look of a source image or when audits say the product is too bright, desaturated, wrong hue, wrong glow, or wrong silhouette extent.",
+      "path": "skills/3d/blender/reference-look-calibration",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/reference-to-3d",
+      "name": "reference-to-3d",
+      "description": "Reconstruct Blender models from supplied reference sheets, branding templates, texture atlases, orthographic front/side/back/top views, or mascot/logo art where visual fidelity to the source is more important than a plausible generated object. Use when the user says the model must match a template, wireframe, texture pack, character sheet, mascot sheet, or brand asset exactly; also use after feedback like \"does not look like the reference\", \"fit the texture 1:1\", \"wrong number of visible parts\", or \"compare against the template\". Requires Blender MCP plus local Python with Pillow/OpenCV/numpy; pairs with blender-uv-texturing, wireframe-to-3d, blender-modeling, blender-materials, and blender-export.",
+      "path": "skills/3d/blender/reference-to-3d",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/source-part-segmentation",
+      "name": "source-part-segmentation",
+      "description": "Segment overlapping visual parts from source images, wireframes, texture atlases, and decals before mesh reconstruction. Use when a mascot/logo/template contains touching or overlapping components and exact structural part masks are needed before contour-to-mesh, UV fitting, or landmark repair.",
+      "path": "skills/3d/blender/source-part-segmentation",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/text-to-blender",
+      "name": "text-to-blender",
+      "description": "Drive Blender from natural language. Converts plain-English requests (\"model a sword and render it with cinematic lighting\", \"make this glass look frosted\", \"set up three-point lighting\", \"export this scene as glTF for the web\") into Blender Python code executed via the Blender MCP server. Acts as the orchestrator that picks and chain-loads specialised sub-skills (blender-modeling, blender-materials, blender-lighting, blender-cameras, blender-rendering, blender-animation, blender-export, wireframe-to-3d, blender-pro-workflow, blender-skill-harmonizer, quality-refinement-autoloop). Use this skill whenever the user wants Claude to do anything in Blender, including creating geometry, applying materials, lighting a scene, framing a camera, rendering, animating, or exporting. Make sure to invoke this skill even if the user does not say \"Blender\" \u2014 also covers requests like \"create a 3D model of...\", \"render this...\", \"make a glTF from...\", \"set up a scene with...\", or any 3D-creation task. Requires the Blender MCP addon (ahujasid/blender-mcp) running on port 9876.",
+      "path": "skills/3d/blender/text-to-blender",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/texture-driven-mesh-fitting",
+      "name": "texture-driven-mesh-fitting",
+      "description": "Reshape source-locked mesh boundaries so the geometry fits texture-atlas or decal contours 1:1 before final UV/material work. Use when textures look off because the model behind them does not match the source texture region, or when the mesh must adapt to the texture instead of stretching the texture onto an approximate mesh.",
+      "path": "skills/3d/blender/texture-driven-mesh-fitting",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/texture-state-animation",
+      "name": "texture-state-animation",
+      "description": "Design and validate texture-state transitions for Blender animations without ugly whole-image crossfades, texture popping, misregistered morphs, or target-engine-incompatible Python-only swaps. Use when animating between multiple source textures, mascot/logo states, style states, lightmaps, decals, or UI skins.",
+      "path": "skills/3d/blender/texture-state-animation",
+      "type": "skill"
+    },
+    {
+      "id": "3d/blender/wireframe-to-3d",
+      "name": "wireframe-to-3d",
+      "description": "Convert 2D orthographic wireframe PNG drawings to 3D Blender models exported as glTF/GLB. Use this skill whenever the user provides wireframe images (technical drawings, line drawings, orthographic views, side/front/back panels) and wants to generate a 3D model, mesh, or .glb file. Triggers on phrases like \"convert this wireframe to 3D\", \"make a 3D model from these drawings\", \"build a model from this wireframe\", \"generate GLB from these views\", or any image-to-3D-mesh request involving line drawings. Make sure to use this skill even if the user does not explicitly say \"wireframe\" \u2014 also covers \"orthographic views\", \"technical drawings\", \"line drawings of objects\", \"front and side views\". Requires the Blender MCP addon to be running (port 9876) and Python with opencv-python, numpy, scipy installed.",
+      "path": "skills/3d/blender/wireframe-to-3d",
+      "type": "skill"
+    },
+    {
       "id": "design/anti-slop/antislop",
       "name": "antislop",
       "description": "Anti Slop: Rules for AI Coding Agents. The core filter. Load always to stop generic AI slop.",
@@ -629,6 +839,13 @@
       "name": "ui-ux-pro-max",
       "description": "UI/UX design intelligence for web, mobile, and desktop. This skill should be used when designing, building, reviewing, or fixing interfaces, including pages, components, design systems, accessibility, interaction, responsive layout, typography, color, charts, and stack-specific UI implementation. Searchable local data: 79 searchable styles (50 active), 192 product palettes and reasoning profiles, 74 font pairings, 119 UX guidelines, 105 icons, 17 GSAP presets, 25 chart types, and 22 stacks.",
       "path": "skills/design/ui-ux-pro-max/ui-ux-pro-max",
+      "type": "skill"
+    },
+    {
+      "id": "video/video-shotcraft",
+      "name": "video-shotcraft",
+      "description": "Create cinematic product videos from shot recipe cards, a validated template, and code/audio assets (Remotion + real page screenshots + 2.5D camera moves + beat-synced cuts + sound design). Use when the user asks to turn a frontend project or webpage into a product video, says \"use video-shotcraft to make a video/promo\", names the Ink Press template or asks to reproduce its effect, or wants a single shot card's motion. \u7528\u955c\u5934\u914d\u65b9\u5361 + \u5df2\u9a8c\u6536\u6a21\u677f + \u4ee3\u7801/\u97f3\u9891\u8d44\u4ea7\u5236\u4f5c\u7535\u5f71\u611f\u4ea7\u54c1\u89c6\u9891\uff08Remotion + \u771f\u5b9e\u9875\u9762\u622a\u56fe + 2.5D \u8fd0\u955c + \u8282\u594f\u5361\u70b9 + \u58f0\u97f3\u8bbe\u8ba1\uff09\u3002\u5f53\u7528\u6237\u8981\u6c42\"\u7528 video-shotcraft \u505a\u89c6\u9891/\u5ba3\u4f20\u7247\"\u3001\u628a\u524d\u7aef\u9879\u76ee/\u7f51\u9875\u505a\u6210\u4ea7\u54c1\u89c6\u9891\u3001\u70b9\u540d Ink Press \u6a21\u677f\u6216\u8981\u6c42\u590d\u523b\u6a21\u677f\u7247\u6548\u679c\uff0c\u6216\u8981\u7528\u955c\u5934\u5361\u505a\u5355\u4e2a\u52a8\u6548\u955c\u5934\u65f6\u4f7f\u7528\u3002",
+      "path": "skills/video/video-shotcraft",
       "type": "skill"
     }
   ],

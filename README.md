@@ -44,6 +44,29 @@ python3 scripts/build-adapters.py
 | motion-primitives (33 components) | [ibelick/motion-primitives](https://github.com/ibelick/motion-primitives) | 6.2k | MIT |
 | claudedesignskills (23 skills) | [freshtechbro/claudedesignskills](https://github.com/freshtechbro/claudedesignskills) | 869 | MIT |
 
+### 3D skills (`skills/3d/`)
+
+| Skill | Upstream | Stars* | License |
+|---|---|---|---|
+| blender (30 skills) | [RobLe3/cc-blender-skill](https://github.com/RobLe3/cc-blender-skill) | 56 | MIT |
+
+Agentic Blender control: modeling, UV/texturing, materials, lighting, cameras, animation,
+rendering, export, plus higher-level pipelines (text-to-blender, reference-to-3d,
+wireframe-to-3d, mascot-logo-reconstruction). Complements `claudedesignskills`'
+`blender-web-pipeline` (glTF export for Three.js/Babylon.js) with actual in-Blender
+modeling/animation work.
+
+### Video skills (`skills/video/`)
+
+| Skill | Upstream | Stars* | License |
+|---|---|---|---|
+| video-shotcraft | [Vincentwei1021/video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) | 7.8k | Apache-2.0 |
+
+Cinematic product videos from shot-recipe cards using Remotion, real page screenshots,
+2.5D camera moves, and beat-synced timing. Vendored the skill, references, agents, and
+workbench template only — the upstream repo's `demos/`, `gallery/`, and `assets/`
+(36M+ of example media) were dropped as non-essential to the skill's function.
+
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
 ### Coding subagents (`agents/coding/`)
