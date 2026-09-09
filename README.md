@@ -42,6 +42,7 @@ python3 scripts/build-adapters.py
 | emilkowalski (12 skills) | [emilkowalski/skills](https://github.com/emilkowalski/skills) | 36k | MIT |
 | anti-slop (6 skills) | [miqdadbadjuber/anti-slop](https://github.com/miqdadbadjuber/anti-slop) | 1.7k | MIT |
 | motion-primitives (33 components) | [ibelick/motion-primitives](https://github.com/ibelick/motion-primitives) | 6.2k | MIT |
+| claudedesignskills (23 skills) | [freshtechbro/claudedesignskills](https://github.com/freshtechbro/claudedesignskills) | 869 | MIT |
 
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
@@ -72,6 +73,7 @@ is missing or unclear (`NOASSERTION`). Use at your own risk directly from upstre
 | [godly.design](https://godly.design/) | Design-inspiration gallery site with no GitHub repo behind it — nothing to vendor. |
 | [manus.im](https://manus.im/) | Commercial hosted AI agent product, no GitHub repo — nothing to vendor. |
 | [motion-primitives.com](https://motion-primitives.com/) | ✅ Vendored — see `skills/design/motion-primitives/` above ([ibelick/motion-primitives](https://github.com/ibelick/motion-primitives), MIT). Copied only `components/core/` (the 33 reusable primitives), not the marketing site's own UI scaffolding. |
+| ["best free skills" from mcpmarket.com/tools/skills](https://mcpmarket.com/tools/skills) | The page returned HTTP 429 (rate-limited) on every fetch attempt and isn't confirmed by search to be a curated "best of" list — it appears to be a large third-party aggregator/marketplace, not a hand-picked set. Rather than guess at its contents or vendor an unverified bulk listing, this was skipped. If you can open the page and name specific skills from it, they can be vendored the same way as everything else here. |
 
 ## Using it
 
