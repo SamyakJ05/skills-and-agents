@@ -41,6 +41,7 @@ python3 scripts/build-adapters.py
 | impeccable | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 67k | Apache-2.0 |
 | emilkowalski (12 skills) | [emilkowalski/skills](https://github.com/emilkowalski/skills) | 36k | MIT |
 | anti-slop (6 skills) | [miqdadbadjuber/anti-slop](https://github.com/miqdadbadjuber/anti-slop) | 1.7k | MIT |
+| motion-primitives (33 components) | [ibelick/motion-primitives](https://github.com/ibelick/motion-primitives) | 6.2k | MIT |
 
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
@@ -62,17 +63,15 @@ is missing or unclear (`NOASSERTION`). Use at your own risk directly from upstre
 | [s0xDk/refactoring-ui-skill](https://github.com/s0xDk/refactoring-ui-skill) | LICENSE present but SPDX `NOASSERTION` |
 | [vercel/vercel-plugin](https://github.com/vercel/vercel-plugin) | LICENSE present but SPDX `NOASSERTION` |
 
-## Not vendored — not a skill/agent repo
-
-These were requested but aren't GitHub skill/agent sources, so nothing to copy in:
+## Not vendored
 
 | Item | Why not vendored |
 |---|---|
 | `npx -y add-mcp https://vgpu.sh/api/mcp -g` / [vercel-labs/vgpu](https://github.com/vercel-labs/vgpu) | MCP server + WebGPU runtime library, not a skill or subagent. Install it as an MCP server via the command above if you want the tool itself. |
-| [reactbits.dev](https://reactbits.dev/) | Component gallery website, no GitHub skill repo. |
-| [godly.design](https://godly.design/) | Design inspiration gallery website, no GitHub skill repo. |
-| [manus.im](https://manus.im/) | Commercial AI agent product website, no GitHub skill repo. |
-| [motion-primitives.com](https://motion-primitives.com/) | Component gallery website, no GitHub skill repo. |
+| [reactbits.dev](https://reactbits.dev/) → [DavidHDev/react-bits](https://github.com/DavidHDev/react-bits) (47k stars) | License is **MIT + Commons Clause** (`NOASSERTION` on GitHub) — the Commons Clause restricts selling the software itself. Link-only per this repo's license policy; browse/copy components directly from the site or repo if needed for your own project. |
+| [godly.design](https://godly.design/) | Design-inspiration gallery site with no GitHub repo behind it — nothing to vendor. |
+| [manus.im](https://manus.im/) | Commercial hosted AI agent product, no GitHub repo — nothing to vendor. |
+| [motion-primitives.com](https://motion-primitives.com/) | ✅ Vendored — see `skills/design/motion-primitives/` above ([ibelick/motion-primitives](https://github.com/ibelick/motion-primitives), MIT). Copied only `components/core/` (the 33 reusable primitives), not the marketing site's own UI scaffolding. |
 
 ## Using it
 

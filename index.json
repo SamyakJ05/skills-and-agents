@@ -149,6 +149,13 @@
       "type": "skill"
     },
     {
+      "id": "design/motion-primitives",
+      "name": "motion-primitives",
+      "description": "Reference React + Framer Motion (motion/react) animated components \u2014 accordions, dialogs, dock, magnetic buttons, text effects, tilt, spotlight, carousel, and more. Use when the user needs a ready-made, accessible, customizable animated UI primitive rather than building motion from scratch. Copy the relevant component from components/ into the project and adjust props; do not use as a package dependency.",
+      "path": "skills/design/motion-primitives",
+      "type": "skill"
+    },
+    {
       "id": "design/nothing-design",
       "name": "nothing-design",
       "description": "This skill should be used when the user explicitly says \"Nothing style\", \"Nothing design\", \"/nothing-design\", or directly asks to use/apply the Nothing design system. NEVER trigger automatically for generic UI or design tasks.",

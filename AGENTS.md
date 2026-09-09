@@ -28,6 +28,7 @@ Regenerate after changes: `python3 scripts/build-adapters.py`
 - **write-swift** (`skills/design/emilkowalski/write-swift`) — How to write modern Swift well — modeling with value types, Swift 6 data-race safety and approachable concurrency (@concurrent, main-actor-by-default, actors, t
 - **hue** (`skills/design/hue`) — Meta-skill that generates new design language skills. Works on Claude Code and Codex. Use when the user says 'create a design skill', 'generate design language'
 - **impeccable** (`skills/design/impeccable`) — Use when the user wants to design, redesign, shape, critique, audit, polish, clarify, distill, harden, optimize, adapt, animate, colorize, extract, or otherwise
+- **motion-primitives** (`skills/design/motion-primitives`) — Reference React + Framer Motion (motion/react) animated components — accordions, dialogs, dock, magnetic buttons, text effects, tilt, spotlight, carousel, and m
 - **nothing-design** (`skills/design/nothing-design`) — This skill should be used when the user explicitly says "Nothing style", "Nothing design", "/nothing-design", or directly asks to use/apply the Nothing design s
 - **ss-a11y** (`skills/design/styleseed/ss-a11y`) — Audit a component or page for accessibility issues and fix them
 - **ss-audit** (`skills/design/styleseed/ss-audit`) — Audit screens for UX issues using Nielsen's heuristics and modern mobile UX best practices
