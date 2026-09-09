@@ -1,25 +1,31 @@
 # skills-and-agents
 
-Agent-agnostic collection of the most popular open-source **UI/UX design skills** and
-**coding subagents**, vendored from their upstream GitHub repos and made usable from
+Agent-agnostic collection of vendored **design, coding, 3D, and video skills**,
+**coding subagents**, and **commands**, vendored from their upstream GitHub repos and made usable from
 any harness — Claude Code, Codex/OpenCode (via `AGENTS.md`), or anything else that can
 read a directory of Markdown files.
 
 ## Layout
 
 ```
-skills/design/<skill>/SKILL.md       vendored design skills (source of truth)
+skills/<category>/**/SKILL.md        skills (source of truth)
+agents/coding/**/skills/*/SKILL.md   skills bundled with upstream agent plugins
 agents/coding/<source>/**/*.md       vendored coding subagents (source of truth)
 .claude/skills/<name>/SKILL.md       generated — Claude Code skill adapter
 .claude/agents/<name>.md             generated — Claude Code agent adapter
+.claude/commands/<name>.md           generated — Claude Code command adapter
 AGENTS.md                            generated — index for Codex/OpenCode/etc.
 index.json                           generated — machine-readable manifest for any other harness
 LICENSES/                            upstream LICENSE file for every vendored source
-scripts/build-adapters.py            regenerates the three generated targets above
+scripts/build-adapters.py            regenerates all adapters and indexes
 ```
 
-**Edit only `skills/` and `agents/coding/`.** Everything else (`.claude/`, `AGENTS.md`,
-`index.json`) is generated — running the build script overwrites it.
+**Edit skill and agent content in `skills/` and `agents/coding/`.** Edit adapter logic
+in `scripts/build-adapters.py`. `.claude/skills/`, `.claude/agents/`,
+`.claude/commands/`, `AGENTS.md`, and `index.json` are generated and replaced by the
+builder. Other `.claude/` configuration is left alone.
+
+Install the builder dependency once with `python3 -m pip install -r scripts/requirements.txt`.
 
 ```bash
 python3 scripts/build-adapters.py
@@ -69,11 +75,36 @@ workbench template only — the upstream repo's `demos/`, `gallery/`, and `asset
 
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
+### Coding skills
+
+The adapter discovers 183 existing skills inside `agents/coding/wshobson/**/skills/`,
+including debugging, code review, testing, API design, authentication, CI/CD,
+Python, TypeScript, data engineering, and LLM workflows. Their supporting resources
+are copied with them. One local skill, `maintain-agent-catalog`, supplies this
+repository's classification, update, and verification workflow.
+
+The current generated catalog contains **314 skills, 360 agents, and 14 commands**.
+These are entrypoint counts, not counts of unique capabilities or upstream files.
+
+### Selected skills.sh additions
+
+Nine additional skills were selected for this repository on 2026-09-09: Vercel
+React performance, composition, and React Native; Supabase PostgreSQL; Playwright
+CLI; Anthropic webapp testing and MCP building; Matt Pocock domain modeling; and
+Vercel skill discovery.
+
+See [the selection and usage notes](docs/skills-sh-additions.md) for individual
+links, rationale, dependencies, and skipped candidates. `skills-sh.lock.json`
+records upstream commit IDs, source paths, license evidence, local changes, and
+per-file hashes for these additions. It is maintained source metadata, not a
+builder output, and does not cover older vendored packages. Hashes are checked by
+the test suite; update them deliberately when updating one of these skills.
+
 ### Coding subagents (`agents/coding/`)
 
-| Source | Upstream | Stars* | License | Agents vendored |
+| Source | Upstream | Stars* | License | Agent entrypoints |
 |---|---|---|---|---|
-| wshobson | [wshobson/agents](https://github.com/wshobson/agents) | 40k | MIT | 416 |
+| wshobson | [wshobson/agents](https://github.com/wshobson/agents) | 40k | MIT | 202 |
 | voltagent | [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) | 25k | MIT | 158 |
 
 ### Skipped — license risk (linked, not vendored)
@@ -106,19 +137,43 @@ automatically; no setup needed.
 **Codex / OpenCode / other AGENTS.md-aware tools** — point the harness at this repo;
 `AGENTS.md` lists every skill and agent with a one-line description.
 
-**Anything else** — parse `index.json`. Each entry has `id`, `name`, `description`,
-`path` (relative to repo root), and `type` (`skill` or `agent`); agents also carry
-`tools`/`model` from their frontmatter.
+**Anything else** — parse `index.json`, which separates `skills`, `agents`, and
+`commands`. Each entry has `id`, `name`, `description`, `path` (relative to repo
+root), `type`, `adapter_name`, and `adapter_path`; agents also carry `tools`/`model`
+from their frontmatter. Duplicate names receive source-derived adapter names;
+use `adapter_name` for invocation. Generated frontmatter matches those names.
+Existing numeric aliases such as `code-reviewer-2` are replaced by these names.
+
+Choose skills for the current task; avoid loading multiple competing design
+systems at once. The catalog does not install MCP servers, hooks, plugin runtimes,
+or application dependencies. Upstream model/tool fields are metadata and may need
+translation to the harness in use. References outside a skill directory require
+checking against the original source tree.
+
+The [catalog review](docs/catalog-review.md) records findings and remaining limits.
 
 ## Updating
 
 To pull a newer version of a vendored source, re-clone it, copy the updated
 `skills/design/<skill>/` or `agents/coding/<source>/` files over the existing ones,
-update the LICENSE in `LICENSES/` if it changed, then re-run:
+record the upstream revision, update the LICENSE in `LICENSES/` if it changed, then re-run:
 
 ```bash
 python3 scripts/build-adapters.py
 ```
+
+## Validation
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 scripts/build-adapters.py --check
+```
+
+`--check` renders into a temporary directory and exits nonzero if generated files
+are missing, changed, or stale. It does not modify the repository. Builds parse
+YAML and validate names before replacing outputs; malformed entrypoints fail with
+their source path. Adapter tests cover classification, support files, duplicate
+names, nested YAML, drift detection, and failure before output replacement.
 
 ## License
 
