@@ -2,6 +2,48 @@
   "generated_by": "scripts/build-adapters.py",
   "skills": [
     {
+      "id": "design/anti-slop/antislop",
+      "name": "antislop",
+      "description": "Anti Slop: Rules for AI Coding Agents. The core filter. Load always to stop generic AI slop.",
+      "path": "skills/design/anti-slop/antislop",
+      "type": "skill"
+    },
+    {
+      "id": "design/anti-slop/antislop-code",
+      "name": "antislop-code",
+      "description": "Code comment hygiene for AI coding agents: remove generic AI-slop comments, keep the valuable ones, never touch the code.",
+      "path": "skills/design/anti-slop/antislop-code",
+      "type": "skill"
+    },
+    {
+      "id": "design/anti-slop/antislop-copywriting",
+      "name": "antislop-copywriting",
+      "description": "Copy and text skill for antislop. Use when writing or editing prose: headlines, tone, CTAs, and anti-AI-writing patterns. Load with the core.",
+      "path": "skills/design/anti-slop/antislop-copywriting",
+      "type": "skill"
+    },
+    {
+      "id": "design/anti-slop/antislop-human",
+      "name": "antislop-human",
+      "description": "Human and accessibility skill for antislop. Contrast, keyboard, focus, and states for real people. Includes the contrast checker.",
+      "path": "skills/design/anti-slop/antislop-human",
+      "type": "skill"
+    },
+    {
+      "id": "design/anti-slop/antislop-layoutmobile",
+      "name": "antislop-layoutmobile",
+      "description": "Mobile layout skill for antislop. Use for layouts that reflow on small screens: grids, overflow, tap targets. Load with the core.",
+      "path": "skills/design/anti-slop/antislop-layoutmobile",
+      "type": "skill"
+    },
+    {
+      "id": "design/anti-slop/antislop-ui",
+      "name": "antislop-ui",
+      "description": "UI and visual skill for antislop. Use when building or editing any interface: color, layout, components, motion. Load with the core.",
+      "path": "skills/design/anti-slop/antislop-ui",
+      "type": "skill"
+    },
+    {
       "id": "design/baoyu-design",
       "name": "baoyu-design",
       "description": "Create polished design artifacts as self-contained HTML: UI mockups, interactive prototypes, wireframes, landing pages, dashboards, app screens, mobile apps, slide decks (a.k.a. PPT / PowerPoint presentations), documents and r\u00e9sum\u00e9s, animations, 3D objects, research reports, HTML email, diagrams, fliers, and visual explorations. Use whenever the user asks to design, mock up, prototype, wireframe, visualize, explore, or make a PPT/deck for an interface, product screen, user flow, content layout, visual artifact, or pitch/deck concept, even if they do not say \"design\". Also use to export a deck built with this skill to PowerPoint (PPT/PPTX) \u2014 but only decks authored here (deck-stage / this skill's slide-structured HTML), NOT arbitrary HTML, so confirm the target is such a deck first. Also use for setting up, importing, or authoring reusable design systems, UI kits, brand tokens, or component libraries. Harness-agnostic for Claude Code, Cursor, Codex Agent, and similar file-capable agents.",

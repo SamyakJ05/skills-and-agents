@@ -40,6 +40,7 @@ python3 scripts/build-adapters.py
 | superdesign | [superdesigndev/superdesign-skill](https://github.com/superdesigndev/superdesign-skill) | 527 | MIT |
 | impeccable | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 67k | Apache-2.0 |
 | emilkowalski (12 skills) | [emilkowalski/skills](https://github.com/emilkowalski/skills) | 36k | MIT |
+| anti-slop (6 skills) | [miqdadbadjuber/anti-slop](https://github.com/miqdadbadjuber/anti-slop) | 1.7k | MIT |
 
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
@@ -60,6 +61,18 @@ is missing or unclear (`NOASSERTION`). Use at your own risk directly from upstre
 | [plugin87/ux-ui-agent-skills](https://github.com/plugin87/ux-ui-agent-skills) | no LICENSE file |
 | [s0xDk/refactoring-ui-skill](https://github.com/s0xDk/refactoring-ui-skill) | LICENSE present but SPDX `NOASSERTION` |
 | [vercel/vercel-plugin](https://github.com/vercel/vercel-plugin) | LICENSE present but SPDX `NOASSERTION` |
+
+## Not vendored — not a skill/agent repo
+
+These were requested but aren't GitHub skill/agent sources, so nothing to copy in:
+
+| Item | Why not vendored |
+|---|---|
+| `npx -y add-mcp https://vgpu.sh/api/mcp -g` / [vercel-labs/vgpu](https://github.com/vercel-labs/vgpu) | MCP server + WebGPU runtime library, not a skill or subagent. Install it as an MCP server via the command above if you want the tool itself. |
+| [reactbits.dev](https://reactbits.dev/) | Component gallery website, no GitHub skill repo. |
+| [godly.design](https://godly.design/) | Design inspiration gallery website, no GitHub skill repo. |
+| [manus.im](https://manus.im/) | Commercial AI agent product website, no GitHub skill repo. |
+| [motion-primitives.com](https://motion-primitives.com/) | Component gallery website, no GitHub skill repo. |
 
 ## Using it
 

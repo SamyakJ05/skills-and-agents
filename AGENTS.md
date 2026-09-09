@@ -7,6 +7,12 @@ Regenerate after changes: `python3 scripts/build-adapters.py`
 
 ## Design skills
 
+- **antislop** (`skills/design/anti-slop/antislop`) — Anti Slop: Rules for AI Coding Agents. The core filter. Load always to stop generic AI slop.
+- **antislop-code** (`skills/design/anti-slop/antislop-code`) — Code comment hygiene for AI coding agents: remove generic AI-slop comments, keep the valuable ones, never touch the code.
+- **antislop-copywriting** (`skills/design/anti-slop/antislop-copywriting`) — Copy and text skill for antislop. Use when writing or editing prose: headlines, tone, CTAs, and anti-AI-writing patterns. Load with the core.
+- **antislop-human** (`skills/design/anti-slop/antislop-human`) — Human and accessibility skill for antislop. Contrast, keyboard, focus, and states for real people. Includes the contrast checker.
+- **antislop-layoutmobile** (`skills/design/anti-slop/antislop-layoutmobile`) — Mobile layout skill for antislop. Use for layouts that reflow on small screens: grids, overflow, tap targets. Load with the core.
+- **antislop-ui** (`skills/design/anti-slop/antislop-ui`) — UI and visual skill for antislop. Use when building or editing any interface: color, layout, components, motion. Load with the core.
 - **baoyu-design** (`skills/design/baoyu-design`) — Create polished design artifacts as self-contained HTML: UI mockups, interactive prototypes, wireframes, landing pages, dashboards, app screens, mobile apps, sl
 - **animate** (`skills/design/emilkowalski/animate`) — Build an animation from scratch, making the decisions in the order that determines whether it feels right — should it animate at all, what purpose, which tool, 
 - **animate-expo** (`skills/design/emilkowalski/animate-expo`) — Build animations in React Native and Expo, making the decisions in the order that determines whether they feel right — should it animate, which thread it runs o
