@@ -8,7 +8,20 @@ Regenerate after changes: `python3 scripts/build-adapters.py`
 ## Design skills
 
 - **baoyu-design** (`skills/design/baoyu-design`) — Create polished design artifacts as self-contained HTML: UI mockups, interactive prototypes, wireframes, landing pages, dashboards, app screens, mobile apps, sl
+- **animate** (`skills/design/emilkowalski/animate`) — Build an animation from scratch, making the decisions in the order that determines whether it feels right — should it animate at all, what purpose, which tool, 
+- **animate-expo** (`skills/design/emilkowalski/animate-expo`) — Build animations in React Native and Expo, making the decisions in the order that determines whether they feel right — should it animate, which thread it runs o
+- **animation-vocabulary** (`skills/design/emilkowalski/animation-vocabulary`) — Reverse-lookup glossary that turns a vague description of a web animation or motion effect into its exact term ("the bouncy thing when a popover opens" → Pop in
+- **apple-design** (`skills/design/emilkowalski/apple-design`) — Apple's approach to interface design and fluid, physical motion, translated for the web. Use when building or reviewing gesture-driven UI, spring animations, dr
+- **ask-sonner** (`skills/design/emilkowalski/ask-sonner`) — Guide to Sonner, the React toast library — install and wire up the Toaster, pick the right toast() call, promise and loading toasts, updating, dismissing and pe
+- **emil-design-eng** (`skills/design/emilkowalski/emil-design-eng`) — This skill encodes Emil Kowalski's philosophy on UI polish, component design, animation decisions, and the invisible details that make software feel great.
+- **find-animation-opportunities** (`skills/design/emilkowalski/find-animation-opportunities`) — Search a codebase or UI for places that don't animate but should, and reject everything that shouldn't. Read-only; it proposes motion with exact values, it does
+- **improve-animations** (`skills/design/emilkowalski/improve-animations`) — Survey a codebase's animation and motion code as a senior motion advisor, then produce a prioritized audit and self-contained implementation plans for other age
+- **pick-ui-library** (`skills/design/emilkowalski/pick-ui-library`) — Pick the right library for a given frontend task from a curated, opinionated list — numbers, OTP inputs, charts, command menus, virtualization, drag and drop, t
+- **prototype** (`skills/design/emilkowalski/prototype`) — Build multiple genuinely different versions of a UI piece you describe, rendered behind a visual picker so you can flip through them live and promote the one th
+- **review-animations** (`skills/design/emilkowalski/review-animations`) — Reviews animation and motion code against a high craft bar derived from Emil Kowalski's design engineering philosophy. Default to flagging; approval is earned.
+- **write-swift** (`skills/design/emilkowalski/write-swift`) — How to write modern Swift well — modeling with value types, Swift 6 data-race safety and approachable concurrency (@concurrent, main-actor-by-default, actors, t
 - **hue** (`skills/design/hue`) — Meta-skill that generates new design language skills. Works on Claude Code and Codex. Use when the user says 'create a design skill', 'generate design language'
+- **impeccable** (`skills/design/impeccable`) — Use when the user wants to design, redesign, shape, critique, audit, polish, clarify, distill, harden, optimize, adapt, animate, colorize, extract, or otherwise
 - **nothing-design** (`skills/design/nothing-design`) — This skill should be used when the user explicitly says "Nothing style", "Nothing design", "/nothing-design", or directly asks to use/apply the Nothing design s
 - **ss-a11y** (`skills/design/styleseed/ss-a11y`) — Audit a component or page for accessibility issues and fix them
 - **ss-audit** (`skills/design/styleseed/ss-audit`) — Audit screens for UX issues using Nielsen's heuristics and modern mobile UX best practices

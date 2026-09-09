@@ -38,6 +38,8 @@ python3 scripts/build-adapters.py
 | styleseed | [bitjaru/styleseed](https://github.com/bitjaru/styleseed) | 945 | MIT |
 | hue | [dominikmartn/hue](https://github.com/dominikmartn/hue) | 828 | MIT |
 | superdesign | [superdesigndev/superdesign-skill](https://github.com/superdesigndev/superdesign-skill) | 527 | MIT |
+| impeccable | [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 67k | Apache-2.0 |
+| emilkowalski (12 skills) | [emilkowalski/skills](https://github.com/emilkowalski/skills) | 36k | MIT |
 
 *Star counts captured 2026-09-09 via the GitHub API — check upstream for current counts.
 
