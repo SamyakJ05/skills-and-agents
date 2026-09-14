@@ -1,0 +1,207 @@
+// Citation extraction and management utilities
+
+export interface Citation {
+  number: string;
+  title: string;
+  url: string;
+  description?: string;
+  quote?: string;
+  source?: string;
+  date?: string;
+  authors?: string[];
+  doi?: string;
+  relevanceScore?: number;
+  toolType?: 'financial' | 'web' | 'wiley';
+}
+
+export interface CitationMap {
+  [key: string]: Citation[];
+}
+
+// Extract citations from tool results and maintain citation numbers
+export function extractCitationsFromToolResults(toolResults: any[]): CitationMap {
+  const citations: CitationMap = {};
+  let citationNumber = 1;
+
+  toolResults.forEach((result) => {
+    if (!result || !result.output) return;
+
+    try {
+      const output = typeof result.output === 'string' 
+        ? JSON.parse(result.output) 
+        : result.output;
+
+      // Handle search results with multiple items
+      if (output.results && Array.isArray(output.results)) {
+        output.results.forEach((item: any) => {
+          const citation: Citation = {
+            number: citationNumber.toString(),
+            title: item.title || `Source ${citationNumber}`,
+            url: item.url || '',
+            description: item.content || item.summary || item.description,
+            source: item.source,
+            date: item.date,
+            relevanceScore: item.relevanceScore || item.relevance_score,
+            toolType: getToolType(result.toolName),
+          };
+
+          // Add academic-specific fields
+          if (item.authors) {
+            citation.authors = Array.isArray(item.authors) ? item.authors : [item.authors];
+          }
+          if (item.doi) {
+            citation.doi = item.doi;
+          }
+          if (item.citation) {
+            citation.quote = item.citation;
+          }
+
+          const key = `[${citationNumber}]`;
+          citations[key] = [citation];
+          citationNumber++;
+        });
+      }
+    } catch (error) {
+    }
+  });
+
+  return citations;
+}
+
+// Build a CitationMap from a DeepResearch report's `sources[]`. Each source
+// carries a `source_id` that matches the `[n]` markers in the report body, so
+// `[n]` → the source with `source_id === n`. This is what powers the inline
+// favicon hover cards in the rendered report.
+export function buildCitationMapFromSources(sources: unknown[] | null | undefined): CitationMap {
+  const map: CitationMap = {};
+  if (!Array.isArray(sources)) return map;
+
+  sources.forEach((raw, i) => {
+    const s = raw as Record<string, any> | null;
+    if (!s) return;
+    const id = String(s.source_id ?? i + 1);
+    const url = typeof s.url === "string" ? s.url : "";
+    const citation: Citation = {
+      number: id,
+      title: s.title || url || `Source ${id}`,
+      url,
+      description: s.description || s.content || s.snippet || undefined,
+      date: s.date || undefined,
+    };
+    (map[`[${id}]`] ||= []).push(citation);
+  });
+
+  return map;
+}
+
+// Build a citation map from inline markdown-link citations of the form
+// `[[12]](https://example.com/...)`. Seeded example reports embed the source
+// URL directly in the marker this way (rather than a separate sources array).
+// Returns the map plus the text rewritten to bare `[12]` markers so the inline
+// pill renderer picks them up - including later bare `[12]` reuses of the same
+// source, which then resolve against the map too.
+export function extractMarkdownLinkCitations(text: string): {
+  citations: CitationMap;
+  text: string;
+} {
+  const map: CitationMap = {};
+  const re = /\[\[(\d+)\]\]\(\s*([^)\s]+)\s*\)/g;
+  const cleaned = text.replace(re, (_m, num: string, url: string) => {
+    const key = `[${num}]`;
+    let host = url;
+    try {
+      host = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      /* leave the raw url as the title */
+    }
+    const list = (map[key] ||= []);
+    if (!list.some((c) => c.url === url)) {
+      list.push({ number: num, title: host, url });
+    }
+    return key;
+  });
+  return { citations: map, text: cleaned };
+}
+
+// Get tool type from tool name
+function getToolType(toolName?: string): 'financial' | 'web' | 'wiley' | undefined {
+  if (!toolName) return undefined;
+  
+  if (toolName.toLowerCase().includes('financial')) return 'financial';
+  if (toolName.toLowerCase().includes('wiley')) return 'wiley';
+  if (toolName.toLowerCase().includes('web')) return 'web';
+  
+  return undefined;
+}
+
+// Parse text and identify citation markers
+export function parseCitations(text: string): { segments: Array<{ type: 'text' | 'citation', content: string }> } {
+  const citationPattern = /\[(\d+)\]/g;
+  const segments: Array<{ type: 'text' | 'citation', content: string }> = [];
+  let lastIndex = 0;
+
+  let match;
+  while ((match = citationPattern.exec(text)) !== null) {
+    // Add text before citation
+    if (match.index > lastIndex) {
+      segments.push({
+        type: 'text',
+        content: text.substring(lastIndex, match.index)
+      });
+    }
+
+    // Add citation
+    segments.push({
+      type: 'citation',
+      content: match[0] // Full citation like [1]
+    });
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    segments.push({
+      type: 'text',
+      content: text.substring(lastIndex)
+    });
+  }
+
+  return { segments };
+}
+
+// Collect all citations from a message's tool calls
+export function collectMessageCitations(message: any): CitationMap {
+  const citations: CitationMap = {};
+  
+  if (!message.parts) return citations;
+
+  message.parts.forEach((part: any) => {
+    if (part.type === 'tool-result' && part.result) {
+      const toolCitations = extractCitationsFromToolResults([{
+        toolName: part.toolName,
+        output: part.result
+      }]);
+      
+      Object.assign(citations, toolCitations);
+    }
+  });
+
+  return citations;
+}
+
+// Merge citations from multiple messages
+export function mergeCitations(...citationMaps: CitationMap[]): CitationMap {
+  const merged: CitationMap = {};
+  
+  citationMaps.forEach(map => {
+    Object.entries(map).forEach(([key, citations]) => {
+      if (!merged[key]) {
+        merged[key] = [];
+      }
+      merged[key].push(...citations);
+    });
+  });
+
+  return merged;
+}
