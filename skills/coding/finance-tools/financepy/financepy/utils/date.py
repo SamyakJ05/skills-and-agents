@@ -1,14 +1,16 @@
 ##############################################################################
 # Copyright (C) 2018, 2019, 2020 Dominic O'Kane
 ##############################################################################
+from __future__ import annotations
 
 from collections.abc import Iterable
 from functools import partial
 import datetime
 import math
 
+from typing import overload
 
-from typing import Union
+
 from numba import njit
 
 import numpy as np
@@ -71,12 +73,12 @@ END_YEAR = 2200
 # Precompute year offsets
 year_offsets_list = []
 days = 0
-for yy in range(START_YEAR, END_YEAR + 1):
+for year in range(START_YEAR, END_YEAR + 1):
     year_offsets_list.append(days)
-    if yy == 1900:
+    if year == 1900:
         days += 366
     else:
-        days += 366 if (yy % 4 == 0 and yy % 100 != 0) or (yy % 400 == 0) else 365
+        days += 366 if (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0) else 365
 
 YEAR_OFFSETS = np.array(year_offsets_list, dtype=np.int32)
 
@@ -200,7 +202,7 @@ class Date:
 
     ####################################################################################
 
-    def __init__(self, d, m, y, hh=0, mm=0, ss=0):
+    def __init__(self, d, m, y, hh=0, mm=0, ss=0) -> None:
         # validation checks (as you already had)
         if 1900 <= d <= 2100 and 1 <= y <= 31:
             raise FinError("Date arguments must be in order Date(day, month, year)")
@@ -218,6 +220,11 @@ class Date:
 
         if not START_YEAR <= y <= END_YEAR:
             raise FinError("Year outside supported range")
+
+        try:
+            datetime.time(hh, mm, ss)
+        except (TypeError, ValueError) as exc:
+            raise FinError("Invalid hour, minute or second") from exc
 
         # set fields
         self.y, self.m, self.d = y, m, d
@@ -246,8 +253,7 @@ class Date:
     ###########################################################################
 
     @classmethod
-    def _make_fast(cls, d, m, y, excel_dt):
-        """Fast constructor when excel_dt is already known."""
+    def _make_fast(cls, d: int, m: int, y: int, excel_dt: int | float) -> Date:
         obj = cls.__new__(cls)
         obj.d, obj.m, obj.y = d, m, y
         obj.hh = obj.mm = obj.ss = 0
@@ -258,8 +264,8 @@ class Date:
     ###########################################################################
 
     @classmethod
-    def from_ymd_excel(cls, d, m, y, excel_dt):
-        obj = cls.__new__(cls)  # allocate without __init__
+    def from_ymd_excel(cls, d: int, m: int, y: int, excel_dt: int | float) -> Date:
+        obj = cls.__new__(cls)
         obj.d, obj.m, obj.y = d, m, y
         obj.hh = obj.mm = obj.ss = 0
         obj.excel_dt = excel_dt
@@ -276,20 +282,20 @@ class Date:
     @staticmethod
     def from_excel(excel_dt: float) -> "Date":
         excel_dt = float(excel_dt)
-    
+
         whole_day = math.floor(excel_dt)
         fraction = excel_dt - whole_day
-    
+
         total_seconds = int(round(fraction * SECONDS_PER_DAY))
-    
+
         # Handle rounding such as 23:59:59.999 -> next day.
         if total_seconds >= SECONDS_PER_DAY:
             whole_day += 1
             total_seconds = 0
-    
+
         hh, remainder = divmod(total_seconds, 3600)
         mm, ss = divmod(remainder, 60)
-    
+
         d, m, y = ymd_from_excel(int(whole_day))
         return Date(d, m, y, hh, mm, ss)
 
@@ -317,17 +323,17 @@ class Date:
                 value.minute,
                 value.second,
             )
-    
+
         if isinstance(value, datetime.date):
             return cls(value.day, value.month, value.year)
-    
+
         if isinstance(value, np.datetime64):
-            timestamp = (
-                value - np.datetime64("1970-01-01T00:00:00")
-            ) / np.timedelta64(1, "s")
-    
+            timestamp = (value - np.datetime64("1970-01-01T00:00:00")) / np.timedelta64(
+                1, "s"
+            )
+
             value = datetime.datetime.utcfromtimestamp(float(timestamp))
-    
+
             return cls(
                 value.day,
                 value.month,
@@ -336,7 +342,7 @@ class Date:
                 value.minute,
                 value.second,
             )
-    
+
         raise FinError("Expected datetime, date or numpy datetime64")
 
     ####################################################################################
@@ -378,9 +384,13 @@ class Date:
 
     ####################################################################################
 
+    # @vectorisation_helper
+    # def __rsub__(self, other):
+    #     return self.excel_dt - other.excel_dt
+
     @vectorisation_helper
     def __rsub__(self, other):
-        return self.excel_dt - other.excel_dt
+        return other.excel_dt - self.excel_dt
 
     ####################################################################################
 
@@ -425,7 +435,7 @@ class Date:
 
     ####################################################################################
 
-    def eom(self):
+    def eom(self) -> Date:
         """returns last date of month of this date."""
 
         y = self.y
@@ -460,57 +470,62 @@ class Date:
     #     dt_2 = Date(dt_1.d, dt_1.m, dt_1.y, hour, dt_1.mm, dt_1.ss)
     #     return dt_2
 
+    def add_hours(self, hours: int | float) -> Date: ...
+
     def add_hours(self, hours):
-        return Date.from_excel(
-            self.excel_dt + float(hours) / 24.0
-        )
-    
-    
+        return Date.from_excel(self.excel_dt + float(hours) / 24.0)
+
     def add_minutes(self, minutes):
-        return Date.from_excel(
-            self.excel_dt + float(minutes) / (24.0 * 60.0)
-        )
-    
-    
+        return Date.from_excel(self.excel_dt + float(minutes) / (24.0 * 60.0))
+
+    def add_seconds(self, seconds: int | float) -> Date: ...
+
     def add_seconds(self, seconds):
-        return Date.from_excel(
-            self.excel_dt + float(seconds) / (24.0 * 60.0 * 60.0)
-        )
+        return Date.from_excel(self.excel_dt + float(seconds) / (24.0 * 60.0 * 60.0))
 
     ####################################################################################
 
     # def add_days(self, num_days:int=1):
-    
+
     #     if np.isscalar(num_days):
     #         new_excel_dt = self.excel_dt + int(num_days)
     #         d, m, y = ymd_from_excel(new_excel_dt)
     #         return Date._make_fast(d, m, y, new_excel_dt)
-    
+
     #     new_excel_dts = self.excel_dt + np.asarray(num_days, dtype=np.int64)
-    
+
     #     dates = []
-    
+
     #     for excel_dt in new_excel_dts:
     #         d, m, y = ymd_from_excel(int(excel_dt))
     #         dt = Date._make_fast(d, m, y, int(excel_dt))
     #         dates.append(dt)
-    
+
     #     return dates
 
     ####################################################################################
 
-    def add_days(self, num_days=1):
+    @overload
+    def add_days(self, num_days: int) -> Date: ...
+
+    @overload
+    def add_days(self, num_days: float) -> Date: ...
+
+    @overload
+    def add_days(self, num_days: list[int | float] | np.ndarray) -> list[Date]: ...
+
+    def add_days(
+        self, num_days: int | float | list[int | float] | np.ndarray = 1
+    ) -> Date | list[Date]:
+
         if np.isscalar(num_days):
             return Date.from_excel(self.excel_dt + float(num_days))
-    
-        return [
-            Date.from_excel(self.excel_dt + float(x))
-            for x in num_days
-        ]
+
+        return [Date.from_excel(self.excel_dt + float(x)) for x in num_days]
 
     ####################################################################################
 
-    def add_weekdays(self, num_days: int):
+    def add_weekdays(self, num_days: int) -> Date:
         """Returns a new date that is num_days working days after Date. Note
         that only weekends are taken into account. Other Holidays are not. If
         you want to include regional holidays then use add_business_days from
@@ -520,6 +535,9 @@ class Date:
 
         if isinstance(num_days, int) is False:
             raise FinError("Num days must be an integer")
+
+        if num_days == 0:
+            return self.add_days(0)
 
         positive_num_days = num_days > 0
         num_days = abs(num_days)
@@ -575,10 +593,19 @@ class Date:
 
     ####################################################################################
 
-    def add_months(self, mm: Union[list, int]) -> Union["Date", list]:
-        """Returns a new date that is mm months after the Date. If mm is an
-        integer or float you get back a single date. If mm is a vector you get
-        back a vector of dates."""
+    @overload
+    def add_months(self, mm: int) -> Date: ...
+
+    @overload
+    def add_months(self, mm: float) -> Date: ...
+
+    @overload
+    def add_months(self, mm: list[int | float] | np.ndarray) -> list[Date]: ...
+
+    def add_months(
+        self, mm: int | float | list[int | float] | np.ndarray
+    ) -> Date | list[Date]:
+        """Returns a new date that is mm months after the Date."""
 
         scalar_flag = False
 
@@ -592,9 +619,9 @@ class Date:
 
         for mmi in mm_vector:
 
-            # If I get a float I check it has no decimal places
             if int(mmi) != mmi:
                 raise FinError("Must only pass integers or float integers.")
+
             mmi = int(mmi)
 
             d = self.d
@@ -602,37 +629,42 @@ class Date:
             y = self.y
 
             while m > 12:
-                m = m - 12
+                m -= 12
                 y += 1
 
             while m < 1:
-                m = m + 12
+                m += 12
                 y -= 1
 
-            leap_year = is_leap_year(y)
-
-            if leap_year:
+            if is_leap_year(y):
                 if d > month_days_leap_year[m - 1]:
                     d = month_days_leap_year[m - 1]
             else:
                 if d > month_days_not_leap_year[m - 1]:
                     d = month_days_not_leap_year[m - 1]
 
-            # excel_dt = excel_from_ymd(d, m, y)
-            # new_dt = Date._make_fast(d, m, y, excel_dt)
-
             new_dt = Date(d, m, y, self.hh, self.mm, self.ss)
-
             date_list.append(new_dt)
 
-        if scalar_flag is True:
+        if scalar_flag:
             return date_list[0]
 
         return date_list
 
     ####################################################################################
 
-    def add_years(self, yy: Union[np.ndarray, float]):
+    @overload
+    def add_years(self, yy: int) -> Date: ...
+
+    @overload
+    def add_years(self, yy: float) -> Date: ...
+
+    @overload
+    def add_years(self, yy: list[int | float] | np.ndarray) -> list[Date]: ...
+
+    def add_years(
+        self, yy: int | float | list[int | float] | np.ndarray
+    ) -> Date | list[Date]:
         """Returns a new date that is yy years after the Date. If yy is an
         integer or float you get back a single date. If yy is a list you get
         back a vector of dates."""
@@ -672,7 +704,7 @@ class Date:
 
     ####################################################################################
 
-    def next_cds_date(self, mm: int = 0):
+    def next_cds_date(self, mm: int = 0) -> Date:
         """Returns a CDS date that is mm months after the Date. If no
         argument is supplied then the next CDS date after today is returned."""
 
@@ -731,7 +763,7 @@ class Date:
 
     ####################################################################################
 
-    def next_imm_date(self):
+    def next_imm_date(self) -> Date:
         """This function returns the next IMM date after the current date
         This is a 3rd Wednesday of Jun, March, Sep or December. For an
         IMM contract the IMM date is the First Delivery Date of the
@@ -769,7 +801,13 @@ class Date:
 
     ####################################################################################
 
-    def add_tenor(self, tenor: Union[list, str, Tenor]):
+    @overload
+    def add_tenor(self, tenor: str | Tenor) -> Date: ...
+
+    @overload
+    def add_tenor(self, tenor: list[str | Tenor]) -> list[Date]: ...
+
+    def add_tenor(self, tenor: str | Tenor | list[str | Tenor]) -> Date | list[Date]:
         """Return the date following the Date by a period given by the
         tenor which is a string consisting of a number and a letter, the
         letter being d, w, m , y for day, week, month or year. This is case
@@ -786,33 +824,19 @@ class Date:
         for tenor_item in tenor:
             tenor_obj = Tenor.as_tenor(str_or_tenor=tenor_item)
 
-            # start with current date
-            d, m, y = self.d, self.m, self.y
-            # Do not int this to keep HMS
-            excel_dt = self.excel_dt
-
+            # Use date arithmetic methods to keep the Excel serial and
+            # hour/minute/second fields consistent for intraday dates.
             if tenor_obj.units == TenorUnit.DAYS:
-                new_excel_dt = excel_dt + int(tenor_obj.num_periods)
-                d, m, y = ymd_from_excel(new_excel_dt)
-                new_dt = Date._make_fast(d, m, y, new_excel_dt)
+                new_dt = self.add_days(int(tenor_obj.num_periods))
 
             elif tenor_obj.units == TenorUnit.WEEKS:
-                new_excel_dt = excel_dt + int(tenor_obj.num_periods) * 7
-                d, m, y = ymd_from_excel(new_excel_dt)
-                new_dt = Date._make_fast(d, m, y, new_excel_dt)
+                new_dt = self.add_days(int(tenor_obj.num_periods) * 7)
 
             elif tenor_obj.units == TenorUnit.MONTHS:
-                # reuse add_months (already _make_fast optimized)
+                # add_months already handles end-of-month truncation.
                 new_dt = self.add_months(int(tenor_obj.num_periods))
 
-                # handle case when Feb truncates to 28/29 (preserve original d if possible)
-                y, m = new_dt.y, new_dt.m
-                d = min(self.d, new_dt.eom().d)
-                excel_dt = excel_from_ymd(d, m, y)
-                new_dt = Date._make_fast(d, m, y, excel_dt)
-
             elif tenor_obj.units == TenorUnit.YEARS:
-                # just months × 12
                 new_dt = self.add_months(int(tenor_obj.num_periods) * 12)
 
             else:
@@ -824,7 +848,7 @@ class Date:
 
     ####################################################################################
 
-    def datetime(self):
+    def datetime(self) -> datetime.datetime:
         """Returns a datetime of the date"""
 
         return datetime.datetime(self.y, self.m, self.d, self.hh, self.mm, self.ss)
@@ -997,7 +1021,7 @@ def daily_working_day_schedule(start_dt: Date, end_dt: Date):
 ########################################################################################
 
 
-def datediff(d1: Date, d2: Date):
+def datediff(d1: Date, d2: Date) -> int:
     """Calculate the number of days between two Findates."""
     dd = d2.excel_dt - d1.excel_dt
     return int(dd)
@@ -1006,18 +1030,14 @@ def datediff(d1: Date, d2: Date):
 ########################################################################################
 
 
-def from_datetime(dt: Date):
-    """Construct a Date from a datetime as this is often needed if we
-    receive inputs from other Python objects such as Pandas dataframes."""
-
-    fin_dt = Date(dt.day, dt.month, dt.year)
-    return fin_dt
+def from_datetime(dt: datetime.date | datetime.datetime) -> Date:
+    return Date.from_date(dt)
 
 
 ########################################################################################
 
 
-def days_in_month(m, y):
+def days_in_month(m, y) -> int:
     """Get the number of days in the month (1-12) of a given year y."""
 
     if m < 1 or m > 12:

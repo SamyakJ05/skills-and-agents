@@ -8,11 +8,11 @@ import numpy as np
 
 from ...utils.error import FinError
 from ...utils.date import Date
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.global_vars import G_DAYS_IN_YEAR
 from ...utils.global_types import OptionTypes
-from .fx_vanilla_option import FXVanillaOption
-from ...models.black_scholes import BlackScholes
+from ...models.bs_european_analytic import european_value
+from ...market.curves.discount_curve import DiscountCurve
 
 from ...utils.helpers import check_argument_types
 
@@ -29,7 +29,7 @@ class FinFXVarianceSwap:
         strike_variance: float,
         notional: float = ONE_MILLION,
         pay_strike_flag: bool = True,
-    ):
+    ) -> None:
         """Create variance swap contract."""
 
         check_argument_types(self.__init__, locals())
@@ -58,7 +58,7 @@ class FinFXVarianceSwap:
 
     ###########################################################################
 
-    def value(self, value_dt, realised_var, fair_strike_var, libor_curve):
+    def value(self, value_dt: Date, realised_var, fair_strike_var, libor_curve: DiscountCurve):
         """Calculate the value of the variance swap based on the realised
         volatility to the valuation date, the forward looking implied
         volatility to the maturity date using the libor discount curve."""
@@ -69,10 +69,8 @@ class FinFXVarianceSwap:
         if value_dt > self.maturity_dt:
             raise FinError("Valuation date after maturity date.")
 
-        if libor_curve.value_dt != value_dt:
-            raise FinError(
-                "Domestic Curve valuation date not same as option value date"
-            )
+        if libor_curve.anchor_dt != value_dt:
+            raise FinError("Domestic Curve valuation date not same as option value date")
 
         t1 = (value_dt - self.effective_dt) / G_DAYS_IN_YEAR
         t2 = (self.maturity_dt - self.effective_dt) / G_DAYS_IN_YEAR
@@ -88,7 +86,10 @@ class FinFXVarianceSwap:
 
     ###########################################################################
 
-    def fair_strike_approx(self, value_dt, fwd_stock_price, strikes, volatilities):
+    def fair_strike_approx(self, value_dt: Date,
+                           fwd_stock_price: float,
+                           strikes: np.ndarray,
+                           volatilities: np.ndarray):
         """This is an approximation of the fair strike variance by Demeterfi
         et al. (1999) which assumes that sigma(K) = sigma(F) - b(K-F)/F where
         F is the forward stock price and sigma(F) is the ATM forward vol."""
@@ -112,14 +113,14 @@ class FinFXVarianceSwap:
 
     def fair_strike(
         self,
-        value_dt,
-        stock_price,
-        dividend_curve,
-        volatility_curve,
-        num_call_options,
-        num_put_options,
-        strike_spacing,
-        discount_curve,
+        value_dt: Date,
+        stock_price: float,
+        dividend_curve: DiscountCurve,
+        volatility_curve: DiscountCurve,
+        num_call_options: int,
+        num_put_options: int,
+        strike_spacing: float,
+        discount_curve: DiscountCurve,
         use_forward=True,
     ):
         """Calculate the implied variance according to the volatility surface
@@ -135,11 +136,11 @@ class FinFXVarianceSwap:
 
         t_mat = (self.maturity_dt - value_dt) / G_DAYS_IN_YEAR
 
-        df = discount_curve.df(t_mat)
-        r = -np.log(df) / t_mat
+        if t_mat <= 0.0:
+            raise FinError("Valuation date must be before maturity date.")
 
-        dq = dividend_curve.df(t_mat)
-        q = -np.log(dq) / t_mat
+        r = discount_curve.zero_rate_cc(self.maturity_dt)
+        q = dividend_curve.zero_rate_cc(self.maturity_dt)
 
         s0 = stock_price
         g = np.exp((r - q) * t_mat)
@@ -166,7 +167,9 @@ class FinFXVarianceSwap:
         if min_strike < strike_spacing:
             k = sstar
             klist = [sstar]
-            while k >= strike_spacing:
+            # keep the put strikes strictly positive: the log-contract weight is
+            # undefined at a zero strike
+            while k - strike_spacing > 0.0:
                 k -= strike_spacing
                 klist.append(k)
             put_k = np.array(klist)
@@ -181,12 +184,17 @@ class FinFXVarianceSwap:
 
         self.call_strikes = call_k
 
+        # Demeterfi, Derman, Kamal and Zhou (1999), eq. (29), with the foreign
+        # rate q in the role of a dividend yield: the drift of the log contract is
+        # (r - q) and the option portfolio is compounded at the domestic rate r.
         option_total = (
-            2.0 * (r * t_mat - (s0 * g / sstar - 1.0) - np.log(sstar / s0)) / t_mat
+            2.0 * ((r - q) * t_mat - (s0 * g / sstar - 1.0) - np.log(sstar / s0)) / t_mat
         )
 
-        self.call_wts = np.zeros(num_call_options)
-        self.put_wts = np.zeros(num_put_options)
+        # The number of puts may have been reduced above when the requested
+        # strikes would have gone below zero, so use the stored counts throughout.
+        self.call_wts = np.zeros(self.num_call_options)
+        self.put_wts = np.zeros(self.num_put_options)
 
         def f(x):
             return (2.0 / t_mat) * ((x - sstar) / sstar - np.log(x / sstar))
@@ -206,32 +214,28 @@ class FinFXVarianceSwap:
             sum_wts += self.call_wts[n]
 
         pi_put = 0.0
-        for n in range(0, num_put_options):
+        for n in range(0, self.num_put_options):
             k = put_k[n]
             vol = volatility_curve.volatility(k)
-            opt = FXVanillaOption(self.maturity_dt, k, put_type)
-            model = BlackScholes(vol)
-            v = opt.value(value_dt, s0, discount_curve, dividend_curve, model)
+            v = european_value(s0, t_mat, k, r, q, vol, put_type.value)
             pi_put += v * self.put_wts[n]
 
         pi_call = 0.0
-        for n in range(0, num_call_options):
+        for n in range(0, self.num_call_options):
             k = call_k[n]
             vol = volatility_curve.volatility(k)
-            opt = FXVanillaOption(self.maturity_dt, k, call_type)
-            model = BlackScholes(vol)
-            v = opt.value(value_dt, s0, discount_curve, dividend_curve, model)
+            v = european_value(s0, t_mat, k, r, q, vol, call_type.value)
             pi_call += v * self.call_wts[n]
 
         pi = pi_call + pi_put
-        option_total += g * pi
+        option_total += np.exp(r * t_mat) * pi
         var = option_total
 
         return var
 
     ###########################################################################
 
-    def realised_variance(self, close_prices, use_logs=True):
+    def realised_variance(self, close_prices: float, use_logs=True):
         """Calculate the realised variance according to market standard
         calculations which can either use log or percentage returns."""
 
@@ -252,7 +256,13 @@ class FinFXVarianceSwap:
                 x = (close_prices[i] - close_prices[i - 1]) / close_prices[i - 1]
                 cum_x2 += x * x
 
-        var = cum_x2 * 252.0 / num_observations
+        # N prices give N - 1 returns: the market-standard realised variance
+        # is 252 / (N - 1) times the sum of the squared returns.
+        num_returns = num_observations - 1
+        if num_returns < 1:
+            raise FinError("At least two prices are needed for a realised variance")
+
+        var = cum_x2 * 252.0 / num_returns
         return var
 
     ###########################################################################

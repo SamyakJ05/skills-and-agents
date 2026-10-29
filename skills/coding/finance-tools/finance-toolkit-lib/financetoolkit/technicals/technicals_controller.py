@@ -3,6 +3,8 @@
 __docformat__ = "google"
 
 import warnings
+from collections.abc import Callable
+from functools import cached_property
 
 import pandas as pd
 
@@ -11,17 +13,25 @@ from financetoolkit.technicals import (
     breadth_model,
     momentum_model,
     overlap_model,
+    seasonality_model,
     volatility_model,
 )
-from financetoolkit.technicals.helpers import handle_errors
+from financetoolkit.utilities.error_model import handle_errors
 from financetoolkit.utilities.statistics_model import (
+    PERIOD_TRANSLATION,
+    PERIODS_PER_YEAR,
+    apply_rounding,
     calculate_growth,
     calculate_standardization,
     finalize_dataset,
 )
 
+PERIODS = ("intraday", "daily", "weekly", "monthly", "quarterly", "yearly")
+
 # pylint: disable=too-many-lines,too-many-instance-attributes,too-many-public-methods,too-many-locals,eval-used
 # pylint: disable=too-many-boolean-expressions
+# The examples' output tables are wider than the line length.
+# ruff: noqa: E501
 
 # The default number of periods the Stochastic Oscillator's %K line is smoothed over to obtain the %D signal line, named so the deprecated `smooth_widow` alias can tell an explicitly passed `smooth_window` apart from the untouched default.  # noqa: E501
 DEFAULT_STOCHASTIC_SMOOTH_WINDOW = 3
@@ -37,8 +47,8 @@ class Technicals:
 
     def __init__(
         self,
-        tickers: str | list[str],
-        historical_data: pd.DataFrame,
+        tickers: list[str] | Callable[[], list[str]],
+        historical_data: dict[str, pd.DataFrame],
         rounding: int | None = 4,
         start_date: str | None = None,
         end_date: str | None = None,
@@ -46,9 +56,13 @@ class Technicals:
         """
         Initializes the Technicals Controller Class.
 
+        The Toolkit passes the tickers as a function without arguments and the historical data
+        as a LazyDict (financetoolkit.helpers), so an indicator retrieves the data of the period
+        it is calculated over when it is first needed, and nothing else.
+
         Args:
-            tickers (str | list[str]): The tickers to use for the calculation.
-            historical_data (pd.DataFrame): The historical data containing all periods.
+            tickers (list[str] | Callable[[], list[str]]): The tickers to use for the calculation.
+            historical_data (dict[str, pd.DataFrame]): The historical data per period.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to 4.
             start_date (str | None, optional): The start date to use for the calculation. Defaults to None.
             end_date (str | None, optional): The end date to use for the calculation. Defaults to None.
@@ -58,27 +72,34 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         average_directional_index = toolkit.technicals.get_average_directional_index()
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |
-        |:-----------|--------:|--------:|
-        | 2023-08-21 | 62.8842 | 36.7468 |
-        | 2023-08-22 | 65.7063 | 36.5525 |
-        | 2023-08-23 | 67.3596 | 35.5149 |
-        | 2023-08-24 | 66.4527 | 35.4399 |
-        | 2023-08-25 | 63.4837 | 32.3323 |
+        | Date       |    AAPL |    TSLA |   Benchmark |
+        |:-----------|--------:|--------:|------------:|
+        | 2025-12-24 | 21.9724 | 24.0777 |     13.6364 |
+        | 2025-12-26 | 20.8908 | 24.3229 |     14.1712 |
+        | 2025-12-29 | 20.0343 | 23.2159 |     13.912  |
+        | 2025-12-30 | 19.2603 | 21.7824 |     13.6713 |
+        | 2025-12-31 | 18.7103 | 20.3475 |     12.9966 |
         """
-        self._tickers = tickers
+        self._tickers_source = tickers
         self._historical_data = historical_data
         self._rounding: int | None = rounding
         self._start_date: str | None = start_date
         self._end_date: str | None = end_date
         self._portfolio_weights: dict | None = None
+        # The historical data with the open, high and low adjusted like the close, per period.
+        self._consistent_data: dict[tuple, pd.DataFrame] = {}
 
         # Technical Indicators
         self._all_indicators: pd.DataFrame = pd.DataFrame()
@@ -92,6 +113,16 @@ class Technicals:
         self._volatility_indicators: pd.DataFrame = pd.DataFrame()
         self._volatility_indicators_growth: pd.DataFrame = pd.DataFrame()
 
+    @cached_property
+    def _tickers(self) -> list[str]:
+        """The tickers, retrieved when first needed."""
+        return (
+            self._tickers_source()
+            if callable(self._tickers_source)
+            else self._tickers_source
+        )
+
+    @handle_errors
     def collect_all_indicators(
         self,
         period: str = "daily",
@@ -129,25 +160,29 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AAPL", "MSFT"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.technicals.collect_all_indicators().xs("AAPL", level=1, axis="columns")
         ```
 
         Which returns:
 
-        | Date       |   Bollinger Band Upper |   Bollinger Band Middle |   Bollinger Band Lower |   True Range |
-        |:-----------|-----------------------:|------------------------:|-----------------------:|-------------:|
-        | 2026-06-18 |                316.843 |                 300.742 |                284.642 |         4.95 |
-        | 2026-06-22 |                315.955 |                 300.078 |                284.201 |         5.66 |
-        | 2026-06-23 |                312.09  |                 298.585 |                285.08  |         7.46 |
-        | 2026-06-24 |                309.328 |                 297.358 |                285.388 |         6.76 |
-        | 2026-06-25 |                309.176 |                 294.781 |                280.386 |        19.33 |
-        | 2026-06-26 |                306.652 |                 293.098 |                279.544 |        11.74 |
-        | 2026-06-29 |                305.571 |                 291.684 |                277.796 |         8.52 |
-        | 2026-06-30 |                305.53  |                 291.599 |                277.667 |         9.24 |
-        | 2026-07-01 |                305.81  |                 291.799 |                277.788 |         7.39 |
-        | 2026-07-02 |                309.318 |                 292.727 |                276.137 |        15.74 |
+        | Date       |   McClellan Oscillator |   Advancers - Decliners |   On-Balance Volume |   Accumulation/Distribution Line |   Chaikin Oscillator |     TRIN |   New Highs - New Lows |   Chaikin Money Flow |   Ease of Movement |   Negative Volume Index |   Positive Volume Index |   Money Flow Index |   Williams %R |   Aroon Indicator Up |   Aroon Indicator Down |   Commodity Channel Index |   Relative Vigor Index |   Relative Vigor Index Signal Line |       Force Index |   Ultimate Oscillator |   Percentage Price Oscillator |   Detrended Price Oscillator |   Average Directional Index |   Chande Momentum Oscillator |   Ichimoku Conversion Line |   Ichimoku Base Line |   Ichimoku Leading Span A |   Ichimoku Leading Span B |   Stochastic %K |   Stochastic %D |   MACD Line |   MACD Signal Line |   Relative Strength Index |   Balance of Power |   Awesome Oscillator |   Vortex Indicator VI+ |   Vortex Indicator VI- |   Elder Ray Bull Power |   Elder Ray Bear Power |   Rate of Change |   Choppiness Index |   Know Sure Thing |   Know Sure Thing Signal Line |   Simple Moving Average (SMA) |   Exponential Moving Average (EMA) |   Double Exponential Moving Average (DEMA) |   TRIX |   Triangular Moving Average |   Weighted Moving Average (WMA) |   Hull Moving Average (HMA) |   Kaufman Adaptive Moving Average (KAMA) |   Volume Weighted Average Price (VWAP) |   Parabolic SAR |   Pivot Point |   Pivot Point Resistance 1 |   Pivot Point Support 1 |   Fibonacci Retracement 50.0% |   Fibonacci Retracement 61.8% |   Bollinger Band Upper |   Bollinger Band Middle |   Bollinger Band Lower |   True Range |   Average True Range |   Supertrend |   Supertrend Trend Direction |   Keltner Channel Upper |   Keltner Channel Middle |   Keltner Channel Lower |   Donchian Channel Upper |   Donchian Channel Middle |   Donchian Channel Lower |
+        |:-----------|-----------------------:|------------------------:|--------------------:|---------------------------------:|---------------------:|---------:|-----------------------:|---------------------:|-------------------:|------------------------:|------------------------:|-------------------:|--------------:|---------------------:|-----------------------:|--------------------------:|-----------------------:|-----------------------------------:|------------------:|----------------------:|------------------------------:|-----------------------------:|----------------------------:|-----------------------------:|---------------------------:|---------------------:|--------------------------:|--------------------------:|----------------:|----------------:|------------:|-------------------:|--------------------------:|-------------------:|---------------------:|-----------------------:|-----------------------:|-----------------------:|-----------------------:|-----------------:|-------------------:|------------------:|------------------------------:|------------------------------:|-----------------------------------:|-------------------------------------------:|-------:|----------------------------:|--------------------------------:|----------------------------:|-----------------------------------------:|---------------------------------------:|----------------:|--------------:|---------------------------:|------------------------:|------------------------------:|------------------------------:|-----------------------:|------------------------:|-----------------------:|-------------:|---------------------:|-------------:|-----------------------------:|------------------------:|-------------------------:|------------------------:|-------------------------:|--------------------------:|-------------------------:|
+        | 2025-12-17 |                -0.0981 |                      -1 |         2.26688e+09 |                      3.99772e+09 |         -1.74845e+07 | nan      |                      0 |              -0.0358 |            -4.7237 |                 2735.56 |                 788.833 |            39.7393 |      -98.8221 |              28.5714 |               100      |                 -139.905  |                -0.2262 |                            -0.0758 |      -3.27663e+07 |               44.5333 |                        0.6309 |                       0.0306 |                     24.6712 |                     -20.6214 |                    275.64  |              276.218 |                   265.243 |                   250.709 |          1.1779 |          8.6606 |      1.7276 |             3.162  |                   45.1866 |            -0.7013 |               1.2663 |                 0.9211 |                 1.0533 |                -0.1329 |                -4.6407 |          -2.0573 |            49.8428 |           36.3832 |                       51.073  |                       277.993 |                            275.523 |                                    275.977 | 0.1587 |                     278.193 |                         276.338 |                     273.323 |                                  274.426 |                                278.186 |         285.71  |       273.223 |                    275.394 |                 271.694 |                       279.37  |                       277.371 |                285.486 |                 277.993 |                270.499 |       4.5077 |               4.8747 |      268.669 |                            1 |                 285.011 |                  275.523 |                 266.035 |                  287.837 |                   279.444 |                  271.052 |
+        | 2025-12-18 |                -0.0378 |                       1 |         2.31851e+09 |                      4.02709e+09 |         -1.16785e+07 | nan      |                      0 |               0.0024 |            -7.4205 |                 2735.56 |                 789.848 |            34.4002 |      -75.8191 |              21.4286 |               100      |                 -162.429  |                -0.2832 |                            -0.1659 |      -2.59949e+07 |               50.981  |                        0.4656 |                      -0.3825 |                     24.4323 |                     -24.9067 |                    272.807 |              276.218 |                   265.243 |                   250.709 |         24.1809 |         14.0382 |      1.2741 |             2.7844 |                   45.9182 |            -0.2126 |               0.01   |                 0.865  |                 1.0802 |                -2.0715 |                -8.7334 |          -2.3884 |            42.7376 |           31.0981 |                       48.3448 |                       277.518 |                            274.98  |                                    274.903 | 0.1367 |                     277.449 |                         275.466 |                     272.107 |                                  274.289 |                                277.532 |         284.525 |       272.472 |                    274.041 |                 269.533 |                       277.031 |                       274.481 |                285.733 |                 277.518 |                269.304 |       6.6619 |               5.0024 |      268.669 |                            1 |                 284.851 |                  274.98  |                 265.109 |                  287.837 |                   279.37  |                  270.903 |
+        | 2025-12-19 |                 0.0139 |                       1 |         2.46314e+09 |                      4.11449e+09 |          1.95658e+07 | nan      |                      0 |               0.1361 |            -9.5047 |                 2735.56 |                 794.143 |            43.3299 |      -68.9888 |              14.2857 |                92.8571 |                 -103.239  |                -0.2694 |                            -0.2349 |       5.9366e+06  |               51.5415 |                        0.3736 |                      -0.4188 |                     23.9077 |                     -39.3408 |                    272.807 |              276.218 |                   265.243 |                   250.709 |         31.0112 |         18.79   |      1.022  |             2.4319 |                   49.0175 |             0.3234 |              -1.1196 |                 0.903  |                 1.137  |                -0.8138 |                -5.5011 |          -3.3309 |            41.2483 |           26.4483 |                       45.0423 |                       276.846 |                            274.706 |                                    274.402 | 0.116  |                     276.642 |                         274.854 |                     271.353 |                                  274.166 |                                276.211 |         282.695 |       270.188 |                    274.15  |                 267.489 |                       277.031 |                       274.481 |                284.913 |                 276.846 |                268.78  |       4.6872 |               4.9799 |      268.669 |                            1 |                 284.528 |                  274.706 |                 264.885 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-22 |                -0.0419 |                      -1 |         2.42657e+09 |                      4.0879e+09  |          2.21091e+07 | nan      |                      0 |               0.079  |           -12.8461 |                 2708.57 |                 794.143 |            36.4312 |      -81.449  |               7.1429 |                85.7143 |                 -104.734  |                -0.2367 |                            -0.2614 |      -7.98568e+06 |               45.7605 |                        0.2188 |                       2.261  |                     23.4205 |                     -64.5465 |                    272.807 |              276.218 |                   265.155 |                   250.709 |         18.551  |         24.581  |      0.5981 |             2.0652 |                   44.0572 |            -0.5608 |              -2.0918 |                 0.8075 |                 1.2147 |                -0.8985 |                -4.2594 |          -5.3182 |            40.4149 |           20.5529 |                       41.1123 |                       275.762 |                            274.11  |                                    273.33  | 0.0946 |                     275.788 |                         273.972 |                     270.604 |                                  273.358 |                                275.272 |         281.048 |       271.983 |                    274.799 |                 270.111 |                       277.031 |                       274.481 |                282.966 |                 275.762 |                268.558 |       3.3609 |               4.8642 |      268.669 |                            1 |                 283.622 |                  274.11  |                 264.598 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-23 |                 0.0106 |                       1 |         2.45621e+09 |                      4.11472e+09 |          2.96729e+07 | nan      |                      0 |               0.0651 |           -14.4872 |                 2722.46 |                 794.143 |            37.2984 |      -69.5722 |               0      |                78.5714 |                  -97.9336 |                -0.205  |                            -0.2501 |      -1.4419e+06  |               49.1968 |                        0.1353 |                       2.3529 |                     23.1942 |                     -51.4171 |                    272.807 |              276.218 |                   265.285 |                   250.709 |         30.4278 |         26.6633 |      0.3697 |             1.7261 |                   47.0291 |             0.517  |              -2.6643 |                 0.7732 |                 1.2661 |                -1.9298 |                -4.8618 |          -4.1492 |            46.4518 |           15.2164 |                       36.6324 |                       274.922 |                            273.778 |                                    272.814 | 0.0747 |                     274.973 |                         273.42  |                     270.19  |                                  273.115 |                                274.464 |         279.566 |       271.049 |                    272.322 |                 268.961 |                       275.091 |                       272.999 |                281.038 |                 274.922 |                268.807 |       2.932  |               4.7262 |      268.669 |                            1 |                 282.925 |                  273.778 |                 264.631 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-24 |                 0.0554 |                       1 |         2.47412e+09 |                      4.11466e+09 |          3.0052e+07  | nan      |                      0 |               0.0846 |            -6.6554 |                 2736.96 |                 794.143 |            41.6581 |      -51.6561 |               0      |                71.4286 |                  -34.6713 |                -0.1841 |                            -0.2228 |       2.20352e+06 |               54.4449 |                        0.1105 |                       3.093  |                     22.0178 |                     -32.9194 |                    272.807 |              276.218 |                   265.264 |                   250.709 |         48.3439 |         32.4409 |      0.3019 |             1.4413 |                   50.012  |             0.4551 |              -2.8209 |                 0.8892 |                 1.1613 |                 1.0812 |                -2.14   |          -2.4546 |            53.1326 |           10.3327 |                       31.6831 |                       274.432 |                            273.683 |                                    272.766 | 0.0578 |                     274.257 |                         273.173 |                     270.366 |                                  273.112 |                                274.006 |         278.232 |       270.736 |                    272.645 |                 269.713 |                       273.301 |                       271.631 |                279.93  |                 274.432 |                268.933 |       3.2212 |               4.6187 |      268.669 |                            1 |                 282.56  |                  273.683 |                 264.807 |                  283.957 |                   275.091 |                  266.225 |
+        | 2025-12-26 |                -0.0066 |                      -1 |         2.4526e+09  |                      4.1024e+09  |          2.35738e+07 | nan      |                      0 |               0.0857 |            -5.4478 |                 2736.96 |                 792.954 |            46.9441 |      -51.1365 |               0      |                64.2857 |                  -25.6937 |                -0.1697 |                            -0.1974 |  736348           |               51.216  |                        0.0779 |                      -0.6824 |                     20.9255 |                     -27.7035 |                    272.807 |              276.308 |                   265.162 |                   250.709 |         48.8635 |         42.5451 |      0.2128 |             1.1956 |                   49.1688 |            -0.3028 |              -2.1675 |                 0.9091 |                 1.1011 |                 1.1561 |                -1.3471 |          -1.9298 |            55.4899 |            5.6441 |                       26.3128 |                       274.048 |                            273.547 |                                    272.633 | 0.0432 |                     273.637 |                         272.936 |                     270.87  |                                  273.087 |                                273.626 |         277.031 |       273.07  |                    274.679 |                 271.458 |                       272.807 |                       271.254 |                279.231 |                 274.048 |                268.866 |       2.5032 |               4.4676 |      268.669 |                            1 |                 282.036 |                  273.547 |                 265.057 |                  280.377 |                   273.301 |                  266.225 |
+        | 2025-12-29 |                 0.0405 |                       1 |         2.47632e+09 |                      4.11196e+09 |          2.18213e+07 |   0.4593 |                      0 |               0.0756 |            -4.8028 |                 2736.96 |                 793.999 |            48.1203 |      -48.4087 |              35.7143 |                57.1429 |                  -30.5655 |                -0.1563 |                            -0.1782 |       1.77365e+06 |               57.3149 |                        0.0619 |                       0.1104 |                     20.0591 |                     -21.8634 |                    270.818 |              276.393 |                   265.269 |                   250.709 |         51.5913 |         49.5996 |      0.1691 |             0.9903 |                   49.9667 |             0.5323 |              -2.0669 |                 0.9316 |                 1.0955 |                 0.2132 |                -1.7914 |          -1.4862 |            54.4742 |            1.1838 |                       21.0434 |                       273.754 |                            273.476 |                                    272.623 | 0.031  |                     273.126 |                         272.798 |                     271.532 |                                  273.085 |                                273.368 |         275.951 |       273.133 |                    274.147 |                 271.644 |                       272.807 |                       271.254 |                278.663 |                 273.754 |                268.846 |       2.0045 |               4.2917 |      268.669 |                            1 |                 281.517 |                  273.476 |                 265.435 |                  279.389 |                   272.807 |                  266.225 |
+        | 2025-12-30 |                -0.0195 |                      -1 |         2.45418e+09 |                      4.1095e+09  |          1.83379e+07 |   1.5877 |                      0 |               0.0249 |            -5.2916 |                 2730.16 |                 793.999 |            43.4593 |      -53.5605 |              28.5714 |                50      |                  -35.5276 |                -0.1288 |                            -0.1608 | -464845           |               54.1042 |                        0.0289 |                      -2.36   |                     19.2759 |                     -21.7392 |                    270.818 |              276.393 |                   265.269 |                   250.709 |         46.4395 |         48.9648 |      0.0789 |             0.808  |                   48.4209 |             0.15   |              -1.9463 |                 0.9145 |                 1.1096 |                 0.0858 |                -1.7093 |          -1.4792 |            53.5704 |           -1.8152 |                       16.116  |                       273.462 |                            273.324 |                                    272.454 | 0.0204 |                     272.738 |                         272.61  |                     272.005 |                                  273.056 |                                273.119 |         274.978 |       272.748 |                    273.885 |                 271.88  |                       272.807 |                       271.254 |                278.183 |                 273.462 |                268.742 |       1.7951 |               4.1134 |      268.669 |                            1 |                 280.921 |                  273.324 |                 265.728 |                  279.389 |                   272.807 |                  266.225 |
+        | 2025-12-31 |                -0.0707 |                      -1 |         2.42688e+09 |                      4.08532e+09 |          7.55142e+06 | nan      |                      0 |              -0.0357 |            -5.2547 |                 2730.16 |                 790.451 |            38.2003 |      -62.803  |              21.4286 |                42.8571 |                  -56.9152 |                -0.0887 |                            -0.1381 |      -4.83062e+06 |               46.408  |                       -0.0329 |                      -1.518  |                     18.7173 |                     -37.4455 |                    270.454 |              277.031 |                   265.802 |                   251.058 |         37.197  |         45.0759 |     -0.0897 |             0.6284 |                   45.6902 |            -0.6218 |              -1.6061 |                 0.9113 |                 1.1148 |                -0.0091 |                -1.9339 |          -2.4822 |            52.5944 |           -4.5221 |                       11.571  |                       272.969 |                            273.031 |                                    272.022 | 0.0101 |                     272.407 |                         272.298 |                     272.09  |                                  272.894 |                                272.801 |         274.103 |       272.405 |                    273.269 |                 271.474 |                       272.807 |                       271.254 |                277.084 |                 272.969 |                268.854 |       1.9248 |               3.957  |      268.669 |                            1 |                 280.252 |                  273.031 |                 265.809 |                  279.389 |                   272.807 |                  266.225 |
         """
         if period not in [
             "intraday",
@@ -183,20 +218,20 @@ class Technicals:
             axis=1,
         )
 
-        self._all_indicators = self._all_indicators.round(
-            rounding if rounding else self._rounding
+        self._all_indicators = apply_rounding(
+            self._all_indicators, rounding if rounding is not None else self._rounding
         ).loc[self._start_date : self._end_date]
 
         if growth:
             self._all_indicators_growth = calculate_growth(
                 dataset=self._all_indicators,
                 lag=lag,
-                rounding=rounding if rounding else self._rounding,
+                rounding=rounding if rounding is not None else self._rounding,
                 axis="index",
             )
 
         if standardize:
-            standardize_rounding = rounding if rounding else self._rounding
+            standardize_rounding = rounding if rounding is not None else self._rounding
             if growth:
                 self._all_indicators_growth = calculate_standardization(
                     dataset=self._all_indicators_growth,
@@ -212,6 +247,7 @@ class Technicals:
 
         return self._all_indicators_growth if growth else self._all_indicators
 
+    @handle_errors
     def collect_breadth_indicators(
         self,
         period: str = "daily",
@@ -226,7 +262,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
                 Defaults to "Adj Close".
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -234,10 +270,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Breadth indicators calculated based on the specified parameters.
@@ -252,25 +288,29 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AAPL", "MSFT"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.technicals.collect_breadth_indicators().xs("AAPL", level=1, axis="columns")
         ```
 
         Which returns:
 
-        | Date       |   McClellan Oscillator |   Advancers - Decliners |   On-Balance Volume |
-        |:-----------|-----------------------:|------------------------:|--------------------:|
-        | 2026-06-18 |                 5.1473 |                  298.01 |         4.50241e+09 |
-        | 2026-06-22 |                 4.8047 |                  297.01 |         4.45753e+09 |
-        | 2026-06-23 |                 4.3522 |                  294.3  |         4.40552e+09 |
-        | 2026-06-24 |                 3.8826 |                  293.08 |         4.35243e+09 |
-        | 2026-06-25 |                 2.5652 |                  275.15 |         4.24518e+09 |
-        | 2026-06-26 |                 1.8575 |                  283.78 |         4.50696e+09 |
-        | 2026-06-29 |                 1.1411 |                  281.74 |         4.44053e+09 |
-        | 2026-06-30 |                 0.9039 |                  289.36 |         4.50563e+09 |
-        | 2026-07-01 |                 0.9476 |                  294.38 |         4.55579e+09 |
-        | 2026-07-02 |                 1.6926 |                  308.63 |         4.63119e+09 |
+        | Date       |   McClellan Oscillator |   Advancers - Decliners |   On-Balance Volume |   Accumulation/Distribution Line |   Chaikin Oscillator |     TRIN |   New Highs - New Lows |   Chaikin Money Flow |   Ease of Movement |   Negative Volume Index |   Positive Volume Index |
+        |:-----------|-----------------------:|------------------------:|--------------------:|---------------------------------:|---------------------:|---------:|-----------------------:|---------------------:|-------------------:|------------------------:|------------------------:|
+        | 2025-12-17 |                -0.0981 |                      -1 |         2.26688e+09 |                      3.99772e+09 |         -1.74845e+07 | nan      |                      0 |              -0.0358 |            -4.7237 |                 2735.56 |                 788.833 |
+        | 2025-12-18 |                -0.0378 |                       1 |         2.31851e+09 |                      4.02709e+09 |         -1.16785e+07 | nan      |                      0 |               0.0024 |            -7.4205 |                 2735.56 |                 789.848 |
+        | 2025-12-19 |                 0.0139 |                       1 |         2.46314e+09 |                      4.11449e+09 |          1.95658e+07 | nan      |                      0 |               0.1361 |            -9.5047 |                 2735.56 |                 794.143 |
+        | 2025-12-22 |                -0.0419 |                      -1 |         2.42657e+09 |                      4.0879e+09  |          2.21091e+07 | nan      |                      0 |               0.079  |           -12.8461 |                 2708.57 |                 794.143 |
+        | 2025-12-23 |                 0.0106 |                       1 |         2.45621e+09 |                      4.11472e+09 |          2.96729e+07 | nan      |                      0 |               0.0651 |           -14.4872 |                 2722.46 |                 794.143 |
+        | 2025-12-24 |                 0.0554 |                       1 |         2.47412e+09 |                      4.11466e+09 |          3.0052e+07  | nan      |                      0 |               0.0846 |            -6.6554 |                 2736.96 |                 794.143 |
+        | 2025-12-26 |                -0.0066 |                      -1 |         2.4526e+09  |                      4.1024e+09  |          2.35738e+07 | nan      |                      0 |               0.0857 |            -5.4478 |                 2736.96 |                 792.954 |
+        | 2025-12-29 |                 0.0405 |                       1 |         2.47632e+09 |                      4.11196e+09 |          2.18213e+07 |   0.4593 |                      0 |               0.0756 |            -4.8028 |                 2736.96 |                 793.999 |
+        | 2025-12-30 |                -0.0195 |                      -1 |         2.45418e+09 |                      4.1095e+09  |          1.83379e+07 |   1.5877 |                      0 |               0.0249 |            -5.2916 |                 2730.16 |                 793.999 |
+        | 2025-12-31 |                -0.0707 |                      -1 |         2.42688e+09 |                      4.08532e+09 |          7.55142e+06 | nan      |                      0 |              -0.0357 |            -5.2547 |                 2730.16 |                 790.451 |
         """
         if period not in [
             "intraday",
@@ -337,20 +377,21 @@ class Technicals:
 
         self._breadth_indicators = pd.concat(breadth_indicators, axis=1)
 
-        self._breadth_indicators = self._breadth_indicators.round(
-            rounding if rounding else self._rounding
+        self._breadth_indicators = apply_rounding(
+            self._breadth_indicators,
+            rounding if rounding is not None else self._rounding,
         ).loc[self._start_date : self._end_date]
 
         if growth:
             self._breadth_indicators_growth = calculate_growth(
                 dataset=self._breadth_indicators,
                 lag=lag,
-                rounding=rounding if rounding else self._rounding,
+                rounding=rounding if rounding is not None else self._rounding,
                 axis="index",
             )
 
         if standardize:
-            standardize_rounding = rounding if rounding else self._rounding
+            standardize_rounding = rounding if rounding is not None else self._rounding
             if growth:
                 self._breadth_indicators_growth = calculate_standardization(
                     dataset=self._breadth_indicators_growth,
@@ -377,6 +418,77 @@ class Technicals:
 
         return self._breadth_indicators_growth if growth else self._breadth_indicators
 
+    def _get_historical_data(self, period: str, close_column: str) -> pd.DataFrame:
+        """
+        The historical data of a period with the open, high and low on the same basis as the
+        close an indicator uses. With the dividend-adjusted close (the default) they are
+        adjusted by the same factor, Adj Close / Close, so that a bounded indicator stays within
+        its bounds and a range is not distorted around ex-dividend days.
+
+        The factor changes on every ex-dividend date, so the open, high and low of a week,
+        month, quarter or year are taken from the adjusted daily prices (the first open, the
+        highest high and the lowest low) rather than adjusted with the factor at the end of
+        the period. The latter would overstate an open before an ex-dividend date within the
+        period by that dividend's yield.
+
+        Args:
+            period (str): The period, e.g. "daily".
+            close_column (str): The close the indicator uses.
+
+        Returns:
+            pd.DataFrame: The historical data, with an adjusted open, high and low when the close
+            is the adjusted close.
+        """
+        historical_data = self._historical_data[period]
+        columns = historical_data.columns.get_level_values(0)
+        if close_column != "Adj Close" or "Close" not in columns:
+            return historical_data
+
+        key = ("consistent", period)
+        if key not in self._consistent_data:
+            factor = historical_data["Adj Close"] / historical_data["Close"]
+            adjusted = {
+                column: historical_data[column] * factor
+                for column in ("Open", "High", "Low")
+                if column in columns
+            }
+
+            daily_data = self._historical_data.get("daily", pd.DataFrame())
+            if (
+                period in PERIOD_TRANSLATION
+                and not daily_data.empty
+                and isinstance(daily_data.index, pd.PeriodIndex)
+                and "Close" in daily_data.columns.get_level_values(0)
+            ):
+                daily_adjusted = self._get_historical_data("daily", close_column)
+                dates = daily_adjusted.index.asfreq(PERIOD_TRANSLATION[period])
+                for column, aggregation in (
+                    ("Open", "first"),
+                    ("High", "max"),
+                    ("Low", "min"),
+                ):
+                    if column in adjusted:
+                        # A period the daily data does not cover keeps the end-of-period factor.
+                        adjusted[column] = (
+                            daily_adjusted[column]
+                            .groupby(dates)
+                            .agg(aggregation)
+                            .reindex(
+                                index=historical_data.index,
+                                columns=adjusted[column].columns,
+                            )
+                            .combine_first(adjusted[column])
+                        )
+
+            self._consistent_data[key] = pd.concat(
+                {
+                    column: adjusted.get(column, historical_data[column])
+                    for column in columns.unique()
+                },
+                axis=1,
+            )
+        return self._consistent_data[key]
+
     @handle_portfolio
     @handle_errors
     def get_mcclellan_oscillator(
@@ -393,19 +505,23 @@ class Technicals:
         """
         Calculate the McClellan Oscillator for a given price series.
 
-        The McClellan Oscillator is a breadth indicator that measures the difference
-        between the exponential moving average of advancing stocks and the exponential
-        moving average of declining stocks.
+        The McClellan Oscillator is the difference between a short-term and a long-term
+        exponential moving average of the daily advance/decline signal. Traditionally it is
+        calculated from the number of advancing minus declining stocks across a market; here
+        it is applied to each ticker's own signal (+1 on a day it closed higher, -1 on a day it
+        closed lower, 0 otherwise), so it measures how persistently that ticker has been rising
+        or falling.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - McClellan Oscillator = EMA(Advancers) — EMA(Decliners)
+        - McClellan Oscillator = EMA(Advance/Decline Signal, short_ema_window) — EMA(Advance/Decline
+          Signal, long_ema_window)
 
         Also known as: McClellan oscillator, market breadth.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
                 Defaults to "Adj Close".
             short_ema_window (int, optional): The window size for the short-term EMA.
@@ -417,10 +533,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: McClellan Oscillator values.
@@ -436,25 +552,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["EWJ", "EWG", "EWU", "EWQ", "EWZ", "INDA", "FXI", "EWC", "EWA", "EWY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_mcclellan_oscillator()
+        toolkit.technicals.get_mcclellan_oscillator().loc[:, ["EWJ", "EWG", "EWZ", "INDA", "FXI", "Benchmark"]].tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |     MSFT |   Benchmark |
-        |:-----------|-------:|---------:|------------:|
-        | 2026-06-18 | 5.1473 |  -4.4405 |      9.1566 |
-        | 2026-06-22 | 4.8047 |  -6.079  |      8.7467 |
-        | 2026-06-23 | 4.3522 |  -7.1196 |      7.8119 |
-        | 2026-06-24 | 3.8826 |  -8.3976 |      6.9567 |
-        | 2026-06-25 | 2.5652 | -10.0799 |      6.2436 |
-        | 2026-06-26 | 1.8575 | -10.4608 |      5.3373 |
-        | 2026-06-29 | 1.1411 | -10.9542 |      5.1361 |
-        | 2026-06-30 | 0.9039 | -11.0988 |      5.227  |
-        | 2026-07-01 | 0.9476 | -10.6039 |      5.228  |
-        | 2026-07-02 | 1.6926 |  -9.8173 |      5.1538 |
+        | Date       |     EWJ |    EWG |     EWZ |    INDA |    FXI |   Benchmark |
+        |:-----------|--------:|-------:|--------:|--------:|-------:|------------:|
+        | 2025-12-24 | -0.0357 | 0.1365 | -0.0693 |  0.0631 | 0.0419 |      0.0718 |
+        | 2025-12-26 | -0.0875 | 0.1604 | -0.0203 | -0.002  | 0.0863 |      0.0008 |
+        | 2025-12-29 | -0.0314 | 0.0801 | -0.0783 | -0.0576 | 0.0239 |     -0.06   |
+        | 2025-12-30 | -0.0832 | 0.1111 | -0.0275 | -0.0049 | 0.0703 |     -0.1116 |
+        | 2025-12-31 | -0.1272 | 0.037  | -0.0839 |  0.0402 | 0.0097 |     -0.1552 |
         """
         if period not in [
             "intraday",
@@ -509,21 +625,23 @@ class Technicals:
         standardize: bool = False,
     ) -> pd.Series | pd.DataFrame:
         """
-        Calculate the Advancers/Decliners ratio for a given price series.
+        Calculate the daily advance/decline signal for a given price series.
 
-        The Advancers/Decliners ratio is a breadth indicator that measures the number
-        of advancing stocks (stocks with positive price changes) versus the number of
-        declining stocks (stocks with negative price changes).
+        Traditionally advancers versus decliners is a market-wide count of rising against
+        falling stocks; applied to a single ticker it becomes a directional signal: +1 on a
+        day the ticker closed higher than the day before, -1 on a day it closed lower and 0
+        on an unchanged day. It feeds the McClellan Oscillator; get_trin and
+        get_new_highs_new_lows measure breadth across all tickers.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - Advancers/Decliners = Advancers / Decliners
+        - Signal = +1 if Close(t) > Close(t-1), -1 if Close(t) < Close(t-1), else 0
 
         Also known as: advance decline ratio, market breadth.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
                 Defaults to "Adj Close".
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -531,17 +649,17 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
-            pd.Series or pd.DataFrame: Advancers/Decliners ratio values.
+            pd.Series or pd.DataFrame: Advance/decline signal values (+1, 0 or -1).
 
         Notes:
         - The method retrieves historical data based on the specified `period` and calculates
-          the Advancers/Decliners ratio for each asset in the Toolkit instance.
+          the advance/decline signal for each asset in the Toolkit instance.
         - If `growth` is set to True, the method calculates the growth of the indicator values
           using the specified `lag`.
 
@@ -550,25 +668,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["EWJ", "EWG", "EWU", "EWQ", "EWZ", "INDA", "FXI", "EWC", "EWA", "EWY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_advancers_decliners()
+        toolkit.technicals.get_advancers_decliners().loc[:, ["EWJ", "EWG", "EWZ", "INDA", "FXI", "Benchmark"]].tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |   MSFT |   Benchmark |
-        |:-----------|-------:|-------:|------------:|
-        | 2026-06-18 | 298.01 | 379.4  |      746.74 |
-        | 2026-06-22 | 297.01 | 367.34 |      744.39 |
-        | 2026-06-23 | 294.3  | 373.94 |      733.58 |
-        | 2026-06-24 | 293.08 | 365.46 |      733.24 |
-        | 2026-06-25 | 275.15 | 352.83 |      734.3  |
-        | 2026-06-26 | 283.78 | 372.97 |      728.99 |
-        | 2026-06-29 | 281.74 | 368.57 |      741    |
-        | 2026-06-30 | 289.36 | 373.02 |      746.77 |
-        | 2026-07-01 | 294.38 | 384.28 |      745.76 |
-        | 2026-07-02 | 308.63 | 390.49 |      744.78 |
+        | Date       |   EWJ |   EWG |   EWZ |   INDA |   FXI |   Benchmark |
+        |:-----------|------:|------:|------:|-------:|------:|------------:|
+        | 2025-12-24 |    -1 |     1 |    -1 |     -1 |     1 |           1 |
+        | 2025-12-26 |    -1 |     1 |     1 |     -1 |     1 |          -1 |
+        | 2025-12-29 |     1 |    -1 |    -1 |     -1 |    -1 |          -1 |
+        | 2025-12-30 |    -1 |     1 |     1 |      1 |     1 |          -1 |
+        | 2025-12-31 |    -1 |    -1 |    -1 |      1 |    -1 |          -1 |
         """
         if period not in [
             "intraday",
@@ -625,15 +743,21 @@ class Technicals:
         It accumulates the volume on up days and subtracts the volume on down days. The resulting OBV line provides
         insights into the buying and selling pressure behind price movements.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - OBV = Previous OBV + Current Volume if Close > Previous Close
+        - OBV = Previous OBV + Volume if Close > Previous Close, Previous OBV — Volume if Close < Previous Close,
+          and Previous OBV otherwise.
+
+        The level of OBV has no meaning by itself, since it depends on the first date of the data; only its
+        direction and its divergences from price matter. A rising OBV while price moves sideways is read as
+        accumulation ahead of a breakout, a falling OBV as distribution. A single day of very high volume, such
+        as an index rebalance or an earnings day, can move the line for a long time.
 
         Also known as: OBV, volume momentum.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -641,10 +765,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the OBV.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: On-Balance Volume values.
@@ -659,25 +783,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_on_balance_volume()
+        toolkit.technicals.get_on_balance_volume().tail(5)
         ```
 
         Which returns:
 
-        | Date       |        AAPL |        MSFT |   Benchmark |
-        |:-----------|------------:|------------:|------------:|
-        | 2026-06-18 | 4.50241e+09 | 3.51706e+08 | 1.39684e+09 |
-        | 2026-06-22 | 4.45753e+09 | 3.06535e+08 | 1.35021e+09 |
-        | 2026-06-23 | 4.40552e+09 | 3.47183e+08 | 1.28336e+09 |
-        | 2026-06-24 | 4.35243e+09 | 3.02673e+08 | 1.22592e+09 |
-        | 2026-06-25 | 4.24518e+09 | 2.36312e+08 | 1.28005e+09 |
-        | 2026-06-26 | 4.50696e+09 | 4.22514e+08 | 1.20902e+09 |
-        | 2026-06-29 | 4.44053e+09 | 3.71284e+08 | 1.26705e+09 |
-        | 2026-06-30 | 4.50563e+09 | 4.1623e+08  | 1.32268e+09 |
-        | 2026-07-01 | 4.55579e+09 | 4.64295e+08 | 1.27558e+09 |
-        | 2026-07-02 | 4.63119e+09 | 5.0649e+08  | 1.21807e+09 |
+        | Date       |       BTCUSD |   Benchmark |
+        |:-----------|-------------:|------------:|
+        | 2025-12-27 | -1.15162e+12 | 1.49356e+09 |
+        | 2025-12-28 | -1.13646e+12 | 1.49356e+09 |
+        | 2025-12-29 | -1.18487e+12 | 1.431e+09   |
+        | 2025-12-30 | -1.14929e+12 | 1.38384e+09 |
+        | 2025-12-31 | -1.18312e+12 | 1.30969e+09 |
         """
         if period not in [
             "intraday",
@@ -735,26 +859,29 @@ class Technicals:
         into or out of an asset. It takes into account both price and volume information to identify
         whether an asset is being accumulated (bought) or distributed (sold) by investors.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - ADL = Previous ADL + Current ADL
+        - Money Flow Multiplier = ((Close — Low) — (High — Close)) / (High — Low)
+        - Money Flow Volume = Money Flow Multiplier * Volume
+        - ADL = Previous ADL + Money Flow Volume
 
         Also known as: ADL, Chaikin ADL, volume-price trend.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the Accumulation/Distribution Line.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Accumulation/Distribution Line values.
@@ -770,25 +897,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GLD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_accumulation_distribution_line()
+        toolkit.technicals.get_accumulation_distribution_line().tail(5)
         ```
 
         Which returns:
 
-        | Date       |        AAPL |        MSFT |   Benchmark |
-        |:-----------|------------:|------------:|------------:|
-        | 2026-06-18 | 4.92368e+09 | 1.8149e+09  | 9.17282e+09 |
-        | 2026-06-22 | 4.88276e+09 | 1.77141e+09 | 9.14286e+09 |
-        | 2026-06-23 | 4.83242e+09 | 1.77134e+09 | 9.09936e+09 |
-        | 2026-06-24 | 4.78154e+09 | 1.73113e+09 | 9.07218e+09 |
-        | 2026-06-25 | 4.69424e+09 | 1.69682e+09 | 9.07013e+09 |
-        | 2026-06-26 | 4.85924e+09 | 1.81902e+09 | 9.08747e+09 |
-        | 2026-06-29 | 4.82229e+09 | 1.81091e+09 | 9.13864e+09 |
-        | 2026-06-30 | 4.87922e+09 | 1.8407e+09  | 9.17476e+09 |
-        | 2026-07-01 | 4.89938e+09 | 1.85739e+09 | 9.17276e+09 |
-        | 2026-07-02 | 4.96721e+09 | 1.8826e+09  | 9.16369e+09 |
+        | Date       |         GLD |   Benchmark |
+        |:-----------|------------:|------------:|
+        | 2025-12-24 | 7.95203e+08 | 8.01751e+09 |
+        | 2025-12-26 | 7.95996e+08 | 8.01211e+09 |
+        | 2025-12-29 | 7.9136e+08  | 8.02071e+09 |
+        | 2025-12-30 | 7.82463e+08 | 7.99403e+09 |
+        | 2025-12-31 | 7.75502e+08 | 7.9254e+09  |
         """
         if period not in [
             "intraday",
@@ -808,7 +935,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         accumulation_distribution_line = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -856,7 +983,7 @@ class Technicals:
         to help identify potential trends and reversals in the market. It is calculated as the
         difference between the 3-day and 10-day Accumulation/Distribution Line.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Chaikin Oscillator = EMA(short-window ADL) — EMA(long-window ADL)
 
@@ -864,9 +991,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             short_window (int, optional): Number of periods for the short-term moving average.
                 Defaults to 3.
             long_window (int, optional): Number of periods for the long-term moving average.
@@ -876,10 +1004,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Chaikin Oscillator.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Chaikin Oscillator values.
@@ -895,25 +1023,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["QQQ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_chaikin_oscillator()
+        toolkit.technicals.get_chaikin_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |         AAPL |         MSFT |    Benchmark |
-        |:-----------|-------------:|-------------:|-------------:|
-        | 2026-06-18 | -1.81858e+07 | -3.96544e+06 | -3.10439e+07 |
-        | 2026-06-22 | -2.9078e+07  | -1.41917e+07 | -3.73954e+07 |
-        | 2026-06-23 | -4.6907e+07  | -1.71047e+07 | -5.04353e+07 |
-        | 2026-06-24 | -6.61266e+07 | -2.95377e+07 | -5.98313e+07 |
-        | 2026-06-25 | -9.57547e+07 | -4.28543e+07 | -5.88882e+07 |
-        | 2026-06-26 | -4.66693e+07 | -5.52418e+06 | -4.76316e+07 |
-        | 2026-06-29 | -3.41049e+07 |  7.66983e+06 | -2.24146e+07 |
-        | 2026-06-30 | -7.75122e+06 |  2.18471e+07 |  1.4324e+06  |
-        | 2026-07-01 |  1.01493e+07 |  3.09708e+07 |  1.0421e+07  |
-        | 2026-07-02 |  3.81324e+07 |  3.99114e+07 |  1.02634e+07 |
+        | Date       |          QQQ |   Benchmark |
+        |:-----------|-------------:|------------:|
+        | 2025-12-24 |  1.33735e+07 | 4.4898e+07  |
+        | 2025-12-26 |  1.24876e+07 | 4.67752e+07 |
+        | 2025-12-29 |  1.15765e+07 | 4.60255e+07 |
+        | 2025-12-30 |  1.62538e+06 | 3.30466e+07 |
+        | 2025-12-31 | -1.44174e+07 | 2.89499e+06 |
         """
         if period not in [
             "intraday",
@@ -933,7 +1061,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         chaikin_oscillator = breadth_model.get_chaikin_oscillator(
             historical_data["High"],
@@ -979,7 +1107,7 @@ class Technicals:
         (accumulation) is dominating over the window, while sustained readings below zero
         indicate selling pressure (distribution).
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Money Flow Multiplier = ((Close — Low) — (High — Close)) / (High — Low)
         - Money Flow Volume = Money Flow Multiplier * Volume
@@ -989,9 +1117,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): Number of periods to sum the Money Flow Volume and
                 volume over. Defaults to 20.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -999,10 +1128,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Chaikin Money Flow.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Chaikin Money Flow values, bounded between -1 and 1.
@@ -1021,10 +1150,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["ETHUSD", "SOLUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_chaikin_money_flow()
+        toolkit.technicals.get_chaikin_money_flow().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   ETHUSD |   SOLUSD |   Benchmark |
+        |:-----------|---------:|---------:|------------:|
+        | 2025-12-27 |  -0.0938 |  -0.143  |      0.0688 |
+        | 2025-12-28 |  -0.1006 |  -0.0945 |      0.0818 |
+        | 2025-12-29 |  -0.1815 |  -0.1419 |      0.1253 |
+        | 2025-12-30 |  -0.1279 |  -0.0749 |      0.0534 |
+        | 2025-12-31 |  -0.1646 |  -0.1521 |     -0.0918 |
         """
         if period not in [
             "intraday",
@@ -1044,7 +1188,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         chaikin_money_flow = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -1095,7 +1239,7 @@ class Technicals:
         little volume. The raw daily reading is smoothed with a Simple Moving Average to
         reduce noise.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Distance Moved = (High(t) + Low(t)) / 2 — (High(t-1) + Low(t-1)) / 2
         - Box Ratio = (Volume / volume_divisor) / (High — Low)
@@ -1106,7 +1250,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods used to smooth the raw Ease of
@@ -1119,10 +1263,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Ease of Movement.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Ease of Movement values.
@@ -1140,10 +1284,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^GSPC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_ease_of_movement()
+        toolkit.technicals.get_ease_of_movement().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   ^GSPC |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 |  1.404  |      2.8161 |
+        | 2025-12-26 |  0.6053 |      2.227  |
+        | 2025-12-29 |  0.6173 |      2.7602 |
+        | 2025-12-30 |  0.6371 |      2.7794 |
+        | 2025-12-31 | -4.2755 |      0.4354 |
         """
         if period not in [
             "intraday",
@@ -1163,7 +1322,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         ease_of_movement = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -1213,7 +1372,7 @@ class Technicals:
         specifically on those days isolates informed trading from the noise of high-volume,
         crowd-driven days.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Index(t) = Index(t-1) * (1 + (Close(t) / Close(t-1) — 1)) if Volume(t) < Volume(t-1)
         - Index(t) = Index(t-1) otherwise
@@ -1222,7 +1381,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             start_value (float, optional): The index value to start the series at.
@@ -1232,10 +1391,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Negative Volume Index.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Negative Volume Index values.
@@ -1253,10 +1412,26 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SPY", "IWM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+            benchmark_ticker=None,
+        )
 
-        toolkit.technicals.get_negative_volume_index()
+        toolkit.technicals.get_negative_volume_index().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |     SPY |     IWM |
+        |:-----------|--------:|--------:|
+        | 2025-12-24 | 5440.89 | 4501.78 |
+        | 2025-12-26 | 5440.89 | 4501.78 |
+        | 2025-12-29 | 5440.89 | 4501.78 |
+        | 2025-12-30 | 5434.27 | 4468.59 |
+        | 2025-12-31 | 5434.27 | 4468.59 |
         """
         if period not in [
             "intraday",
@@ -1324,7 +1499,7 @@ class Technicals:
         (crowd-driven) days, which is traditionally read as tracking less-informed,
         sentiment-driven trading.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Index(t) = Index(t-1) * (1 + (Close(t) / Close(t-1) — 1)) if Volume(t) > Volume(t-1)
         - Index(t) = Index(t-1) otherwise
@@ -1333,7 +1508,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             start_value (float, optional): The index value to start the series at.
@@ -1343,10 +1518,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Positive Volume Index.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Positive Volume Index values.
@@ -1364,10 +1539,26 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SPY", "IWM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+            benchmark_ticker=None,
+        )
 
-        toolkit.technicals.get_positive_volume_index()
+        toolkit.technicals.get_positive_volume_index().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |     SPY |     IWM |
+        |:-----------|--------:|--------:|
+        | 2025-12-24 | 368.577 | 308.515 |
+        | 2025-12-26 | 368.539 | 306.942 |
+        | 2025-12-29 | 367.226 | 305.061 |
+        | 2025-12-30 | 367.226 | 305.061 |
+        | 2025-12-31 | 364.506 | 302.758 |
         """
         if period not in [
             "intraday",
@@ -1412,6 +1603,7 @@ class Technicals:
             apply_slice=False,
         )
 
+    @handle_errors
     def collect_momentum_indicators(
         self,
         period: str = "daily",
@@ -1427,7 +1619,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             window (int, optional): The window size for calculating indicators.
                 Defaults to 14.
             close_column (str, optional): The name of the column containing the close prices.
@@ -1437,10 +1629,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Momentum indicators calculated based on the specified parameters.
@@ -1455,25 +1647,29 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AAPL", "MSFT"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.technicals.collect_momentum_indicators().xs("AAPL", level=1, axis="columns")
         ```
 
         Which returns:
 
-        | Date       |   Ichimoku Leading Span A |   Ichimoku Leading Span B |   Stochastic %K |   Stochastic %D |
-        |:-----------|--------------------------:|--------------------------:|----------------:|----------------:|
-        | 2026-06-18 |                   307.225 |                   286.8   |         35.4097 |         34.4881 |
-        | 2026-06-22 |                   306.55  |                   287.03  |         32.0786 |         32.012  |
-        | 2026-06-23 |                   302.59  |                   287.295 |         23.0513 |         30.1799 |
-        | 2026-06-24 |                   302.39  |                   287.605 |         18.9873 |         24.7058 |
-        | 2026-06-25 |                   302.39  |                   289.335 |          3.2073 |         15.082  |
-        | 2026-06-26 |                   302.39  |                   291.235 |         22.9782 |         15.0576 |
-        | 2026-06-29 |                   302.39  |                   291.235 |         27.8689 |         18.0181 |
-        | 2026-06-30 |                   302.39  |                   291.235 |         54.4472 |         35.0981 |
-        | 2026-07-01 |                   302.39  |                   291.235 |         71.9567 |         51.4243 |
-        | 2026-07-02 |                   302.39  |                   291.235 |         97.7853 |         74.7297 |
+        | Date       |   Money Flow Index |   Williams %R |   Aroon Indicator Up |   Aroon Indicator Down |   Commodity Channel Index |   Relative Vigor Index |   Relative Vigor Index Signal Line |       Force Index |   Ultimate Oscillator |   Percentage Price Oscillator |   Detrended Price Oscillator |   Average Directional Index |   Chande Momentum Oscillator |   Ichimoku Conversion Line |   Ichimoku Base Line |   Ichimoku Leading Span A |   Ichimoku Leading Span B |   Stochastic %K |   Stochastic %D |   MACD Line |   MACD Signal Line |   Relative Strength Index |   Balance of Power |   Awesome Oscillator |   Vortex Indicator VI+ |   Vortex Indicator VI- |   Elder Ray Bull Power |   Elder Ray Bear Power |   Rate of Change |   Choppiness Index |   Know Sure Thing |   Know Sure Thing Signal Line |
+        |:-----------|-------------------:|--------------:|---------------------:|-----------------------:|--------------------------:|-----------------------:|-----------------------------------:|------------------:|----------------------:|------------------------------:|-----------------------------:|----------------------------:|-----------------------------:|---------------------------:|---------------------:|--------------------------:|--------------------------:|----------------:|----------------:|------------:|-------------------:|--------------------------:|-------------------:|---------------------:|-----------------------:|-----------------------:|-----------------------:|-----------------------:|-----------------:|-------------------:|------------------:|------------------------------:|
+        | 2025-12-17 |            39.7393 |      -98.8221 |              28.5714 |               100      |                 -139.905  |                -0.2262 |                            -0.0758 |      -3.27663e+07 |               44.5333 |                        0.6309 |                       0.0306 |                     24.6712 |                     -20.6214 |                    275.64  |              276.218 |                   265.243 |                   250.709 |          1.1779 |          8.6606 |      1.7276 |             3.162  |                   45.1866 |            -0.7013 |               1.2663 |                 0.9211 |                 1.0533 |                -0.1329 |                -4.6407 |          -2.0573 |            49.8428 |           36.3832 |                       51.073  |
+        | 2025-12-18 |            34.4002 |      -75.8191 |              21.4286 |               100      |                 -162.429  |                -0.2832 |                            -0.1659 |      -2.59949e+07 |               50.981  |                        0.4656 |                      -0.3825 |                     24.4323 |                     -24.9067 |                    272.807 |              276.218 |                   265.243 |                   250.709 |         24.1809 |         14.0382 |      1.2741 |             2.7844 |                   45.9182 |            -0.2126 |               0.01   |                 0.865  |                 1.0802 |                -2.0715 |                -8.7334 |          -2.3884 |            42.7376 |           31.0981 |                       48.3448 |
+        | 2025-12-19 |            43.3299 |      -68.9888 |              14.2857 |                92.8571 |                 -103.239  |                -0.2694 |                            -0.2349 |       5.9366e+06  |               51.5415 |                        0.3736 |                      -0.4188 |                     23.9077 |                     -39.3408 |                    272.807 |              276.218 |                   265.243 |                   250.709 |         31.0112 |         18.79   |      1.022  |             2.4319 |                   49.0175 |             0.3234 |              -1.1196 |                 0.903  |                 1.137  |                -0.8138 |                -5.5011 |          -3.3309 |            41.2483 |           26.4483 |                       45.0423 |
+        | 2025-12-22 |            36.4312 |      -81.449  |               7.1429 |                85.7143 |                 -104.734  |                -0.2367 |                            -0.2614 |      -7.98568e+06 |               45.7605 |                        0.2188 |                       2.261  |                     23.4205 |                     -64.5465 |                    272.807 |              276.218 |                   265.155 |                   250.709 |         18.551  |         24.581  |      0.5981 |             2.0652 |                   44.0572 |            -0.5608 |              -2.0918 |                 0.8075 |                 1.2147 |                -0.8985 |                -4.2594 |          -5.3182 |            40.4149 |           20.5529 |                       41.1123 |
+        | 2025-12-23 |            37.2984 |      -69.5722 |               0      |                78.5714 |                  -97.9336 |                -0.205  |                            -0.2501 |      -1.4419e+06  |               49.1968 |                        0.1353 |                       2.3529 |                     23.1942 |                     -51.4171 |                    272.807 |              276.218 |                   265.285 |                   250.709 |         30.4278 |         26.6633 |      0.3697 |             1.7261 |                   47.0291 |             0.517  |              -2.6643 |                 0.7732 |                 1.2661 |                -1.9298 |                -4.8618 |          -4.1492 |            46.4518 |           15.2164 |                       36.6324 |
+        | 2025-12-24 |            41.6581 |      -51.6561 |               0      |                71.4286 |                  -34.6713 |                -0.1841 |                            -0.2228 |       2.20352e+06 |               54.4449 |                        0.1105 |                       3.093  |                     22.0178 |                     -32.9194 |                    272.807 |              276.218 |                   265.264 |                   250.709 |         48.3439 |         32.4409 |      0.3019 |             1.4413 |                   50.012  |             0.4551 |              -2.8209 |                 0.8892 |                 1.1613 |                 1.0812 |                -2.14   |          -2.4546 |            53.1326 |           10.3327 |                       31.6831 |
+        | 2025-12-26 |            46.9441 |      -51.1365 |               0      |                64.2857 |                  -25.6937 |                -0.1697 |                            -0.1974 |  736348           |               51.216  |                        0.0779 |                      -0.6824 |                     20.9255 |                     -27.7035 |                    272.807 |              276.308 |                   265.162 |                   250.709 |         48.8635 |         42.5451 |      0.2128 |             1.1956 |                   49.1688 |            -0.3028 |              -2.1675 |                 0.9091 |                 1.1011 |                 1.1561 |                -1.3471 |          -1.9298 |            55.4899 |            5.6441 |                       26.3128 |
+        | 2025-12-29 |            48.1203 |      -48.4087 |              35.7143 |                57.1429 |                  -30.5655 |                -0.1563 |                            -0.1782 |       1.77365e+06 |               57.3149 |                        0.0619 |                       0.1104 |                     20.0591 |                     -21.8634 |                    270.818 |              276.393 |                   265.269 |                   250.709 |         51.5913 |         49.5996 |      0.1691 |             0.9903 |                   49.9667 |             0.5323 |              -2.0669 |                 0.9316 |                 1.0955 |                 0.2132 |                -1.7914 |          -1.4862 |            54.4742 |            1.1838 |                       21.0434 |
+        | 2025-12-30 |            43.4593 |      -53.5605 |              28.5714 |                50      |                  -35.5276 |                -0.1288 |                            -0.1608 | -464845           |               54.1042 |                        0.0289 |                      -2.36   |                     19.2759 |                     -21.7392 |                    270.818 |              276.393 |                   265.269 |                   250.709 |         46.4395 |         48.9648 |      0.0789 |             0.808  |                   48.4209 |             0.15   |              -1.9463 |                 0.9145 |                 1.1096 |                 0.0858 |                -1.7093 |          -1.4792 |            53.5704 |           -1.8152 |                       16.116  |
+        | 2025-12-31 |            38.2003 |      -62.803  |              21.4286 |                42.8571 |                  -56.9152 |                -0.0887 |                            -0.1381 |      -4.83062e+06 |               46.408  |                       -0.0329 |                      -1.518  |                     18.7173 |                     -37.4455 |                    270.454 |              277.031 |                   265.802 |                   251.058 |         37.197  |         45.0759 |     -0.0897 |             0.6284 |                   45.6902 |            -0.6218 |              -1.6061 |                 0.9113 |                 1.1148 |                -0.0091 |                -1.9339 |          -2.4822 |            52.5944 |           -4.5221 |                       11.571  |
         """
         if period not in [
             "intraday",
@@ -1512,9 +1708,16 @@ class Technicals:
             )
         )
 
-        momentum_indicators["Relative Vigor Index"] = self.get_relative_vigor_index(
-            period=period, close_column=close_column, window=window
+        relative_vigor_index = self.get_relative_vigor_index(
+            period=period, close_column=close_column
         )
+
+        momentum_indicators["Relative Vigor Index"] = relative_vigor_index[
+            "Relative Vigor Index"
+        ]
+        momentum_indicators["Relative Vigor Index Signal Line"] = relative_vigor_index[
+            "Signal Line"
+        ]
 
         momentum_indicators["Force Index"] = self.get_force_index(
             period=period, close_column=close_column, window=window
@@ -1616,20 +1819,21 @@ class Technicals:
 
         self._momentum_indicators = pd.concat(momentum_indicators, axis=1)
 
-        self._momentum_indicators = self._momentum_indicators.round(
-            rounding if rounding else self._rounding
+        self._momentum_indicators = apply_rounding(
+            self._momentum_indicators,
+            rounding if rounding is not None else self._rounding,
         ).loc[self._start_date : self._end_date]
 
         if growth:
             self._momentum_indicators_growth = calculate_growth(
                 dataset=self._momentum_indicators,
                 lag=lag,
-                rounding=rounding if rounding else self._rounding,
+                rounding=rounding if rounding is not None else self._rounding,
                 axis="index",
             )
 
         if standardize:
-            standardize_rounding = rounding if rounding else self._rounding
+            standardize_rounding = rounding if rounding is not None else self._rounding
             if growth:
                 self._momentum_indicators_growth = calculate_standardization(
                     dataset=self._momentum_indicators_growth,
@@ -1675,7 +1879,7 @@ class Technicals:
         direction of money flowing in and out of a security by considering both price
         and volume.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - MFI = 100 — (100 / (1 + (positive_money_flow / negative_money_flow)))
 
@@ -1683,9 +1887,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods for calculating the MFI.
                 Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -1693,10 +1898,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Money Flow Index (MFI) values.
@@ -1712,25 +1917,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^IXIC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_money_flow_index()
+        toolkit.technicals.get_money_flow_index().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 34.2012 | 17.0425 |     45.4099 |
-        | 2026-06-22 | 40.4098 |  6.0393 |     40.4024 |
-        | 2026-06-23 | 33.9909 | 13.2653 |     35.5328 |
-        | 2026-06-24 | 34.0195 | 13.2877 |     35.3632 |
-        | 2026-06-25 | 31.7751 | 12.5721 |     29.9219 |
-        | 2026-06-26 | 50.9525 | 34.8784 |     30.7073 |
-        | 2026-06-29 | 58.3251 | 40.8726 |     36.5958 |
-        | 2026-06-30 | 65.173  | 46.3834 |     44.023  |
-        | 2026-07-01 | 70.4341 | 51.8574 |     49.9149 |
-        | 2026-07-02 | 71.4645 | 57.9088 |     41.6417 |
+        | Date       |   ^IXIC |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | 49.2154 |     53.8187 |
+        | 2025-12-26 | 47.7867 |     52.3146 |
+        | 2025-12-29 | 48.6922 |     51.9588 |
+        | 2025-12-30 | 48.8975 |     52.4467 |
+        | 2025-12-31 | 42.2704 |     45.3999 |
         """
         if period not in [
             "intraday",
@@ -1750,7 +1955,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         money_flow_index = momentum_model.get_money_flow_index(
             historical_data["High"],
@@ -1791,7 +1996,7 @@ class Technicals:
         The Williams %R is a momentum indicator that measures the level of the close price
         relative to the high-low range over a certain number of periods.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Williams %R = (Highest High — Close) / (Highest High — Lowest Low) * —100
 
@@ -1799,9 +2004,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods for calculating the Williams %R.
                 Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -1809,10 +2015,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Williams %R values.
@@ -1828,25 +2034,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["EURUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_williams_percent_r()
+        toolkit.technicals.get_williams_percent_r().tail(5)
         ```
 
         Which returns:
 
-        | Date       |     AAPL |     MSFT |   Benchmark |
-        |:-----------|---------:|---------:|------------:|
-        | 2026-06-18 | -64.5903 | -93.4222 |    -36.128  |
-        | 2026-06-22 | -67.9214 | -99.6876 |    -42.3433 |
-        | 2026-06-23 | -76.9487 | -90.6301 |    -69.6493 |
-        | 2026-06-24 | -81.0127 | -99.0472 |    -70.1848 |
-        | 2026-06-25 | -96.7927 | -95.4778 |    -65.6498 |
-        | 2026-06-26 | -77.0218 | -65.0235 |    -69.0524 |
-        | 2026-06-29 | -72.1311 | -69.1462 |    -39.1022 |
-        | 2026-06-30 | -45.5528 | -57.3424 |    -24.7132 |
-        | 2026-07-01 | -28.0433 | -33.2445 |    -27.2319 |
-        | 2026-07-02 |  -2.2147 | -21.4272 |    -29.6758 |
+        | Date       |   EURUSD |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-26 | -16.5329 |     -6.0156 |
+        | 2025-12-28 | -18.4956 |    -11.4945 |
+        | 2025-12-29 | -18.4956 |    -16.9733 |
+        | 2025-12-30 | -78.0427 |    -20.7008 |
+        | 2025-12-31 | -78.0427 |    -43.3797 |
         """
         if period not in [
             "intraday",
@@ -1866,7 +2072,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         williams_percent_r = momentum_model.get_williams_percent_r(
             historical_data["High"],
@@ -1906,7 +2112,7 @@ class Technicals:
         The Aroon Indicator is an oscillator that measures the strength of a trend and the
         likelihood of its continuation or reversal.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Aroon Up = ((Number of periods) — (Number of periods since highest high)) / (Number of periods) * 100
 
@@ -1914,7 +2120,9 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
+            close_column (str, optional): The column name for closing prices in the historical data.
+                Defaults to "Adj Close".
             window (int, optional): The number of periods for calculating the Aroon Indicator.
                 Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -1922,10 +2130,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -1942,25 +2150,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_aroon_indicator().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_aroon_indicator().xs("GCUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Aroon Down |   Aroon Up |
         |:-----------|-------------:|-----------:|
-        | 2026-06-18 |      50      |    64.2857 |
-        | 2026-06-22 |      57.1429 |    71.4286 |
-        | 2026-06-23 |      64.2857 |    78.5714 |
-        | 2026-06-24 |      71.4286 |    85.7143 |
-        | 2026-06-25 |       7.1429 |    92.8571 |
-        | 2026-06-26 |      14.2857 |   100      |
-        | 2026-06-29 |      21.4286 |    42.8571 |
-        | 2026-06-30 |      28.5714 |    50      |
-        | 2026-07-01 |      35.7143 |    57.1429 |
-        | 2026-07-02 |      42.8571 |     7.1429 |
+        | 2025-12-26 |       0      |   100      |
+        | 2025-12-28 |       0      |    92.8571 |
+        | 2025-12-29 |       0      |    85.7143 |
+        | 2025-12-30 |      14.2857 |    78.5714 |
+        | 2025-12-31 |     100      |    71.4286 |
         """
         if period not in [
             "intraday",
@@ -1980,7 +2188,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         aroon_indicator_dict = {}
 
@@ -2027,7 +2235,7 @@ class Technicals:
         The Commodity Channel Index is an oscillator that measures the current price level
         relative to an average price level over a specified period.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - CCI = (Typical Price — SMA(Typical Price)) / (constant * Mean Deviation)
 
@@ -2035,9 +2243,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
-                the closing prices. Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods for calculating the CCI.
                 Defaults to 14.
             constant (float, optional): Constant multiplier used in the CCI calculation.
@@ -2047,10 +2256,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Commodity Channel Index (CCI) values.
@@ -2066,25 +2275,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["CLUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_commodity_channel_index()
+        toolkit.technicals.get_commodity_channel_index().tail(5)
         ```
 
         Which returns:
 
-        | Date       |      AAPL |     MSFT |   Benchmark |
-        |:-----------|----------:|---------:|------------:|
-        | 2026-06-18 |  -29.8087 | -96.1785 |      0.3891 |
-        | 2026-06-22 |  -18.6411 | -97.7637 |      4.5369 |
-        | 2026-06-23 |  -28.0495 | -75.0122 |    -75.9764 |
-        | 2026-06-24 |  -31.5076 | -70.1223 |    -67.2592 |
-        | 2026-06-25 | -146.597  | -87.7738 |    -56.5227 |
-        | 2026-06-26 | -101.005  | -42.5782 |   -105.047  |
-        | 2026-06-29 |  -67.6738 | -31.457  |    -11.134  |
-        | 2026-06-30 |  -42.7183 | -21.1814 |     50.4596 |
-        | 2026-07-01 |   11.4352 |  12.9724 |     53.1052 |
-        | 2026-07-02 |  102.962  |  33.0344 |     43.6351 |
+        | Date       |   CLUSD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-26 | 15.2689 |    120.245  |
+        | 2025-12-28 | -1.512  |     88.9846 |
+        | 2025-12-29 | 51.2665 |     60.685  |
+        | 2025-12-30 | 69.184  |     49.5715 |
+        | 2025-12-31 | 38.1997 |     -1.7385 |
         """
         if period not in [
             "intraday",
@@ -2104,7 +2313,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         commodity_channel_index = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -2140,7 +2349,7 @@ class Technicals:
         self,
         period: str = "daily",
         close_column: str = "Adj Close",
-        window: int = 14,
+        window: int = 10,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -2149,38 +2358,45 @@ class Technicals:
         """
         Calculate the Relative Vigor Index (RVI) for a given price series.
 
-        The Relative Vigor Index is an oscillator that measures the conviction of a current price
-        trend using the relationship between closing and opening prices.
+        The Relative Vigor Index measures the conviction behind a move by comparing where each
+        period closes relative to its open with the period's full high-low range: in an uptrend
+        prices tend to close above their open, in a downtrend below it.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - RVI = Sum(Upward Close-Open Movement, window) / (Sum(Upward Close-Open Movement, window)
-          + Sum(Downward Close-Open Movement, window))
+        - Numerator = (Close — Open) smoothed with the symmetric weights 1, 2, 2, 1 over the
+          current and three prior periods, divided by 6
+        - Denominator = (High — Low) smoothed with the same weights
+        - RVI = SMA(Numerator, window) / SMA(Denominator, window)
+        - Signal Line = RVI smoothed with the same symmetric weights
 
-        Also known as: vigor index. Note this is a bounded [0, 1] measure of the proportion
-        of upward close-open movement, related in spirit to (but not numerically the same
-        as) John Ehlers' published Relative Vigor Index. See `momentum_model.get_relative_vigor_index`
-        for the full formula and caveats.
+        The RVI usually lies between -1 and 1 and is positive when closes sit above opens.
+        Crossovers of the RVI and its signal line are the usual trigger, and a divergence from
+        price warns that a move lacks conviction. See `momentum_model.get_relative_vigor_index`
+        for the full formula.
+
+        Also known as: RVI, RVGI, vigor index.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
-                the closing prices. Defaults to "Adj Close".
-            window (int, optional): The number of periods for calculating the RVI.
-                Defaults to 14.
+                the closing prices. Defaults to "Adj Close", in which case the open, high and
+                low prices are adjusted for dividends in the same way.
+            window (int, optional): The number of periods for the averages of the numerator
+                and denominator. Defaults to 10, Ehlers' setting.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
-            pd.Series or pd.DataFrame: Relative Vigor Index (RVI) values.
+            pd.Series or pd.DataFrame: Relative Vigor Index and Signal Line values.
 
         Notes:
         - The method retrieves historical data based on the specified `period` and calculates
@@ -2193,25 +2409,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^HSI"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_relative_vigor_index()
+        toolkit.technicals.get_relative_vigor_index().xs("^HSI", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |   MSFT |   Benchmark |
-        |:-----------|-------:|-------:|------------:|
-        | 2026-06-18 | 0.4036 | 0.0663 |      0.4484 |
-        | 2026-06-22 | 0.4352 | 0.0626 |      0.3655 |
-        | 2026-06-23 | 0.2163 | 0.091  |      0.319  |
-        | 2026-06-24 | 0.2251 | 0.0984 |      0.3306 |
-        | 2026-06-25 | 0.1793 | 0.095  |      0.2203 |
-        | 2026-06-26 | 0.397  | 0.4174 |      0.2946 |
-        | 2026-06-29 | 0.4175 | 0.3712 |      0.4362 |
-        | 2026-06-30 | 0.7891 | 0.4475 |      0.6846 |
-        | 2026-07-01 | 0.7922 | 0.5237 |      0.9267 |
-        | 2026-07-02 | 1.1745 | 0.7045 |      0.5225 |
+        | Date       |   Relative Vigor Index |   Signal Line |
+        |:-----------|-----------------------:|--------------:|
+        | 2025-12-24 |                -0.0322 |       -0.0822 |
+        | 2025-12-26 |                 0.0098 |       -0.0505 |
+        | 2025-12-29 |                -0.0084 |       -0.0215 |
+        | 2025-12-30 |                -0.0505 |       -0.0133 |
+        | 2025-12-31 |                -0.0627 |       -0.0285 |
         """
         if period not in [
             "intraday",
@@ -2231,13 +2447,24 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
-        relative_vigor_index = momentum_model.get_relative_vigor_index(
-            historical_data["Open"],
-            historical_data[close_column],
-            window,
-        ).loc[self._start_date : self._end_date]
+        relative_vigor_index_dict = {}
+
+        for ticker in historical_data[close_column].columns:
+            relative_vigor_index_dict[ticker] = momentum_model.get_relative_vigor_index(
+                historical_data["Open"][ticker],
+                historical_data["High"][ticker],
+                historical_data["Low"][ticker],
+                historical_data[close_column][ticker],
+                window,
+            ).loc[self._start_date : self._end_date]
+
+        relative_vigor_index = (
+            pd.concat(relative_vigor_index_dict, axis=1)
+            .swaplevel(1, 0, axis=1)
+            .sort_index(axis=1)
+        )
 
         return finalize_dataset(
             dataset=relative_vigor_index,
@@ -2258,7 +2485,7 @@ class Technicals:
         self,
         period: str = "daily",
         close_column: str = "Adj Close",
-        window: int = 14,
+        window: int = 13,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -2269,7 +2496,7 @@ class Technicals:
 
         The Force Index is an indicator that measures the strength behind price movements.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Raw Force Index = (Close — Close(1)) * Volume
         - Force Index = EMA(Raw Force Index, window)
@@ -2278,20 +2505,21 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
                 the closing prices. Defaults to "Adj Close".
-            window (int, optional): The number of periods for calculating the Force Index.
-                Defaults to 14.
+            window (int, optional): The number of periods of the EMA that smooths the raw
+                Force Index. Defaults to 13, Elder's setting for the trend (2 is his setting
+                for timing entries).
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Force Index values.
@@ -2307,25 +2535,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["TLT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_force_index()
+        toolkit.technicals.get_force_index().tail(5)
         ```
 
         Which returns:
 
-        | Date       |         AAPL |         MSFT |    Benchmark |
-        |:-----------|-------------:|-------------:|-------------:|
-        | 2026-06-18 |  1.5469e+09  |  2.64103e+08 |  5.23308e+09 |
-        | 2026-06-22 | -7.46954e+08 | -6.39817e+09 | -2.13467e+09 |
-        | 2026-06-23 | -2.04451e+09 |  3.52532e+09 | -1.02007e+10 |
-        | 2026-06-24 | -9.23144e+08 | -4.57591e+09 | -3.22888e+08 |
-        | 2026-06-25 | -1.46857e+10 | -7.31369e+09 |  1.01111e+09 |
-        | 2026-06-26 |  8.76398e+09 |  1.47121e+10 | -4.94319e+09 |
-        | 2026-06-29 | -2.04817e+09 | -3.2984e+09  |  1.1285e+10  |
-        | 2026-06-30 |  7.61233e+09 |  3.37872e+09 |  5.23673e+09 |
-        | 2026-07-01 |  5.00175e+09 |  8.72373e+09 | -9.03283e+08 |
-        | 2026-07-02 |  1.4666e+10  |  4.77999e+09 | -8.48204e+08 |
+        | Date       |               TLT |    Benchmark |
+        |:-----------|------------------:|-------------:|
+        | 2025-12-24 |  946514           |  8.27837e+07 |
+        | 2025-12-26 | -287501           |  7.05413e+07 |
+        | 2025-12-29 |       1.09756e+06 |  3.86575e+07 |
+        | 2025-12-30 |  223430           |  2.75431e+07 |
+        | 2025-12-31 |      -3.35421e+06 | -2.98818e+07 |
         """
         if period not in [
             "intraday",
@@ -2386,7 +2614,7 @@ class Technicals:
         The Ultimate Oscillator is a momentum oscillator that combines short-term, mid-term,
         and long-term price momentum into a single value.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Average(i) = Sum(Buying Pressure, window_i) / Sum(True Range, window_i)
         - Ultimate Oscillator = 100 * [(4 * Average_1) + (2 * Average_2) + Average_3] / 7
@@ -2397,9 +2625,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
-                the closing prices. Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window_1 (int, optional): The number of periods for the first short-term window.
                 Defaults to 7.
             window_2 (int, optional): The number of periods for the second mid-term window.
@@ -2411,10 +2640,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Ultimate Oscillator values.
@@ -2430,25 +2659,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^GDAXI"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_ultimate_oscillator()
+        toolkit.technicals.get_ultimate_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |    MSFT |   Benchmark |
-        |:-----------|-------:|--------:|------------:|
-        | 2026-06-18 | 5.7264 |  1.4313 |      5.7432 |
-        | 2026-06-22 | 5.7478 |  0.3073 |      5.6389 |
-        | 2026-06-23 | 4.1905 |  1.5815 |      3.88   |
-        | 2026-06-24 | 3.6773 |  1.0805 |      2.8505 |
-        | 2026-06-25 | 0.392  | -0.874  |      1.6945 |
-        | 2026-06-26 | 1.0483 |  0.9805 |      2.1519 |
-        | 2026-06-29 | 1.9469 |  2.2386 |      4.6356 |
-        | 2026-06-30 | 3.0712 |  3.2361 |      5.7923 |
-        | 2026-07-01 | 4.2231 |  4.5312 |      6.0908 |
-        | 2026-07-02 | 5.615  |  5.5004 |      6.4095 |
+        | Date       |   ^GDAXI |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-24 |  56.3876 |     57.6018 |
+        | 2025-12-26 |  60.8708 |     57.097  |
+        | 2025-12-29 |  69.7344 |     64.6179 |
+        | 2025-12-30 |  67.8468 |     66.1075 |
+        | 2025-12-31 | nan      |     53.9197 |
         """
         if period not in [
             "intraday",
@@ -2468,7 +2697,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         ultimate_oscillator = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -2502,8 +2731,8 @@ class Technicals:
         self,
         period: str = "daily",
         close_column: str = "Adj Close",
-        short_window: int = 7,
-        long_window: int = 28,
+        short_window: int = 12,
+        long_window: int = 26,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -2515,30 +2744,35 @@ class Technicals:
         The Percentage Price Oscillator (PPO) is a momentum oscillator that measures the
         difference between two moving averages as a percentage of the longer moving average.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - PPO = ((Long-term EMA — Short-term EMA) / Short—term EMA) * 100
+        - PPO = ((Short-term EMA — Long-term EMA) / Long-term EMA) * 100
+
+        The PPO is the MACD line as a percentage of the long EMA, so unlike the MACD its level
+        can be compared across stocks and over long periods. The usual signal line is the
+        9-period EMA of the PPO; it is not returned here and can be calculated from the result,
+        for example with `get_exponential_moving_average` of the `overlap_model`.
 
         Also known as: PPO, price oscillator.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
                 the closing prices. Defaults to "Adj Close".
             short_window (int, optional): The number of periods for the short-term moving average.
-                Defaults to 7.
+                Defaults to 12, as for MACD.
             long_window (int, optional): The number of periods for the long-term moving average.
-                Defaults to 28.
+                Defaults to 26, as for MACD.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Percentage Price Oscillator (PPO) values.
@@ -2554,25 +2788,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^STOXX50E", "^GSPC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_percentage_price_oscillator()
+        toolkit.technicals.get_percentage_price_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 |  0.1732 | -4.0561 |      0.6878 |
-        | 2026-06-22 |  0.14   | -4.8668 |      0.6275 |
-        | 2026-06-23 | -0.0508 | -5.0611 |      0.3105 |
-        | 2026-06-24 | -0.2579 | -5.5078 |      0.0753 |
-        | 2026-06-25 | -1.5005 | -6.3251 |     -0.0644 |
-        | 2026-06-26 | -1.8165 | -5.8609 |     -0.2913 |
-        | 2026-06-29 | -2.1348 | -5.645  |     -0.15   |
-        | 2026-06-30 | -1.848  | -5.1917 |      0.0925 |
-        | 2026-07-01 | -1.304  | -4.2572 |      0.2353 |
-        | 2026-07-02 | -0.022  | -3.2398 |      0.3068 |
+        | Date       |   ^STOXX50E |   ^GSPC |   Benchmark |
+        |:-----------|------------:|--------:|------------:|
+        | 2025-12-24 |      0.4778 |  0.4289 |      0.4587 |
+        | 2025-12-26 |      0.4709 |  0.4902 |      0.5219 |
+        | 2025-12-29 |      0.4612 |  0.5044 |      0.5366 |
+        | 2025-12-30 |      0.5102 |  0.4986 |      0.5321 |
+        | 2025-12-31 |      0.5102 |  0.4295 |      0.4632 |
         """
         if period not in [
             "intraday",
@@ -2631,7 +2865,7 @@ class Technicals:
         The Detrended Price Oscillator (DPO) is an indicator that helps identify short-term cycles
         by removing longer-term trends from prices.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Displacement = floor(Number of Periods / 2) + 1
         - DPO = Close(t — Displacement) — SMA(Close, Number of Periods)(t)
@@ -2642,7 +2876,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
                 the closing prices. Defaults to "Adj Close".
             window (int, optional): The number of periods to consider for the DPO calculation.
@@ -2652,10 +2886,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Detrended Price Oscillator (DPO) values.
@@ -2671,25 +2905,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["NGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_detrended_price_oscillator()
+        toolkit.technicals.get_detrended_price_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |     AAPL |     MSFT |   Benchmark |
-        |:-----------|---------:|---------:|------------:|
-        | 2026-06-18 | -16.7529 | -21.8536 |    -11.8786 |
-        | 2026-06-22 | -14.9607 | -26.2107 |    -22.3686 |
-        | 2026-06-23 | -10.2421 | -31.1771 |     -9.6843 |
-        | 2026-06-24 | -13.4786 | -28.7893 |     -5.4164 |
-        | 2026-06-25 |  -7.3379 | -18.6071 |      7.3607 |
-        | 2026-06-26 |  -3.6886 | -23.1914 |      2.87   |
-        | 2026-06-29 |  -5.7957 | -34.6771 |     -5.5257 |
-        | 2026-06-30 |  -2.7321 | -29.1271 |      0.95   |
-        | 2026-07-01 |  -3.0679 | -34.5314 |     -0.3893 |
-        | 2026-07-02 |  -4.285  | -23.1193 |     -9.3429 |
+        | Date       |   NGUSD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-26 | -0.0693 |    -12.8207 |
+        | 2025-12-28 | -0.155  |     -7.9386 |
+        | 2025-12-29 | -0.0764 |     -2.4429 |
+        | 2025-12-30 | -0.0021 |     -0.8893 |
+        | 2025-12-31 | -0.0493 |      0.9886 |
         """
         if period not in [
             "intraday",
@@ -2746,18 +2980,25 @@ class Technicals:
         The Average Directional Index (ADX) is an indicator that measures the strength of a trend,
         whether it's an uptrend or a downtrend.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - ADX = Wilder's Smoothed Moving Average of DX, where DX = 100 * |+DI — -DI| / (+DI + -DI)
+
+        The ADX measures trend strength, not direction: a reading above about 25 is usually taken as a
+        trending market and below 20 as a range, whether prices are rising or falling. Traders combine it
+        with the +DI and -DI lines it is built from, which this method does not return, or with the price
+        itself, to know the direction. With Wilder's smoothing it reacts slowly and needs a few times the
+        window of history before its values settle.
 
         Also known as: ADX, trend strength indicator. See `momentum_model.get_average_directional_index`
         for the full formula, which uses Wilder's smoothing (not a plain SMA) throughout.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
-                the closing prices. Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods to consider for the ADX calculation.
                 Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -2765,10 +3006,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series: Average Directional Index (ADX) values.
@@ -2784,25 +3025,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["USDJPY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_average_directional_index()
+        toolkit.technicals.get_average_directional_index().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 31.7885 | 26.0482 |     24.8516 |
-        | 2026-06-22 | 28.0539 | 27.1817 |     25.2744 |
-        | 2026-06-23 | 25.3719 | 29.9043 |     25.3022 |
-        | 2026-06-24 | 23.5607 | 33.0223 |     26.3917 |
-        | 2026-06-25 | 23.3155 | 36.6469 |     28.5969 |
-        | 2026-06-26 | 24.2698 | 40.1891 |     31.1122 |
-        | 2026-06-29 | 25.7674 | 43.281  |     33.5671 |
-        | 2026-06-30 | 27.545  | 44.9576 |     33.0473 |
-        | 2026-07-01 | 27.4563 | 45.3851 |     31.753  |
-        | 2026-07-02 | 27.743  | 43.8357 |     30.2519 |
+        | Date       |   USDJPY |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-26 |  12.9299 |     17.7945 |
+        | 2025-12-28 |  12.0721 |     18.0251 |
+        | 2025-12-29 |  11.4398 |     17.7259 |
+        | 2025-12-30 |  11.0738 |     17.448  |
+        | 2025-12-31 |  10.4431 |     16.6228 |
         """
         if period not in [
             "intraday",
@@ -2822,7 +3063,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         average_directional_index = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -2868,16 +3109,16 @@ class Technicals:
         The Chande Momentum Oscillator is an indicator that measures the momentum of a price
         series and identifies overbought and oversold conditions.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - CMO = ((Sum of Upward Change) — (Sum of Downward Change)) / ((Sum of Upward Change)
-            + (Sum of Downward Change))
+        - CMO = 100 * ((Sum of Upward Change) — (Sum of Downward Change)) / ((Sum of Upward Change)
+            + (Sum of Downward Change)), bounded between -100 and 100.
 
         Also known as: CMO, Chande momentum.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column in the historical data that represents
                 the closing prices. Defaults to "Adj Close".
             window (int, optional): The number of periods to consider for the CMO calculation.
@@ -2887,10 +3128,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Chande Momentum Oscillator values.
@@ -2906,25 +3147,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SIUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_chande_momentum_oscillator()
+        toolkit.technicals.get_chande_momentum_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |     AAPL |     MSFT |   Benchmark |
-        |:-----------|---------:|---------:|------------:|
-        | 2026-06-18 | -21.8609 | -62.8906 |    -10.2182 |
-        | 2026-06-22 | -15.625  | -81.4368 |    -14.7997 |
-        | 2026-06-23 | -39.1826 | -66.1723 |    -24.6608 |
-        | 2026-06-24 | -34.6231 | -64.2442 |    -20.9163 |
-        | 2026-06-25 | -54.1904 | -69.4937 |    -23.1112 |
-        | 2026-06-26 | -33.0342 | -37.3504 |    -10.1446 |
-        | 2026-06-29 | -29.3073 | -37.0653 |      1.8792 |
-        | 2026-06-30 |  -1.8539 | -26.9917 |      9.8861 |
-        | 2026-07-01 |   4.1068 | -11.1036 |     23.1787 |
-        | 2026-07-02 |  16.5859 |   0.1282 |      9.1933 |
+        | Date       |   SIUSD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-26 | 59.7782 |     11.8161 |
+        | 2025-12-28 | 57.6324 |      4.8651 |
+        | 2025-12-29 | 26.3815 |     23.9571 |
+        | 2025-12-30 | 38.9752 |     22.7863 |
+        | 2025-12-31 | 15.4986 |      8.2769 |
         """
         if period not in [
             "intraday",
@@ -2984,7 +3225,7 @@ class Technicals:
         defines support and resistance, identifies trend direction, gauges momentum, and provides
         trading signals.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Conversion Line = (Highest High + Lowest Low) / 2, over conversion_window periods
         - Base Line = (Highest High + Lowest Low) / 2, over base_window periods
@@ -2992,13 +3233,22 @@ class Technicals:
         - Leading Span B = (Highest High + Lowest Low) / 2 over lead_span_b_window periods,
           shifted forward base_window periods
 
+        Price above the cloud is read as an uptrend and below it as a downtrend, with the cloud itself
+        as support or resistance; a thick cloud is stronger support than a thin one. The leading spans
+        are shifted forward by the base window, so the cloud value shown on a date was calculated
+        base_window periods (26 by default) earlier from the data then available. The method returns the
+        Conversion and Base Lines and the two Leading Spans but not the Lagging Span (the close shifted
+        back), which would report a future close on each date.
+
         Also known as: Ichimoku Kinko Hyo, cloud indicator. The default windows (9, 26, 52)
         are Goichi Hosoda's original values, both leading spans are conventionally displaced
         forward by the base (Kijun-sen) period.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
+            close_column (str, optional): The column name for closing prices in the historical data.
+                Defaults to "Adj Close".
             conversion_window (int, optional): The number of periods to consider for the
                 Conversion Line (Tenkan-sen) calculation. Defaults to 9.
             base_window (int, optional): The number of periods to consider for the Base Line
@@ -3011,10 +3261,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -3025,31 +3275,34 @@ class Technicals:
           the Ichimoku Cloud values for each asset in the Toolkit instance.
         - If `growth` is set to True, the method calculates the growth of the indicator values
           using the specified `lag`.
+        - The leading spans are shifted forward by exactly `base_window` periods, as StockCharts
+          defines the cloud. Platforms that count the current period as the first of the 26
+          shift by `base_window` - 1 and show the same values one period earlier.
 
         As an example:
 
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^N225"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_ichimoku_cloud().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_ichimoku_cloud().xs("^N225", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Base Line |   Conversion Line |   Leading Span A |   Leading Span B |
         |:-----------|------------:|------------------:|-----------------:|-----------------:|
-        | 2026-06-18 |     302.39  |           302.39  |          307.225 |          286.8   |
-        | 2026-06-22 |     302.39  |           294.9   |          306.55  |          287.03  |
-        | 2026-06-23 |     302.39  |           294.9   |          302.59  |          287.295 |
-        | 2026-06-24 |     302.39  |           296.005 |          302.39  |          287.605 |
-        | 2026-06-25 |     295.575 |           288.085 |          302.39  |          289.335 |
-        | 2026-06-26 |     295.575 |           288.085 |          302.39  |          291.235 |
-        | 2026-06-29 |     295.575 |           288.085 |          302.39  |          291.235 |
-        | 2026-06-30 |     295.575 |           288.085 |          302.39  |          291.235 |
-        | 2026-07-01 |     295.575 |           288.085 |          302.39  |          291.235 |
-        | 2026-07-02 |     295.575 |           291.585 |          302.39  |          291.235 |
+        | 2025-12-25 |     49808.9 |           49640.4 |          49824   |          48044.8 |
+        | 2025-12-26 |     49808.9 |           49792.8 |          49969.9 |          48072.9 |
+        | 2025-12-29 |     49814.3 |           49792.8 |          49969.9 |          48253.7 |
+        | 2025-12-30 |     49819.8 |           49792.8 |          50111.6 |          48497.3 |
+        | 2025-12-31 |       nan   |             nan   |          50111.6 |          48497.3 |
         """
         if period not in [
             "intraday",
@@ -3069,7 +3322,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         ichimoku_cloud_dict = {}
 
@@ -3122,7 +3375,7 @@ class Technicals:
         relative to the high-low range over a set number of periods. It consists of the %K line
         (fast) and the %D line (slow).
 
-        The formula is a follows:
+        The formula is as follows:
 
         - %K = 100 * ((Close — Lowest Low) / (Highest High — Lowest Low))
         - %D = SMA(%K, smooth_window)
@@ -3131,9 +3384,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods to consider for the %K line calculation.
                 Defaults to 14.
             smooth_window (int, optional): The number of periods used to smooth the %K line
@@ -3169,25 +3423,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GBPUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_stochastic_oscillator().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_stochastic_oscillator().xs("GBPUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Stochastic %D |   Stochastic %K |
         |:-----------|----------------:|----------------:|
-        | 2026-06-18 |         34.4881 |         35.4097 |
-        | 2026-06-22 |         32.012  |         32.0786 |
-        | 2026-06-23 |         30.1799 |         23.0513 |
-        | 2026-06-24 |         24.7058 |         18.9873 |
-        | 2026-06-25 |         15.082  |          3.2073 |
-        | 2026-06-26 |         15.0576 |         22.9782 |
-        | 2026-06-29 |         18.0181 |         27.8689 |
-        | 2026-06-30 |         35.0981 |         54.4472 |
-        | 2026-07-01 |         51.4243 |         71.9567 |
-        | 2026-07-02 |         74.7297 |         97.7853 |
+        | 2025-12-26 |         85.0072 |         83.2421 |
+        | 2025-12-28 |         83.9852 |         83.2421 |
+        | 2025-12-29 |         83.2421 |         83.2421 |
+        | 2025-12-30 |         79.3458 |         71.5532 |
+        | 2025-12-31 |         75.4495 |         71.5532 |
         """
         if smooth_widow is not None:
             warnings.warn(
@@ -3221,7 +3475,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         stochastic_oscillator_dict = {}
 
@@ -3274,18 +3528,24 @@ class Technicals:
 
         The Moving Average Convergence Divergence (MACD) is a trend-following momentum indicator
         that shows the relationship between two moving averages of a security's price. It consists
-        of the MACD line, signal line, and MACD histogram.
+        of the MACD line and its signal line; their difference is the MACD histogram.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - MACD Line = Short-term EMA — Long-term EMA
-        - Signal Line = SMA(MACD Line)
+        - MACD Line = EMA(Close, short_window) — EMA(Close, long_window)
+        - Signal Line = EMA(MACD Line, signal_window)
+
+        The MACD line crossing its signal line is the usual trigger, and the MACD crossing zero means
+        the short average has crossed the long one. Because the MACD is a price difference, its level
+        scales with the share price and cannot be compared across stocks; the Percentage Price Oscillator
+        divides by the long average for that. Both lines lag price, so crossovers come late in fast
+        reversals.
 
         Also known as: MACD, momentum indicator.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             short_window (int, optional): The number of periods for the shorter moving average.
@@ -3299,10 +3559,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the MACD and signal values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -3319,25 +3579,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2024-10-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_moving_average_convergence_divergence().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_moving_average_convergence_divergence().xs("MSFT", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   MACD Line |   Signal Line |
         |:-----------|------------:|--------------:|
-        | 2026-06-18 |      1.1803 |        3.2153 |
-        | 2026-06-22 |      0.9697 |        2.7662 |
-        | 2026-06-23 |      0.5776 |        2.3285 |
-        | 2026-06-24 |      0.1664 |        1.8961 |
-        | 2026-06-25 |     -1.588  |        1.1993 |
-        | 2026-06-26 |     -2.2559 |        0.5082 |
-        | 2026-06-29 |     -2.9163 |       -0.1767 |
-        | 2026-06-30 |     -2.7926 |       -0.6999 |
-        | 2026-07-01 |     -2.2633 |       -1.0125 |
-        | 2026-07-02 |     -0.6862 |       -0.9473 |
+        | 2025-12-24 |     -3.02   |       -4.8167 |
+        | 2025-12-26 |     -2.5054 |       -4.3544 |
+        | 2025-12-29 |     -2.122  |       -3.908  |
+        | 2025-12-30 |     -1.7673 |       -3.4798 |
+        | 2025-12-31 |     -1.7752 |       -3.1389 |
         """
         if period not in [
             "intraday",
@@ -3405,15 +3665,21 @@ class Technicals:
         change of price movements. It ranges from 0 to 100 and is used to identify overbought or
         oversold conditions in an asset's price.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - RSI = 100 — (100 / (1 + RS))
+
+        Readings above 70 are conventionally read as overbought and below 30 as oversold, but in a
+        strong trend the RSI can stay above 70 or below 30 for weeks, so a crossing is not a signal on
+        its own. Practitioners look more at divergences, a new price high with a lower RSI high, and at
+        the 50 line as a trend filter. The value depends on the window: a shorter window swings more and
+        reaches the extremes more often.
 
         Also known as: RSI, momentum oscillator, overbought, oversold.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): The number of periods for RSI calculation. Defaults to 14.
@@ -3422,10 +3688,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the RSI.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -3442,25 +3708,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["BTCUSD", "ETHUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_relative_strength_index()
+        toolkit.technicals.get_relative_strength_index().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 39.0696 | 18.5547 |     44.8909 |
-        | 2026-06-22 | 42.1875 |  9.2816 |     42.6001 |
-        | 2026-06-23 | 30.4087 | 16.9139 |     37.6696 |
-        | 2026-06-24 | 32.6884 | 17.8779 |     39.5418 |
-        | 2026-06-25 | 22.9048 | 15.2531 |     38.4444 |
-        | 2026-06-26 | 33.4829 | 31.3248 |     44.9277 |
-        | 2026-06-29 | 35.3464 | 31.4673 |     50.9396 |
-        | 2026-06-30 | 49.0731 | 36.5041 |     54.943  |
-        | 2026-07-01 | 52.0534 | 44.4482 |     61.5893 |
-        | 2026-07-02 | 58.2929 | 50.0641 |     54.5966 |
+        | Date       |   BTCUSD |   ETHUSD |   Benchmark |
+        |:-----------|---------:|---------:|------------:|
+        | 2025-12-27 |  44.6846 |  45.0659 |     62.972  |
+        | 2025-12-28 |  44.9649 |  45.241  |     61.2128 |
+        | 2025-12-29 |  42.4043 |  44.276  |     59.4252 |
+        | 2025-12-30 |  47.7803 |  47.2561 |     57.5773 |
+        | 2025-12-31 |  44.643  |  46.9887 |     47.8313 |
         """
         if period not in [
             "intraday",
@@ -3516,7 +3782,7 @@ class Technicals:
         The Balance of Power (BOP) indicator measures the strength of buyers versus sellers
         in the market. It relates the price change to the change in the asset's trading range.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - BOP = (Close — Open) / (High — Low)
 
@@ -3524,18 +3790,19 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the BOP.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -3552,25 +3819,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^FTSE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_balance_of_power()
+        toolkit.technicals.get_balance_of_power().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | -0.0202 |  0.1953 |     -0.2334 |
-        | 2026-06-22 | -0.053  | -0.5769 |     -0.4695 |
-        | 2026-06-23 | -0.4343 |  0.2382 |     -0.0314 |
-        | 2026-06-24 | -0.3373 | -0.4333 |     -0.2119 |
-        | 2026-06-25 | -0.814  | -0.6613 |     -0.4719 |
-        | 2026-06-26 |  0.7479 |  0.7469 |      0.002  |
-        | 2026-06-29 | -0.5857 | -0.4335 |      0.472  |
-        | 2026-06-30 |  0.8864 |  0.297  |      0.7686 |
-        | 2026-07-01 |  0.1272 |  0.2475 |      0.1076 |
-        | 2026-07-02 |  0.9219 |  0.7071 |     -0.2323 |
+        | Date       |   ^FTSE |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | -0.5953 |      0.802  |
+        | 2025-12-26 | -0.3466 |     -0.1381 |
+        | 2025-12-29 | -0.1212 |      0.099  |
+        | 2025-12-30 |  0.7846 |     -0.2222 |
+        | 2025-12-31 | -0.279  |     -0.9239 |
         """
         if period not in [
             "intraday",
@@ -3590,7 +3857,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         balance_of_power = momentum_model.get_balance_of_power(
             historical_data["Open"],
@@ -3633,7 +3900,7 @@ class Technicals:
         and low, rather than the closing price). It was developed by Bill Williams as part of
         his broader "Trading Chaos" collection of momentum indicators.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Median Price = (High + Low) / 2
         - AO = SMA(Median Price, short_window) — SMA(Median Price, long_window)
@@ -3642,7 +3909,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             short_window (int, optional): The number of periods for the short-term SMA of the
@@ -3654,10 +3921,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the AO.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Awesome Oscillator (AO) values.
@@ -3679,25 +3946,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SOLUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_awesome_oscillator()
+        toolkit.technicals.get_awesome_oscillator().tail(5)
         ```
 
         Which returns:
 
-        | Date       |     AAPL |    MSFT |   Benchmark |
-        |:-----------|---------:|--------:|------------:|
-        | 2022-12-16 |  -3.5418 | 11.2131 |      2.3418 |
-        | 2022-12-19 |  -4.8628 |  9.3716 |     -0.5142 |
-        | 2022-12-20 |  -7.3604 |  5.5371 |     -5.2622 |
-        | 2022-12-21 |  -8.7804 |  1.9144 |     -8.5319 |
-        | 2022-12-22 |  -9.8319 | -1.2635 |    -11.0124 |
-        | 2022-12-23 | -10.5435 | -3.8732 |    -11.8451 |
-        | 2022-12-27 | -10.9665 | -5.1579 |    -11.8737 |
-        | 2022-12-28 | -11.2666 | -6.1431 |    -11.8561 |
-        | 2022-12-29 | -12.1821 | -7.321  |    -12.6508 |
-        | 2022-12-30 | -12.5038 | -7.2199 |    -12.3585 |
+        | Date       |   SOLUSD |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-27 |  -8.9048 |      8.1464 |
+        | 2025-12-28 |  -8.6621 |      7.9295 |
+        | 2025-12-29 |  -7.5992 |      7.0338 |
+        | 2025-12-30 |  -6.6618 |      6.2715 |
+        | 2025-12-31 |  -5.546  |      4.9234 |
         """
         if period not in [
             "intraday",
@@ -3717,7 +3984,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         awesome_oscillator = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -3764,7 +4031,7 @@ class Technicals:
         crossovers signal potential trend changes: VI+ above VI- suggests an uptrend is in
         control, VI- above VI+ suggests a downtrend is in control.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - VM+ = |High(t) — Low(t-1)|
         - VM- = |Low(t) — High(t-1)|
@@ -3775,9 +4042,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods to sum the directional movement and
                 true range over. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -3785,10 +4053,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the VI+ and VI- values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -3807,25 +4075,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AUDUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_vortex_indicator().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_vortex_indicator().xs("AUDUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |    VI+ |    VI- |
         |:-----------|-------:|-------:|
-        | 2022-12-16 | 0.7841 | 1.0588 |
-        | 2022-12-19 | 0.7914 | 1.0685 |
-        | 2022-12-20 | 0.7615 | 1.1866 |
-        | 2022-12-21 | 0.6978 | 1.1025 |
-        | 2022-12-22 | 0.6841 | 1.1164 |
-        | 2022-12-23 | 0.6603 | 1.1994 |
-        | 2022-12-27 | 0.693  | 1.1657 |
-        | 2022-12-28 | 0.687  | 1.105  |
-        | 2022-12-29 | 0.6859 | 1.0921 |
-        | 2022-12-30 | 0.6736 | 1.1363 |
+        | 2025-12-26 | 1.1414 | 0.9189 |
+        | 2025-12-28 | 1.1667 | 0.8882 |
+        | 2025-12-29 | 1.1118 | 0.8882 |
+        | 2025-12-30 | 1.1094 | 0.8691 |
+        | 2025-12-31 | 1.058  | 0.9068 |
         """
         if period not in [
             "intraday",
@@ -3845,7 +4113,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         vortex_indicator_dict = {}
 
@@ -3896,7 +4164,7 @@ class Technicals:
         how far the high extends above the EMA (buying pressure), while Bear Power captures how
         far the low extends below the EMA (selling pressure).
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Bull Power = High — EMA(Close, window)
         - Bear Power = Low — EMA(Close, window)
@@ -3905,9 +4173,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): The number of periods for the EMA used as the trend baseline.
                 Defaults to 13, as originally proposed by Elder.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -3915,10 +4184,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Bull and Bear Power.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -3939,25 +4208,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["HGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_elder_ray_index().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_elder_ray_index().xs("HGUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Bear Power |   Bull Power |
         |:-----------|-------------:|-------------:|
-        | 2022-12-16 |      -6.837  |      -2.917  |
-        | 2022-12-19 |      -7.8589 |      -3.9789 |
-        | 2022-12-20 |      -8.089  |      -4.729  |
-        | 2022-12-21 |      -4.6449 |      -0.5849 |
-        | 2022-12-22 |      -6.1399 |      -1.8799 |
-        | 2022-12-23 |      -5.9285 |      -3.1485 |
-        | 2022-12-27 |      -5.8444 |      -3.1544 |
-        | 2022-12-28 |      -7.2695 |      -2.1095 |
-        | 2022-12-29 |      -4.6924 |      -1.9424 |
-        | 2022-12-30 |      -4.4235 |      -1.9035 |
+        | 2025-12-26 |       0.1172 |       0.3357 |
+        | 2025-12-28 |       0.1601 |       0.3185 |
+        | 2025-12-29 |      -0.0356 |       0.3307 |
+        | 2025-12-30 |      -0.0892 |       0.1712 |
+        | 2025-12-31 |       0.0046 |       0.1455 |
         """
         if period not in [
             "intraday",
@@ -3977,7 +4246,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         elder_ray_index_dict = {}
 
@@ -4029,7 +4298,7 @@ class Technicals:
         `window` periods ago (upward momentum), while negative values indicate price is
         lower (downward momentum).
 
-        The formula is a follows:
+        The formula is as follows:
 
         - ROC = (Close(t) / Close(t - window) — 1) * 100
 
@@ -4037,7 +4306,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods to look back for the rate of change
@@ -4047,10 +4316,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Rate of Change.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Rate of Change values, expressed as a percentage.
@@ -4068,10 +4337,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GCUSD", "SIUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_rate_of_change()
+        toolkit.technicals.get_rate_of_change().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   GCUSD |   SIUSD |   Benchmark |
+        |:-----------|--------:|--------:|------------:|
+        | 2025-12-26 |  5.1845 | 24.496  |      1.5538 |
+        | 2025-12-28 |  4.1063 | 26.2965 |      1.4496 |
+        | 2025-12-29 |  0.1938 | 10.8036 |      1.3453 |
+        | 2025-12-30 |  1.2465 | 23.0575 |      1.4994 |
+        | 2025-12-31 | -0.7499 |  5.5306 |      1.8684 |
         """
         if period not in [
             "intraday",
@@ -4135,7 +4419,7 @@ class Technicals:
         efficiently in one direction, the index is low (near 0), signalling a trending
         market.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - CHOP = 100 * log10( Sum(True Range, window) / (Max(High, window) — Min(Low, window)) ) / log10(window)
 
@@ -4143,9 +4427,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): Number of periods to consider for the Choppiness Index
                 calculation. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -4153,10 +4438,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Choppiness Index.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Choppiness Index values, bounded between 0 and 100.
@@ -4177,10 +4462,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["EURUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_choppiness_index()
+        toolkit.technicals.get_choppiness_index().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   EURUSD |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-26 |  52.4784 |     50.3552 |
+        | 2025-12-28 |  53.5899 |     48.3828 |
+        | 2025-12-29 |  54.145  |     45.0165 |
+        | 2025-12-30 |  58.6754 |     41.7357 |
+        | 2025-12-31 |  54.8842 |     41.2609 |
         """
         if period not in [
             "intraday",
@@ -4200,7 +4500,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         choppiness_index = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -4253,7 +4553,7 @@ class Technicals:
         is used to spot crossovers, in the same way the MACD line is compared to its signal
         line.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - RCMA(i) = SMA(ROC(Close, roc_windows[i]), sma_windows[i])
         - KST = Sum(RCMA(i) * weights[i]) for i = 1..4
@@ -4263,7 +4563,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             roc_windows (list[int] | None, optional): The four lookback periods used for the
@@ -4281,10 +4581,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the KST and Signal Line.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -4303,10 +4603,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^GSPC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_know_sure_thing().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_know_sure_thing().xs("^GSPC", level=1, axis="columns").tail(5)
         ```
+
+        Which returns:
+
+        | Date       |     KST |   Signal Line |
+        |:-----------|--------:|--------------:|
+        | 2025-12-24 | 12.1661 |       12.9719 |
+        | 2025-12-26 | 11.4885 |       12.7129 |
+        | 2025-12-29 | 10.8463 |       12.3296 |
+        | 2025-12-30 | 10.884  |       11.9188 |
+        | 2025-12-31 | 11.0461 |       11.6636 |
         """
         if period not in [
             "intraday",
@@ -4358,6 +4673,7 @@ class Technicals:
             apply_slice=False,
         )
 
+    @handle_errors
     def collect_overlap_indicators(
         self,
         period: str = "daily",
@@ -4373,7 +4689,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             window (int, optional): The window size for calculating indicators.
                 Defaults to 14.
             close_column (str, optional): The name of the column containing the close prices.
@@ -4383,10 +4699,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Overlap-based indicators calculated based on the specified parameters.
@@ -4401,25 +4717,29 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AAPL", "MSFT"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.technicals.collect_overlap_indicators().xs("AAPL", level=1, axis="columns")
         ```
 
         Which returns:
 
-        | Date       |   Simple Moving Average (SMA) |   Exponential Moving Average (EMA) |
-        |:-----------|------------------------------:|-----------------------------------:|
-        | 2026-06-18 |                       300.742 |                            298.807 |
-        | 2026-06-22 |                       300.078 |                            298.567 |
-        | 2026-06-23 |                       298.585 |                            297.998 |
-        | 2026-06-24 |                       297.358 |                            297.342 |
-        | 2026-06-25 |                       294.781 |                            294.383 |
-        | 2026-06-26 |                       293.098 |                            292.969 |
-        | 2026-06-29 |                       291.684 |                            291.472 |
-        | 2026-06-30 |                       291.599 |                            291.191 |
-        | 2026-07-01 |                       291.799 |                            291.616 |
-        | 2026-07-02 |                       292.727 |                            293.884 |
+        | Date       |   Simple Moving Average (SMA) |   Exponential Moving Average (EMA) |   Double Exponential Moving Average (DEMA) |   TRIX |   Triangular Moving Average |   Weighted Moving Average (WMA) |   Hull Moving Average (HMA) |   Kaufman Adaptive Moving Average (KAMA) |   Volume Weighted Average Price (VWAP) |   Parabolic SAR |   Pivot Point |   Pivot Point Resistance 1 |   Pivot Point Support 1 |   Fibonacci Retracement 50.0% |   Fibonacci Retracement 61.8% |
+        |:-----------|------------------------------:|-----------------------------------:|-------------------------------------------:|-------:|----------------------------:|--------------------------------:|----------------------------:|-----------------------------------------:|---------------------------------------:|----------------:|--------------:|---------------------------:|------------------------:|------------------------------:|------------------------------:|
+        | 2025-12-17 |                       277.993 |                            275.523 |                                    275.977 | 0.1587 |                     278.193 |                         276.338 |                     273.323 |                                  274.426 |                                278.186 |         285.71  |       273.223 |                    275.394 |                 271.694 |                       279.37  |                       277.371 |
+        | 2025-12-18 |                       277.518 |                            274.98  |                                    274.903 | 0.1367 |                     277.449 |                         275.466 |                     272.107 |                                  274.289 |                                277.532 |         284.525 |       272.472 |                    274.041 |                 269.533 |                       277.031 |                       274.481 |
+        | 2025-12-19 |                       276.846 |                            274.706 |                                    274.402 | 0.116  |                     276.642 |                         274.854 |                     271.353 |                                  274.166 |                                276.211 |         282.695 |       270.188 |                    274.15  |                 267.489 |                       277.031 |                       274.481 |
+        | 2025-12-22 |                       275.762 |                            274.11  |                                    273.33  | 0.0946 |                     275.788 |                         273.972 |                     270.604 |                                  273.358 |                                275.272 |         281.048 |       271.983 |                    274.799 |                 270.111 |                       277.031 |                       274.481 |
+        | 2025-12-23 |                       274.922 |                            273.778 |                                    272.814 | 0.0747 |                     274.973 |                         273.42  |                     270.19  |                                  273.115 |                                274.464 |         279.566 |       271.049 |                    272.322 |                 268.961 |                       275.091 |                       272.999 |
+        | 2025-12-24 |                       274.432 |                            273.683 |                                    272.766 | 0.0578 |                     274.257 |                         273.173 |                     270.366 |                                  273.112 |                                274.006 |         278.232 |       270.736 |                    272.645 |                 269.713 |                       273.301 |                       271.631 |
+        | 2025-12-26 |                       274.048 |                            273.547 |                                    272.633 | 0.0432 |                     273.637 |                         272.936 |                     270.87  |                                  273.087 |                                273.626 |         277.031 |       273.07  |                    274.679 |                 271.458 |                       272.807 |                       271.254 |
+        | 2025-12-29 |                       273.754 |                            273.476 |                                    272.623 | 0.031  |                     273.126 |                         272.798 |                     271.532 |                                  273.085 |                                273.368 |         275.951 |       273.133 |                    274.147 |                 271.644 |                       272.807 |                       271.254 |
+        | 2025-12-30 |                       273.462 |                            273.324 |                                    272.454 | 0.0204 |                     272.738 |                         272.61  |                     272.005 |                                  273.056 |                                273.119 |         274.978 |       272.748 |                    273.885 |                 271.88  |                       272.807 |                       271.254 |
+        | 2025-12-31 |                       272.969 |                            273.031 |                                    272.022 | 0.0101 |                     272.407 |                         272.298 |                     272.09  |                                  272.894 |                                272.801 |         274.103 |       272.405 |                    273.269 |                 271.474 |                       272.807 |                       271.254 |
         """
         if period not in [
             "intraday",
@@ -4510,20 +4830,21 @@ class Technicals:
 
         self._overlap_indicators = pd.concat(overlap_indicators, axis=1)
 
-        self._overlap_indicators = self._overlap_indicators.round(
-            rounding if rounding else self._rounding
+        self._overlap_indicators = apply_rounding(
+            self._overlap_indicators,
+            rounding if rounding is not None else self._rounding,
         ).loc[self._start_date : self._end_date]
 
         if growth:
             self._overlap_indicators_growth = calculate_growth(
                 dataset=self._overlap_indicators,
                 lag=lag,
-                rounding=rounding if rounding else self._rounding,
+                rounding=rounding if rounding is not None else self._rounding,
                 axis="index",
             )
 
         if standardize:
-            standardize_rounding = rounding if rounding else self._rounding
+            standardize_rounding = rounding if rounding is not None else self._rounding
             if growth:
                 self._overlap_indicators_growth = calculate_standardization(
                     dataset=self._overlap_indicators_growth,
@@ -4568,7 +4889,7 @@ class Technicals:
         The Moving Average (MA) is a commonly used technical indicator that smooths out
         price data by calculating the average price over a specified number of periods.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - MA = (Sum of Prices) / (Number of Prices)
 
@@ -4576,20 +4897,20 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods to consider for the moving average.
-                The number of periods (time intervals) over which to calculate the MA.
+                The number of periods (time intervals) over which to calculate the MA. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the MA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -4606,25 +4927,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^GSPC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_moving_average()
+        toolkit.technicals.get_moving_average(window=50).tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 300.742 | 408.527 |     745.79  |
-        | 2026-06-22 | 300.078 | 401.871 |     744.779 |
-        | 2026-06-23 | 298.585 | 397.059 |     742.923 |
-        | 2026-06-24 | 297.358 | 392.639 |     741.423 |
-        | 2026-06-25 | 294.781 | 387.266 |     739.795 |
-        | 2026-06-26 | 293.098 | 384.145 |     739.184 |
-        | 2026-06-29 | 291.684 | 381.061 |     739.311 |
-        | 2026-06-30 | 291.599 | 378.891 |     740.005 |
-        | 2026-07-01 | 291.799 | 377.956 |     741.457 |
-        | 2026-07-02 | 292.727 | 377.967 |     741.959 |
+        | Date       |   ^GSPC |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | 6784.99 |     669.712 |
+        | 2025-12-26 | 6790.16 |     670.25  |
+        | 2025-12-29 | 6795.7  |     670.828 |
+        | 2025-12-30 | 6800.34 |     671.316 |
+        | 2025-12-31 | 6802.55 |     671.566 |
         """
         if period not in [
             "intraday",
@@ -4681,28 +5002,34 @@ class Technicals:
         EMA is a technical indicator that gives more weight to recent price data,
         providing a smoothed moving average that reacts faster to price changes.
 
-        The formula is a follows:
+        The formula is as follows:
 
+        - First EMA = SMA(Close, Window), on the Window-th period
         - EMA = (Close — Previous EMA) * (2 / (1 + Window)) + Previous EMA
+
+        Seeding with a simple average, as TA-Lib and StockCharts do, leaves the first Window - 1
+        periods of the price history empty. The DEMA, TRIX, MACD, Percentage Price Oscillator,
+        Force Index, Elder Ray Index, Keltner Channels and Chaikin and McClellan Oscillators
+        use the same EMA and start once their own EMAs are seeded.
 
         Also known as: EMA.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for EMA calculation.
-                The number of periods (time intervals) over which to calculate the EMA.
+                The number of periods (time intervals) over which to calculate the EMA. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the EMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -4719,25 +5046,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["ETHUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_exponential_moving_average()
+        toolkit.technicals.get_exponential_moving_average(window=20).tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 298.807 | 400.817 |     744.491 |
-        | 2026-06-22 | 298.567 | 396.353 |     744.477 |
-        | 2026-06-23 | 297.998 | 393.365 |     743.024 |
-        | 2026-06-24 | 297.342 | 389.644 |     741.72  |
-        | 2026-06-25 | 294.383 | 384.736 |     740.73  |
-        | 2026-06-26 | 292.969 | 383.167 |     739.165 |
-        | 2026-06-29 | 291.472 | 381.221 |     739.41  |
-        | 2026-06-30 | 291.191 | 380.127 |     740.391 |
-        | 2026-07-01 | 291.616 | 380.681 |     741.107 |
-        | 2026-07-02 | 293.884 | 381.989 |     741.597 |
+        | Date       |   ETHUSD |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-27 |  2990.19 |     678.205 |
+        | 2025-12-28 |  2986.26 |     678.692 |
+        | 2025-12-29 |  2981.3  |     679.056 |
+        | 2025-12-30 |  2980.26 |     679.306 |
+        | 2025-12-31 |  2978.98 |     679.051 |
         """
         if period not in [
             "intraday",
@@ -4794,28 +5121,30 @@ class Technicals:
         DEMA is a technical indicator that attempts to reduce the lag from traditional
         moving averages by using a combination of two exponential moving averages.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - EMA = (Close — Previous EMA) * (2 / (1 + Window)) + Previous EMA
+        - EMA1 = EMA(Close, Window)
+        - EMA2 = EMA(EMA1, Window)
+        - DEMA = 2 * EMA1 — EMA2
 
         Also known as: DEMA, double EMA.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for moving average calculation.
-                The number of periods (time intervals) over which to calculate the moving average.
+                The number of periods (time intervals) over which to calculate the moving average. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the DEMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -4832,25 +5161,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["QQQ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_double_exponential_moving_average()
+        toolkit.technicals.get_double_exponential_moving_average().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 297.732 | 388.259 |     746.117 |
-        | 2026-06-22 | 297.428 | 381.601 |     745.875 |
-        | 2026-06-23 | 296.518 | 377.99  |     742.977 |
-        | 2026-06-24 | 295.491 | 373.095 |     740.548 |
-        | 2026-06-25 | 290.215 | 366.139 |     738.857 |
-        | 2026-06-26 | 288.132 | 365.69  |     736.185 |
-        | 2026-06-29 | 285.982 | 364.387 |     737.039 |
-        | 2026-06-30 | 286.188 | 364.591 |     739.187 |
-        | 2026-07-01 | 287.649 | 367.696 |     740.684 |
-        | 2026-07-02 | 292.412 | 371.868 |     741.654 |
+        | Date       |     QQQ |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | 616.194 |     679.471 |
+        | 2025-12-26 | 617.773 |     681.229 |
+        | 2025-12-29 | 618.281 |     682.008 |
+        | 2025-12-30 | 618.315 |     682.395 |
+        | 2025-12-31 | 617.052 |     681.416 |
         """
         if period not in [
             "intraday",
@@ -4897,7 +5226,7 @@ class Technicals:
         self,
         period: str = "daily",
         close_column: str = "Adj Close",
-        window: int = 14,
+        window: int = 15,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -4910,7 +5239,7 @@ class Technicals:
         exponentially smoothed moving average. It helps identify overbought and oversold conditions
         in a market.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - EMA1 = EMA(Close, Window)
         - EMA2 = EMA(EMA1, Window)
@@ -4919,22 +5248,25 @@ class Technicals:
 
         Also known as: triple smoothed EMA, rate of change oscillator.
 
+        Reference: Hutson, J. (1983). "TRIX — Triple Exponential Smoothing Oscillator."
+        Technical Analysis of Stocks & Commodities, 1(5).
+
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
-            window (int, optional): Number of periods for moving average calculation.
-                The number of periods (time intervals) over which to calculate the moving average.
+            window (int, optional): The number of periods of each of the three exponential moving
+                averages. Defaults to 15, the window of Hutson (1983) and StockCharts.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the Trix.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -4951,25 +5283,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^IXIC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_trix()
+        toolkit.technicals.get_trix().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 |  0.1364 | -0.1466 |      0.0936 |
-        | 2026-06-22 |  0.1102 | -0.1998 |      0.0849 |
-        | 2026-06-23 |  0.0852 | -0.2492 |      0.0734 |
-        | 2026-06-24 |  0.061  | -0.2982 |      0.0603 |
-        | 2026-06-25 |  0.0242 | -0.3513 |      0.0471 |
-        | 2026-06-26 | -0.0123 | -0.3924 |      0.0325 |
-        | 2026-06-29 | -0.0485 | -0.4254 |      0.0216 |
-        | 2026-06-30 | -0.0765 | -0.4481 |      0.0154 |
-        | 2026-07-01 | -0.0937 | -0.4554 |      0.0122 |
-        | 2026-07-02 | -0.0914 | -0.4477 |      0.0107 |
+        | Date       |   ^IXIC |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 |  0.0367 |      0.0541 |
+        | 2025-12-26 |  0.0402 |      0.0582 |
+        | 2025-12-29 |  0.0432 |      0.062  |
+        | 2025-12-30 |  0.0454 |      0.0651 |
+        | 2025-12-31 |  0.0452 |      0.0661 |
         """
         if period not in [
             "intraday",
@@ -5015,7 +5347,7 @@ class Technicals:
         period: str = "daily",
         close_column: str = "Adj Close",
         window: int = 14,
-        num_std_dev: int = 2,
+        num_std_dev: float = 2,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -5029,7 +5361,7 @@ class Technicals:
         calculated as the moving average plus and minus a specified number of standard deviations,
         respectively.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Middle Band = SMA(Close, Window)
         - Upper Band = Middle Band + (Num Std Dev * Std Dev)
@@ -5039,26 +5371,32 @@ class Technicals:
         Bollinger himself specifies and as TA-Lib and StockCharts both implement, not
         pandas' default sample standard deviation.
 
+        The band width tracks volatility: bands that narrow sharply (a squeeze) often precede a
+        larger move, without saying in which direction. A close at or beyond a band is not a sell
+        or buy signal by itself, since prices can walk along a band in a trend. Bollinger's own
+        setting is a 20-period average with 2 standard deviations; this method defaults to a
+        window of 14, so pass window=20 to match most charting platforms.
+
         Also known as: Bollinger Bands, BB, volatility bands, price channels.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for moving average calculation.
-                The number of periods (time intervals) over which to calculate the moving average.
-            num_std_dev (int, optional): Number of standard deviations for the bands.
+                The number of periods (time intervals) over which to calculate the moving average. Defaults to 14.
+            num_std_dev (float, optional): Number of standard deviations for the bands.
                 Defaults to 2.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the bands.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -5075,25 +5413,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["USDJPY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_bollinger_bands().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_bollinger_bands().xs("USDJPY", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Close |   Lower Band |   Middle Band |   Upper Band |
         |:-----------|--------:|-------------:|--------------:|-------------:|
-        | 2026-06-18 |  298.01 |      284.642 |       300.742 |      316.843 |
-        | 2026-06-22 |  297.01 |      284.201 |       300.078 |      315.955 |
-        | 2026-06-23 |  294.3  |      285.08  |       298.585 |      312.09  |
-        | 2026-06-24 |  293.08 |      285.388 |       297.358 |      309.328 |
-        | 2026-06-25 |  275.15 |      280.386 |       294.781 |      309.176 |
-        | 2026-06-26 |  283.78 |      279.544 |       293.098 |      306.652 |
-        | 2026-06-29 |  281.74 |      277.796 |       291.684 |      305.571 |
-        | 2026-06-30 |  289.36 |      277.667 |       291.599 |      305.53  |
-        | 2026-07-01 |  294.38 |      277.788 |       291.799 |      305.81  |
-        | 2026-07-02 |  308.63 |      276.137 |       292.727 |      309.318 |
+        | 2025-12-26 |  156.5  |      154.489 |       156.076 |      157.664 |
+        | 2025-12-28 |  156.32 |      154.562 |       156.129 |      157.697 |
+        | 2025-12-29 |  156.03 |      154.588 |       156.146 |      157.704 |
+        | 2025-12-30 |  156.33 |      154.627 |       156.179 |      157.732 |
+        | 2025-12-31 |  156.85 |      154.808 |       156.296 |      157.785 |
         """
         if period not in [
             "intraday",
@@ -5159,7 +5497,7 @@ class Technicals:
         The Triangular Moving Average (TMA) is a smoothed version of the Simple Moving Average (SMA)
         that uses multiple SMAs to reduce noise and provide a smoother trendline.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - For an odd window: Sub-window Length = (Window + 1) / 2, applied for both passes.
         - For an even window: the two passes use different sub-window lengths, Window / 2
@@ -5170,20 +5508,20 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for TMA calculation.
-                The number of periods (time intervals) over which to calculate the TMA.
+                The number of periods (time intervals) over which to calculate the TMA. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the TMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Triangular Moving Average values.
@@ -5199,25 +5537,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GLD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_triangular_moving_average()
+        toolkit.technicals.get_triangular_moving_average().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 561.385 | 762.584 |     1392.14 |
-        | 2026-06-22 | 560.145 | 750.16  |     1390.25 |
-        | 2026-06-23 | 557.359 | 741.177 |     1386.79 |
-        | 2026-06-24 | 555.068 | 732.927 |     1383.99 |
-        | 2026-06-25 | 550.257 | 722.897 |     1380.95 |
-        | 2026-06-26 | 547.116 | 717.071 |     1379.81 |
-        | 2026-06-29 | 544.476 | 711.315 |     1380.05 |
-        | 2026-06-30 | 544.317 | 707.263 |     1381.34 |
-        | 2026-07-01 | 544.691 | 705.519 |     1384.05 |
-        | 2026-07-02 | 546.424 | 705.539 |     1384.99 |
+        | Date       |     GLD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | 396.516 |     674.499 |
+        | 2025-12-26 | 398.563 |     674.508 |
+        | 2025-12-29 | 400.429 |     674.964 |
+        | 2025-12-30 | 402.053 |     675.859 |
+        | 2025-12-31 | 403.429 |     676.893 |
         """
         if period not in [
             "intraday",
@@ -5275,7 +5613,7 @@ class Technicals:
         increasing weight to more recent prices, making it more responsive to recent
         price changes than a Simple Moving Average.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - WMA = (Sum of (Price * Weight)) / (Sum of Weights)
 
@@ -5283,20 +5621,20 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods to consider for the WMA.
-                The number of periods (time intervals) over which to calculate the WMA.
+                The number of periods (time intervals) over which to calculate the WMA. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the WMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -5313,25 +5651,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["TLT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_weighted_moving_average()
+        toolkit.technicals.get_weighted_moving_average().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 300.742 | 408.527 |     745.79  |
-        | 2026-06-22 | 300.078 | 401.871 |     744.779 |
-        | 2026-06-23 | 298.585 | 397.059 |     742.923 |
-        | 2026-06-24 | 297.358 | 392.639 |     741.423 |
-        | 2026-06-25 | 294.781 | 387.266 |     739.795 |
-        | 2026-06-26 | 293.098 | 384.145 |     739.184 |
-        | 2026-06-29 | 291.684 | 381.061 |     739.311 |
-        | 2026-06-30 | 291.599 | 378.891 |     740.005 |
-        | 2026-07-01 | 291.799 | 377.956 |     741.457 |
-        | 2026-07-02 | 292.727 | 377.967 |     741.959 |
+        | Date       |     TLT |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-24 | 84.95   |     676.565 |
+        | 2025-12-26 | 84.9693 |     677.721 |
+        | 2025-12-29 | 85.0322 |     678.489 |
+        | 2025-12-30 | 85.0635 |     679.088 |
+        | 2025-12-31 | 85.0021 |     678.956 |
         """
         if period not in [
             "intraday",
@@ -5390,7 +5728,7 @@ class Technicals:
         of half the window length, a WMA of the full window length, and a further WMA
         over the square root of the window length.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Raw HMA = (2 * WMA(Close, Window / 2)) — WMA(Close, Window)
         - HMA = WMA(Raw HMA, sqrt(Window))
@@ -5399,20 +5737,20 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods to consider for the HMA.
-                The number of periods (time intervals) over which to calculate the HMA.
+                The number of periods (time intervals) over which to calculate the HMA. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the HMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -5429,25 +5767,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_hull_moving_average()
+        toolkit.technicals.get_hull_moving_average().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 300.742 | 408.527 |     745.79  |
-        | 2026-06-22 | 300.078 | 401.871 |     744.779 |
-        | 2026-06-23 | 298.585 | 397.059 |     742.923 |
-        | 2026-06-24 | 297.358 | 392.639 |     741.423 |
-        | 2026-06-25 | 294.781 | 387.266 |     739.795 |
-        | 2026-06-26 | 293.098 | 384.145 |     739.184 |
-        | 2026-06-29 | 291.684 | 381.061 |     739.311 |
-        | 2026-06-30 | 291.599 | 378.891 |     740.005 |
-        | 2026-07-01 | 291.799 | 377.956 |     741.457 |
-        | 2026-07-02 | 292.727 | 377.967 |     741.959 |
+        | Date       |   BTCUSD |   Benchmark |
+        |:-----------|---------:|------------:|
+        | 2025-12-27 |  87664.2 |     687.165 |
+        | 2025-12-28 |  87603.8 |     687.17  |
+        | 2025-12-29 |  87477.7 |     686.493 |
+        | 2025-12-30 |  87572.5 |     685.285 |
+        | 2025-12-31 |  87626   |     682.993 |
         """
         if period not in [
             "intraday",
@@ -5512,7 +5850,7 @@ class Technicals:
         close to 0 and KAMA flattens out, behaving like a slow EMA — reducing whipsaw signals
         in choppy markets while still reacting quickly during strong trends.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Change = |Close(t) — Close(t - window)|
         - Volatility = Sum(|Close(i) — Close(i - 1)|, window)
@@ -5525,7 +5863,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods over which the Efficiency Ratio is
@@ -5541,10 +5879,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the KAMA.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: KAMA values.
@@ -5561,10 +5899,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^STOXX50E"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_kaufman_adaptive_moving_average()
+        toolkit.technicals.get_kaufman_adaptive_moving_average().tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   ^STOXX50E |   Benchmark |
+        |:-----------|------------:|------------:|
+        | 2025-12-24 |     5725.01 |     674.232 |
+        | 2025-12-26 |     5725.15 |     674.371 |
+        | 2025-12-29 |     5725.79 |     674.726 |
+        | 2025-12-30 |     5728.19 |     675.041 |
+        | 2025-12-31 |     5728.19 |     675.076 |
         """
         if period not in [
             "intraday",
@@ -5631,29 +5984,36 @@ class Technicals:
         by its traded volume over a rolling window, giving a more volume-informed view of
         the average price than a plain moving average.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Typical Price = (High + Low + Close) / 3
         - VWAP = Sum(Typical Price * Volume, Window) / Sum(Volume, Window)
+
+        The VWAP that trading desks use as an execution benchmark is calculated from the trades
+        of a single session and resets every day. This method computes a rolling VWAP over several
+        periods from the high, low, close and volume of each period, which works as a
+        volume-weighted moving average, not as the intraday benchmark against which fills are
+        measured.
 
         Also known as: VWAP.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): Number of periods to consider for the VWAP.
-                The number of periods (time intervals) over which to calculate the VWAP.
+                The number of periods (time intervals) over which to calculate the VWAP. Defaults to 14.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the VWAP.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -5670,25 +6030,26 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SPY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+            benchmark_ticker=None,
+        )
 
-        toolkit.technicals.get_volume_weighted_average_price()
+        toolkit.technicals.get_volume_weighted_average_price().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 300.742 | 408.527 |     745.79  |
-        | 2026-06-22 | 300.078 | 401.871 |     744.779 |
-        | 2026-06-23 | 298.585 | 397.059 |     742.923 |
-        | 2026-06-24 | 297.358 | 392.639 |     741.423 |
-        | 2026-06-25 | 294.781 | 387.266 |     739.795 |
-        | 2026-06-26 | 293.098 | 384.145 |     739.184 |
-        | 2026-06-29 | 291.684 | 381.061 |     739.311 |
-        | 2026-06-30 | 291.599 | 378.891 |     740.005 |
-        | 2026-07-01 | 291.799 | 377.956 |     741.457 |
-        | 2026-07-02 | 292.727 | 377.967 |     741.959 |
+        | Date       |     SPY |
+        |:-----------|--------:|
+        | 2025-12-24 | 675.242 |
+        | 2025-12-26 | 675.346 |
+        | 2025-12-29 | 675.664 |
+        | 2025-12-30 | 675.891 |
+        | 2025-12-31 | 675.847 |
         """
         if period not in [
             "intraday",
@@ -5708,7 +6069,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         volume_weighted_average_price = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -5759,7 +6120,7 @@ class Technicals:
         The acceleration factor increases as the trend extends, causing the SAR to
         converge towards price over time.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Uptrend SAR = Prior SAR + AF * (Extreme Point — Prior SAR)
         - Downtrend SAR = Prior SAR — AF * (Prior SAR — Extreme Point)
@@ -5768,7 +6129,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             af_start (float, optional): Initial acceleration factor. Defaults to 0.02.
@@ -5781,10 +6142,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Parabolic SAR.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.DataFrame or pd.Series:
@@ -5801,25 +6162,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["CLUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_parabolic_sar()
+        toolkit.technicals.get_parabolic_sar().tail(5)
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |   Benchmark |
-        |:-----------|--------:|--------:|------------:|
-        | 2026-06-18 | 300.742 | 408.527 |     745.79  |
-        | 2026-06-22 | 300.078 | 401.871 |     744.779 |
-        | 2026-06-23 | 298.585 | 397.059 |     742.923 |
-        | 2026-06-24 | 297.358 | 392.639 |     741.423 |
-        | 2026-06-25 | 294.781 | 387.266 |     739.795 |
-        | 2026-06-26 | 293.098 | 384.145 |     739.184 |
-        | 2026-06-29 | 291.684 | 381.061 |     739.311 |
-        | 2026-06-30 | 291.599 | 378.891 |     740.005 |
-        | 2026-07-01 | 291.799 | 377.956 |     741.457 |
-        | 2026-07-02 | 292.727 | 377.967 |     741.959 |
+        | Date       |   CLUSD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-26 | 55.5988 |     667.872 |
+        | 2025-12-28 | 55.8613 |     669.714 |
+        | 2025-12-29 | 56.1028 |     671.371 |
+        | 2025-12-30 | 56.325  |     672.863 |
+        | 2025-12-31 | 56.5294 |     674.206 |
         """
         if period not in [
             "intraday",
@@ -5839,7 +6200,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         parabolic_sar = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -5884,7 +6245,7 @@ class Technicals:
         prices and are used to identify potential support and resistance levels for
         the current period.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Pivot Point = (Previous High + Previous Low + Previous Close) / 3
         - Resistance 1 = (2 * Pivot Point) — Previous Low
@@ -5898,18 +6259,19 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the Pivot Points.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -5926,25 +6288,27 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["EURUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_pivot_points().xs("AAPL", level=1, axis="columns")
+        pivot_points = toolkit.technicals.get_pivot_points().xs("EURUSD", level=1, axis="columns")
+
+        pivot_points.loc[:, ["Pivot Point", "Resistance 1", "Resistance 2", "Support 1", "Support 2"]].tail(5)
         ```
 
         Which returns:
 
-        | Date       |   Pivot Point |   Resistance 1 |   Support 1 |
-        |:-----------|--------------:|----------------:|-------------:|
-        | 2026-06-18 |       300.742 |          305.53  |      295.954 |
-        | 2026-06-22 |       300.078 |          304.201 |      295.955 |
-        | 2026-06-23 |       298.585 |          303.09  |      294.08  |
-        | 2026-06-24 |       297.358 |          301.328 |      293.388 |
-        | 2026-06-25 |       294.781 |          299.176 |      290.386 |
-        | 2026-06-26 |       293.098 |          296.652 |      289.544 |
-        | 2026-06-29 |       291.684 |          295.571 |      287.796 |
-        | 2026-06-30 |       291.599 |          295.53  |      287.667 |
-        | 2026-07-01 |       291.799 |          295.81  |      287.788 |
-        | 2026-07-02 |       292.727 |          299.318 |      286.137 |
+        | Date       |   Pivot Point |   Resistance 1 |   Resistance 2 |   Support 1 |   Support 2 |
+        |:-----------|--------------:|---------------:|---------------:|------------:|------------:|
+        | 2025-12-26 |        1.18   |         1.1809 |         1.1817 |      1.1792 |      1.1783 |
+        | 2025-12-28 |        1.1806 |         1.182  |         1.1841 |      1.1785 |      1.1771 |
+        | 2025-12-29 |        1.1806 |         1.1814 |         1.1827 |      1.1793 |      1.1785 |
+        | 2025-12-30 |        1.1797 |         1.1819 |         1.1837 |      1.1779 |      1.1757 |
+        | 2025-12-31 |        1.1709 |         1.1723 |         1.1746 |      1.1686 |      1.1672 |
         """
         if period not in [
             "intraday",
@@ -5964,7 +6328,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         pivot_points_dict = {}
 
@@ -6025,6 +6389,17 @@ class Technicals:
         The function groups these similar peaks and valleys together to identify key resistance and
         support levels.
 
+        The formula is as follows:
+
+        - Peak (t) = Close (t) if Close (t) > every Close within `window` periods before and after t (14 by default)
+        - Valley (t) = Close (t) if Close (t) < every Close within `window` periods before and after t
+        - Level = (Existing Level + Peak or Valley) / 2 if |Peak or Valley - Existing Level| / |Existing Level| <
+          Sensitivity (0.05 by default), otherwise a new level at the Peak or Valley
+        - Resistance (t) = the most recent level from the peaks published up to t, and Support (t) the same for
+          the valleys, with each level published `window` periods after its peak or valley (when it is confirmed)
+
+        Where Close is the `close_column`, the Adj Close by default (the Close for intraday data).
+
         Also known as: support levels, resistance levels, pivot points.
 
         Args:
@@ -6032,7 +6407,7 @@ class Technicals:
                 and valleys. A higher sensitivity value will result in fewer support and resistance levels
                 being identified. Defaults to 0.05.
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for calculating support and resistance levels.
@@ -6072,24 +6447,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["GCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        support_resistance_levels = toolkit.technicals.get_support_resistance_levels()
-
-        support_resistance_levels.xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_support_resistance_levels().xs("GCUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Resistance |   Support |
         |:-----------|-------------:|----------:|
-        | 2026-06-24 |      174.201 |   128.17  |
-        | 2026-06-25 |      174.201 |   128.17  |
-        | 2026-06-26 |      174.201 |   128.17  |
-        | 2026-06-29 |      174.201 |   128.17  |
-        | 2026-06-30 |      174.201 |   128.17  |
-        | 2026-07-01 |      174.201 |   128.17  |
-        | 2026-07-02 |      174.201 |   128.17  |
+        | 2025-12-26 |       4359.4 |    3960.5 |
+        | 2025-12-28 |       4359.4 |    3960.5 |
+        | 2025-12-29 |       4359.4 |    3960.5 |
+        | 2025-12-30 |       4359.4 |    3960.5 |
+        | 2025-12-31 |       4359.4 |    3960.5 |
         """
         if period not in [
             "intraday",
@@ -6165,7 +6541,7 @@ class Technicals:
         minimum low over the specified `window`, and the retracement levels are derived from
         that high/low pair.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Uptrend (retracing down from the high): Level = High — Ratio * (High — Low)
         - Downtrend (retracing up from the low): Level = Low + Ratio * (High — Low)
@@ -6174,7 +6550,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): The number of periods over which the rolling swing high
@@ -6191,10 +6567,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the retracement levels.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Fibonacci Retracement Levels, one column per ratio in
@@ -6212,6 +6588,9 @@ class Technicals:
           about half of a prior move.
         - The 78.6% level is the square root of 0.618, not a ratio drawn directly from the
           Fibonacci sequence itself (unlike 23.6%, 38.2% and 61.8%, which are).
+        - The columns sort lexicographically by their label (so "100.0%" sorts right after
+          "0.0%", ahead of "23.6%"), matching the sorting convention used by every other
+          multi-column indicator in this module (e.g. Pivot Points' Resistance/Support levels).
         - There is no single canonical academic paper behind Fibonacci Retracement Levels — the
           indicator is a practitioner tool derived from the Fibonacci sequence's ratios rather
           than a published financial model. The standard textbook treatment is Murphy, J.J.
@@ -6224,29 +6603,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_fibonacci_retracement_levels().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_fibonacci_retracement_levels().xs("BTCUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
-        Note that the columns sort lexicographically by their label (so "100.0%" sorts right
-        after "0.0%", ahead of "23.6%"), matching the sorting convention used by every other
-        multi-column indicator in this module (e.g. Pivot Points' Resistance/Support levels).
-
-        | Date       |   0.0% |   100.0% |   23.6% |   38.2% |   50.0% |   61.8% |   78.6% |
-        |:-----------|-------:|---------:|--------:|--------:|--------:|--------:|--------:|
-        | 2022-12-16 | 150.92 |   133.73 | 146.863 | 144.353 | 142.325 | 140.297 | 137.409 |
-        | 2022-12-19 | 150.92 |   131.32 | 146.294 | 143.433 | 141.12  | 138.807 | 135.514 |
-        | 2022-12-20 | 150.92 |   129.89 | 145.957 | 142.887 | 140.405 | 137.923 | 134.39  |
-        | 2022-12-21 | 150.92 |   129.89 | 145.957 | 142.887 | 140.405 | 137.923 | 134.39  |
-        | 2022-12-22 | 150.92 |   129.89 | 145.957 | 142.887 | 140.405 | 137.923 | 134.39  |
-        | 2022-12-23 | 149.97 |   129.64 | 145.172 | 142.204 | 139.805 | 137.406 | 133.991 |
-        | 2022-12-27 | 149.97 |   128.72 | 144.955 | 141.852 | 139.345 | 136.838 | 133.268 |
-        | 2022-12-28 | 149.97 |   125.87 | 144.282 | 140.764 | 137.92  | 135.076 | 131.027 |
-        | 2022-12-29 | 149.97 |   125.87 | 144.282 | 140.764 | 137.92  | 135.076 | 131.027 |
-        | 2022-12-30 | 149.97 |   125.87 | 144.282 | 140.764 | 137.92  | 135.076 | 131.027 |
+        | Date       |    0.0% |   100.0% |   23.6% |   38.2% |   50.0% |   61.8% |   78.6% |
+        |:-----------|--------:|---------:|--------:|--------:|--------:|--------:|--------:|
+        | 2025-12-27 | 90541.8 |    84400 | 89092.3 | 88195.6 | 87470.9 | 86746.2 | 85714.3 |
+        | 2025-12-28 | 90541.8 |    84400 | 89092.3 | 88195.6 | 87470.9 | 86746.2 | 85714.3 |
+        | 2025-12-29 | 90541.8 |    84400 | 89092.3 | 88195.6 | 87470.9 | 86746.2 | 85714.3 |
+        | 2025-12-30 | 90541.8 |    84400 | 89092.3 | 88195.6 | 87470.9 | 86746.2 | 85714.3 |
+        | 2025-12-31 | 90541.8 |    84400 | 89092.3 | 88195.6 | 87470.9 | 86746.2 | 85714.3 |
         """
         if period not in [
             "intraday",
@@ -6266,7 +6641,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         fibonacci_retracement_levels_dict = {}
 
@@ -6299,6 +6674,7 @@ class Technicals:
             apply_slice=False,
         )
 
+    @handle_errors
     def collect_volatility_indicators(
         self,
         period: str = "daily",
@@ -6314,7 +6690,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             window (int, optional): The window size for calculating indicators.
                 Defaults to 14.
             close_column (str, optional): The name of the column containing the close prices.
@@ -6324,10 +6700,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Volatility indicators calculated based on the specified parameters.
@@ -6342,25 +6718,29 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["AAPL", "MSFT"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.technicals.collect_volatility_indicators().xs("AAPL", level=1, axis="columns")
         ```
 
         Which returns:
 
-        | Date       |   Bollinger Band Upper |   Bollinger Band Middle |   Bollinger Band Lower |   True Range |
-        |:-----------|-----------------------:|------------------------:|-----------------------:|-------------:|
-        | 2026-06-18 |                316.843 |                 300.742 |                284.642 |         4.95 |
-        | 2026-06-22 |                315.955 |                 300.078 |                284.201 |         5.66 |
-        | 2026-06-23 |                312.09  |                 298.585 |                285.08  |         7.46 |
-        | 2026-06-24 |                309.328 |                 297.358 |                285.388 |         6.76 |
-        | 2026-06-25 |                309.176 |                 294.781 |                280.386 |        19.33 |
-        | 2026-06-26 |                306.652 |                 293.098 |                279.544 |        11.74 |
-        | 2026-06-29 |                305.571 |                 291.684 |                277.796 |         8.52 |
-        | 2026-06-30 |                305.53  |                 291.599 |                277.667 |         9.24 |
-        | 2026-07-01 |                305.81  |                 291.799 |                277.788 |         7.39 |
-        | 2026-07-02 |                309.318 |                 292.727 |                276.137 |        15.74 |
+        | Date       |   Bollinger Band Upper |   Bollinger Band Middle |   Bollinger Band Lower |   True Range |   Average True Range |   Supertrend |   Supertrend Trend Direction |   Keltner Channel Upper |   Keltner Channel Middle |   Keltner Channel Lower |   Donchian Channel Upper |   Donchian Channel Middle |   Donchian Channel Lower |
+        |:-----------|-----------------------:|------------------------:|-----------------------:|-------------:|---------------------:|-------------:|-----------------------------:|------------------------:|-------------------------:|------------------------:|-------------------------:|--------------------------:|-------------------------:|
+        | 2025-12-17 |                285.486 |                 277.993 |                270.499 |       4.5077 |               4.8747 |      268.669 |                            1 |                 285.011 |                  275.523 |                 266.035 |                  287.837 |                   279.444 |                  271.052 |
+        | 2025-12-18 |                285.733 |                 277.518 |                269.304 |       6.6619 |               5.0024 |      268.669 |                            1 |                 284.851 |                  274.98  |                 265.109 |                  287.837 |                   279.37  |                  270.903 |
+        | 2025-12-19 |                284.913 |                 276.846 |                268.78  |       4.6872 |               4.9799 |      268.669 |                            1 |                 284.528 |                  274.706 |                 264.885 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-22 |                282.966 |                 275.762 |                268.558 |       3.3609 |               4.8642 |      268.669 |                            1 |                 283.622 |                  274.11  |                 264.598 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-23 |                281.038 |                 274.922 |                268.807 |       2.932  |               4.7262 |      268.669 |                            1 |                 282.925 |                  273.778 |                 264.631 |                  287.837 |                   277.031 |                  266.225 |
+        | 2025-12-24 |                279.93  |                 274.432 |                268.933 |       3.2212 |               4.6187 |      268.669 |                            1 |                 282.56  |                  273.683 |                 264.807 |                  283.957 |                   275.091 |                  266.225 |
+        | 2025-12-26 |                279.231 |                 274.048 |                268.866 |       2.5032 |               4.4676 |      268.669 |                            1 |                 282.036 |                  273.547 |                 265.057 |                  280.377 |                   273.301 |                  266.225 |
+        | 2025-12-29 |                278.663 |                 273.754 |                268.846 |       2.0045 |               4.2917 |      268.669 |                            1 |                 281.517 |                  273.476 |                 265.435 |                  279.389 |                   272.807 |                  266.225 |
+        | 2025-12-30 |                278.183 |                 273.462 |                268.742 |       1.7951 |               4.1134 |      268.669 |                            1 |                 280.921 |                  273.324 |                 265.728 |                  279.389 |                   272.807 |                  266.225 |
+        | 2025-12-31 |                277.084 |                 272.969 |                268.854 |       1.9248 |               3.957  |      268.669 |                            1 |                 280.252 |                  273.031 |                 265.809 |                  279.389 |                   272.807 |                  266.225 |
         """
         if period not in [
             "intraday",
@@ -6429,20 +6809,21 @@ class Technicals:
 
         self._volatility_indicators = pd.concat(volatility_indicators, axis=1)
 
-        self._volatility_indicators = self._volatility_indicators.round(
-            rounding if rounding else self._rounding
+        self._volatility_indicators = apply_rounding(
+            self._volatility_indicators,
+            rounding if rounding is not None else self._rounding,
         ).loc[self._start_date : self._end_date]
 
         if growth:
             self._volatility_indicators_growth = calculate_growth(
                 dataset=self._volatility_indicators,
                 lag=lag,
-                rounding=rounding if rounding else self._rounding,
+                rounding=rounding if rounding is not None else self._rounding,
                 axis="index",
             )
 
         if standardize:
-            standardize_rounding = rounding if rounding else self._rounding
+            standardize_rounding = rounding if rounding is not None else self._rounding
             if growth:
                 self._volatility_indicators_growth = calculate_standardization(
                     dataset=self._volatility_indicators_growth,
@@ -6491,7 +6872,7 @@ class Technicals:
         between the high and low prices and the previous closing price. It provides insights
         into the price movement of an asset.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - TR = max(high — low, abs(high — previous_close), abs(low — previous_close))
 
@@ -6499,18 +6880,19 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the True Range.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: True Range values.
@@ -6526,25 +6908,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["NGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_true_range()
+        toolkit.technicals.get_true_range().tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |   MSFT |   Benchmark |
-        |:-----------|-------:|-------:|------------:|
-        | 2026-06-18 |   4.95 |   8.09 |        7.27 |
-        | 2026-06-22 |   5.66 |  14.56 |        7.05 |
-        | 2026-06-23 |   7.46 |   9.88 |       12.09 |
-        | 2026-06-24 |   6.76 |  14.1  |        9.11 |
-        | 2026-06-25 |  19.33 |  16.26 |        9.77 |
-        | 2026-06-26 |  11.74 |  23.78 |       19.95 |
-        | 2026-06-29 |   8.52 |  20.6  |       12.57 |
-        | 2026-06-30 |   9.24 |   6.7  |        7.13 |
-        | 2026-07-01 |   7.39 |  15.81 |        7.06 |
-        | 2026-07-02 |  15.74 |   8.5  |       11.28 |
+        | Date       |   NGUSD |   Benchmark |
+        |:-----------|--------:|------------:|
+        | 2025-12-26 |  0.5251 |      2.3714 |
+        | 2025-12-28 |  0.482  |      2.7386 |
+        | 2025-12-29 |  0.2422 |      3.1057 |
+        | 2025-12-30 |  0.2599 |      1.9646 |
+        | 2025-12-31 |  0.3043 |      5.6062 |
         """
         if period not in [
             "intraday",
@@ -6564,7 +6946,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         true_range = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -6600,7 +6982,7 @@ class Technicals:
         growth: bool = False,
         lag: int | list[int] = 1,
         standardize: bool = False,
-    ) -> pd.Series:
+    ) -> pd.DataFrame:
         """
         Calculate the Average True Range (ATR) of a given price series.
 
@@ -6609,40 +6991,47 @@ class Technicals:
         into the potential price range of an asset, which can help traders and investors make
         more informed decisions.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - TR = max(high — low, abs(high — previous_close), abs(low — previous_close))
         - ATR = Wilder's Smoothed Moving Average of TR over `window` periods
+
+        The ATR is in price units, which makes it the common basis for stop distances (for example
+        two ATRs below the entry) and for sizing positions to equal risk. For the same reason it
+        cannot be compared across stocks or over long periods in which the price changed a lot;
+        divide it by the price for a percentage volatility. It measures how far price moves, not in
+        which direction.
 
         Also known as: ATR, volatility indicator. See `volatility_model.get_average_true_range`
         for the full formula; Wilder's smoothing constant (1/window) is slower than a
         standard EMA's (2/(window+1)) of the same window.
 
+        The first period has no previous close, so its True Range is High — Low and the first ATR
+        is the average of the first `window` True Ranges (the StockCharts convention; TA-Lib starts
+        one period later).
+
         Args:
-            period (str): Period for which to calculate the ATR.
-            window (int): Number of periods for ATR calculation.
-                The number of periods (time intervals) over which to calculate the Average True Range.
-            rounding (int | None): Number of decimal places to round the resulting ATR values to.
-                If None, no rounding is performed.
-            growth (bool): Flag indicating whether to return the ATR growth rate.
-                If True, the ATR growth rate is calculated.
-            lag (int | list[int]): Number of periods to lag the ATR values by.
-                If an integer is provided, all ATR values are lagged by the same number of periods.
-                If a list of integers is provided, each ATR value is lagged by the corresponding number of periods.
+            period (str, optional): The time period to consider for historical data.
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
+            close_column (str, optional): The column name for closing prices in the historical data.
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
+            window (int, optional): The number of periods over which to calculate the Average
+                True Range. Defaults to 14.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None, which uses the rounding set on the Toolkit (4 unless set
+                otherwise).
+            growth (bool, optional): Whether to return the growth of the ATR instead of its
+                level. Defaults to False.
+            lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
 
         Returns:
-            pd.Series: ATR values or ATR growth rate (if growth is True).
+            pd.DataFrame: ATR values per ticker or ATR growth rate (if growth is True).
                 A pandas Series containing the calculated Average True Range values or growth rate for each period.
-
-        Formula:
-        The Average True Range (ATR) is calculated using the following steps:
-        1. Calculate the True Range (TR) for each period:
-            - True Range (TR) = max(high — low, abs(high — previous_close), abs(low — previous_close))
-        2. Calculate the Average True Range (ATR) over the specified window:
-            - ATR = EMA(TR, window), where EMA is the Exponential Moving Average.
 
         Notes:
         - ATR values are typically used to assess the volatility and potential price movement of an asset.
@@ -6653,25 +7042,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["CLUSD", "NGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_average_true_range()
+        toolkit.technicals.get_average_true_range().tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |    MSFT |   Benchmark |
-        |:-----------|-------:|--------:|------------:|
-        | 2026-06-18 | 8.1636 | 12.5379 |     11.0343 |
-        | 2026-06-22 | 8.065  | 12.4293 |     11.1386 |
-        | 2026-06-23 | 7.945  | 11.7    |     11.7414 |
-        | 2026-06-24 | 7.85   | 11.4886 |     11.9636 |
-        | 2026-06-25 | 8.9529 | 11.9543 |     12.1729 |
-        | 2026-06-26 | 9.2186 | 12.5764 |     12.0579 |
-        | 2026-06-29 | 8.6679 | 13.4336 |     12.3993 |
-        | 2026-06-30 | 8.345  | 12.9479 |     11.1721 |
-        | 2026-07-01 | 8.3464 | 13.5143 |     10.7443 |
-        | 2026-07-02 | 8.9414 | 13.1671 |     10.4364 |
+        | Date       |   CLUSD |   NGUSD |   Benchmark |
+        |:-----------|--------:|--------:|------------:|
+        | 2025-12-26 |  1.2031 |  0.3041 |      5.8269 |
+        | 2025-12-28 |  1.1614 |  0.3168 |      5.6063 |
+        | 2025-12-29 |  1.1778 |  0.3115 |      5.4277 |
+        | 2025-12-30 |  1.1558 |  0.3078 |      5.1803 |
+        | 2025-12-31 |  1.1697 |  0.3076 |      5.2107 |
         """
         if period not in [
             "intraday",
@@ -6691,7 +7080,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         average_true_range = pd.DataFrame(
             index=historical_data.loc[self._start_date : self._end_date].index
@@ -6742,7 +7131,7 @@ class Technicals:
         Supertrend both a trend filter (the flip direction signals a trend change) and a
         trailing stop-loss level.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Basic Upper Band = (High + Low) / 2 + multiplier * ATR(window)
         - Basic Lower Band = (High + Low) / 2 — multiplier * ATR(window)
@@ -6758,9 +7147,10 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
             window (int, optional): Number of periods for the underlying Average True Range
                 calculation. Defaults to 10.
             multiplier (float, optional): Multiplier applied to the Average True Range to
@@ -6770,10 +7160,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the Supertrend and
                 Trend Direction values. Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame:
@@ -6796,10 +7186,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["SHOP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_supertrend().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_supertrend().xs("SHOP", level=1, axis="columns").tail(5)
         ```
+
+        Which returns:
+
+        | Date       |   Supertrend |   Trend Direction |
+        |:-----------|-------------:|------------------:|
+        | 2025-12-24 |      150.646 |                 1 |
+        | 2025-12-26 |      151.942 |                 1 |
+        | 2025-12-29 |      152.113 |                 1 |
+        | 2025-12-30 |      152.113 |                 1 |
+        | 2025-12-31 |      152.113 |                 1 |
         """
         if period not in [
             "intraday",
@@ -6819,7 +7224,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         supertrend_dict = {}
 
@@ -6857,9 +7262,9 @@ class Technicals:
         self,
         period: str = "daily",
         close_column: str = "Adj Close",
-        window: int = 14,
-        atr_window: int = 14,
-        atr_multiplier: int = 2,
+        window: int = 20,
+        atr_window: int = 10,
+        atr_multiplier: float = 2,
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -6868,41 +7273,39 @@ class Technicals:
         """
         Calculate the Keltner Channels for a given price series.
 
-        The Keltner Channels consist of three lines:
-        - Upper Channel Line = Exponential Moving Average (EMA) of High Prices + ATR * ATR Multiplier
-        - Middle Channel Line = Exponential Moving Average (EMA) of Closing Prices
-        - Lower Channel Line = Exponential Moving Average (EMA) of Low Prices — ATR * ATR Multiplier
+        The Keltner Channels consist of three lines: a middle line, the Exponential Moving Average
+        (EMA) of the closing prices, and an upper and a lower line a multiple of the Average True
+        Range (ATR) above and below it.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - EMA = (Close — Previous EMA) * (2 / (1 + Window)) + Previous EMA
-        - ATR = EMA(TR, ATR Window)
-        - Upper Channel Line = EMA(High, Window) + ATR * ATR Multiplier
-        - Middle Channel Line = EMA(Close, Window)
-        - Lower Channel Line = EMA(Low, Window) — ATR * ATR Multiplier
+        - Middle Line = EMA(Close, window)
+        - Upper Line = Middle Line + atr_multiplier * ATR(atr_window)
+        - Lower Line = Middle Line — atr_multiplier * ATR(atr_window), where the ATR uses Wilder's smoothing.
 
         Also known as: ATR-based bands, volatility channels.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
-                Defaults to "Adj Close".
-            window (int, optional): Number of periods for the moving average.
-                Defaults to 14.
+                Defaults to "Adj Close", in which case the open, high and low prices are adjusted
+                for dividends in the same way.
+            window (int, optional): Number of periods for the Exponential Moving Average (the
+                middle line). Defaults to 20, as on StockCharts.
             atr_window (int, optional): Number of periods for ATR calculation.
-                Defaults to 14.
-            atr_multiplier (int, optional): Multiplier for ATR to determine channel width.
+                Defaults to 10, as on StockCharts.
+            atr_multiplier (float, optional): Multiplier for ATR to determine channel width.
                 Defaults to 2.
             rounding (int | None, optional): The number of decimals to round the results to.
                 Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the channels.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Keltner Channels (upper, middle, lower).
@@ -6917,25 +7320,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["^GDAXI"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_keltner_channels().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_keltner_channels().xs("^GDAXI", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Lower Line |   Middle Line |   Upper Line |
         |:-----------|-------------:|--------------:|-------------:|
-        | 2026-06-18 |      282.479 |       298.807 |      315.134 |
-        | 2026-06-22 |      282.437 |       298.567 |      314.697 |
-        | 2026-06-23 |      282.108 |       297.998 |      313.888 |
-        | 2026-06-24 |      281.642 |       297.342 |      313.042 |
-        | 2026-06-25 |      276.478 |       294.383 |      312.289 |
-        | 2026-06-26 |      274.532 |       292.969 |      311.407 |
-        | 2026-06-29 |      274.137 |       291.472 |      308.808 |
-        | 2026-06-30 |      274.501 |       291.191 |      307.881 |
-        | 2026-07-01 |      274.923 |       291.616 |      308.309 |
-        | 2026-07-02 |      276.002 |       293.884 |      311.767 |
+        | 2025-12-24 |      23674   |       24088.6 |      24503.2 |
+        | 2025-12-26 |      23715.1 |       24113.2 |      24511.4 |
+        | 2025-12-29 |      23750.5 |       24135.9 |      24521.3 |
+        | 2025-12-30 |      23782.9 |       24169.6 |      24556.4 |
+        | 2025-12-31 |      23782.9 |       24169.6 |      24556.4 |
         """
         if period not in [
             "intraday",
@@ -6955,7 +7358,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         keltner_channels_dict = {}
 
@@ -7007,7 +7410,7 @@ class Technicals:
         *preceding* the current one, with the middle line being the average of the two. They
         are used to identify breakouts and the overall volatility of the price range.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - Upper Channel = Highest High over Window, ending one period ago
         - Lower Channel = Lowest Low over Window, ending one period ago
@@ -7021,7 +7424,7 @@ class Technicals:
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for the Donchian Channels.
@@ -7031,10 +7434,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the channels.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: Donchian Channels (upper, middle, lower).
@@ -7049,25 +7452,25 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["HGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_donchian_channels().xs("AAPL", level=1, axis="columns")
+        toolkit.technicals.get_donchian_channels().xs("HGUSD", level=1, axis="columns").tail(5)
         ```
 
         Which returns:
 
         | Date       |   Lower Channel |   Middle Channel |   Upper Channel |
-        |:-----------|-----------------:|------------------:|-----------------:|
-        | 2026-06-18 |           279.4  |            300.13 |           320.86 |
-        | 2026-06-22 |           279.4  |            299.4  |           319.4  |
-        | 2026-06-23 |           279.4  |            298.7  |           318    |
-        | 2026-06-24 |           275.15 |            296.87 |           318.6  |
-        | 2026-06-25 |           275.15 |            296.87 |           318.6  |
-        | 2026-06-26 |           275.15 |            296.87 |           318.6  |
-        | 2026-06-29 |           275.15 |            296.87 |           318.6  |
-        | 2026-06-30 |           275.15 |            296.87 |           318.6  |
-        | 2026-07-01 |           275.15 |            296.87 |           318.6  |
-        | 2026-07-02 |           275.15 |            296.87 |           318.6  |
+        |:-----------|----------------:|-----------------:|----------------:|
+        | 2025-12-26 |          5.2425 |           5.4982 |          5.754  |
+        | 2025-12-28 |          5.281  |           5.5847 |          5.8885 |
+        | 2025-12-29 |          5.281  |           5.6002 |          5.9195 |
+        | 2025-12-30 |          5.281  |           5.6041 |          5.9272 |
+        | 2025-12-31 |          5.281  |           5.6041 |          5.9272 |
         """
         if period not in [
             "intraday",
@@ -7087,7 +7490,7 @@ class Technicals:
                 )
             close_column = "Close"
 
-        historical_data = self._historical_data[period]
+        historical_data = self._get_historical_data(period, close_column)
 
         donchian_channels_dict = {}
 
@@ -7135,13 +7538,37 @@ class Technicals:
         used to judge whether current (or implied) volatility is cheap or expensive
         relative to history.
 
+        Realized volatility is the standard deviation of the log returns over each rolling
+        window, annualized with the square root of the observations per year of the period
+        (252 for daily, 52 for weekly and 12 for monthly data). For each
+        window, the cone reports the minimum, the 10th, 25th, 50th, 75th and 90th percentiles,
+        the maximum and the most recent value of that realized volatility series.
+
+        The formula is as follows:
+
+        - Log Return (t) = ln(Close (t) / Close (t-1))
+        - Realized Volatility (t, Window) = Sample Standard Deviation (ddof=1) of the Log Returns over the last
+          Window periods * √(Periods per Year)
+        - Cone (Window) = Min, 10th, 25th, 50th (Median), 75th and 90th Percentile, Max and Current (latest) value
+          of Realized Volatility (t, Window) over the full history, for each window (10, 20, 30, 60, 90 and 120
+          by default)
+
+        Where Close is the `close_column`, the Adj Close by default (the Close for intraday data).
+
+        Options traders compare implied volatility with the cone at the matching horizon:
+        implied volatility near the top of the historical range for that window suggests
+        options are expensive relative to history, near the bottom cheap. The percentiles
+        depend on the sample, so a period that includes a crash widens the cone for as long
+        as it stays in the data; five years of daily data or more gives a more stable picture
+        than one.
+
         Also known as: volatility cone, realized volatility term structure.
 
         Args:
             windows (list[int] | None, optional): The rolling windows (in periods) to
                 calculate realized volatility for. Defaults to [10, 20, 30, 60, 90, 120].
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The column name for closing prices in the historical data.
                 Defaults to "Adj Close".
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -7163,20 +7590,28 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        volatility_cone = toolkit.technicals.get_volatility_cone()
+        volatility_cone = toolkit.technicals.get_volatility_cone().xs("BTCUSD", level=1, axis="columns")
 
-        volatility_cone.xs("AAPL", level=1, axis="columns")
+        volatility_cone.loc[:, ["Min", "10th Percentile", "Median", "90th Percentile", "Max", "Current"]]
         ```
 
         Which returns:
 
-        | Window   |   Min |   Median |   Max |   Current |
-        |:---------|------:|---------:|------:|----------:|
-        | 10       |  0.12 |     0.24 |  0.58 |      0.27 |
-        | 20       |  0.14 |     0.23 |  0.52 |      0.25 |
-        | 30       |  0.15 |     0.22 |  0.47 |      0.24 |
+        |   Window |    Min |   10th Percentile |   Median |   90th Percentile |    Max |   Current |
+        |---------:|-------:|------------------:|---------:|------------------:|-------:|----------:|
+        |       10 | 0.0727 |            0.2073 |   0.3975 |            0.7323 | 1.3284 |    0.1308 |
+        |       20 | 0.0952 |            0.2474 |   0.4151 |            0.713  | 1.0995 |    0.2209 |
+        |       30 | 0.1416 |            0.2634 |   0.4278 |            0.6834 | 1.0096 |    0.2865 |
+        |       60 | 0.2175 |            0.2859 |   0.4537 |            0.6445 | 0.903  |    0.3453 |
+        |       90 | 0.2306 |            0.2962 |   0.445  |            0.6358 | 0.8003 |    0.3433 |
+        |      120 | 0.2412 |            0.3038 |   0.4334 |            0.6228 | 0.7615 |    0.3208 |
         """
         if period not in [
             "intraday",
@@ -7200,9 +7635,26 @@ class Technicals:
 
         volatility_cone = {}
 
+        # The volatility is annualized with the observations per year of the period;
+        # intraday that is the trading days times the bars per day.
+        if period == "intraday":
+            index = historical_data.index
+            days = (
+                index.to_timestamp() if isinstance(index, pd.PeriodIndex) else index
+            ).normalize()
+            periods_per_year = (
+                volatility_model.TRADING_DAYS_PER_YEAR
+                * len(index)
+                / max(days.nunique(), 1)
+            )
+        else:
+            periods_per_year = PERIODS_PER_YEAR[period]
+
         for ticker in historical_data[close_column].columns:
             volatility_cone[ticker] = volatility_model.get_volatility_cone(
-                historical_data[close_column][ticker], windows=windows
+                historical_data[close_column][ticker],
+                windows=windows,
+                periods_per_year=periods_per_year,
             )
 
         volatility_cone_df = (
@@ -7211,7 +7663,9 @@ class Technicals:
             .sort_index(axis=1)
         )
 
-        return volatility_cone_df.round(rounding if rounding else self._rounding)
+        return apply_rounding(
+            volatility_cone_df, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -7234,15 +7688,21 @@ class Technicals:
         reading is broadcast to every ticker column so it lines up with the other
         breadth indicators.
 
-        The formula is a follows:
+        The formula is as follows:
 
         - TRIN = (Advancing Issues / Declining Issues) / (Advancing Volume / Declining Volume)
+
+        A TRIN below 1 means the volume in rising stocks outweighs their number, which is read
+        as buying pressure, and above 1 as selling pressure; readings far above 2 tend to come
+        with capitulation days. It is meant for a broad universe, such as all stocks of an
+        exchange. Calculated across a handful of tickers it jumps between extremes and is
+        undefined on days when none of them fell.
 
         Also known as: Arms Index, TRIN.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
                 Defaults to "Adj Close".
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -7250,10 +7710,10 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
             pd.Series or pd.DataFrame: TRIN values.
@@ -7269,25 +7729,26 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_trin()
+        # TRIN is one market-wide reading, repeated in every ticker column
+        toolkit.technicals.get_trin().loc[:, ["XLK"]].tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |   MSFT |   Benchmark |
-        |:-----------|-------:|-------:|------------:|
-        | 2026-06-18 |   0.85 |   0.85 |        0.85 |
-        | 2026-06-22 |   1.12 |   1.12 |        1.12 |
-        | 2026-06-23 |   0.97 |   0.97 |        0.97 |
-        | 2026-06-24 |   1.05 |   1.05 |        1.05 |
-        | 2026-06-25 |   1.31 |   1.31 |        1.31 |
-        | 2026-06-26 |   0.79 |   0.79 |        0.79 |
-        | 2026-06-29 |   0.91 |   0.91 |        0.91 |
-        | 2026-06-30 |   0.88 |   0.88 |        0.88 |
-        | 2026-07-01 |   0.94 |   0.94 |        0.94 |
-        | 2026-07-02 |   1.02 |   1.02 |        1.02 |
+        | Date       |      XLK |
+        |:-----------|---------:|
+        | 2025-12-24 |   2.485  |
+        | 2025-12-26 |   1.6498 |
+        | 2025-12-29 |   0.6578 |
+        | 2025-12-30 |   0.6376 |
+        | 2025-12-31 | nan      |
         """
         if period not in [
             "intraday",
@@ -7351,24 +7812,30 @@ class Technicals:
         standardize: bool = False,
     ) -> pd.Series | pd.DataFrame:
         """
-        Calculate the New Highs — New Lows for a given price series.
+        Calculate the New Highs - New Lows for a given price series.
 
-        New Highs — New Lows measures the number of tickers reaching a new high over
+        New Highs - New Lows measures the number of tickers reaching a new high over
         the specified window minus the number of tickers reaching a new low over the
         same window. It is a market-wide breadth reading computed across all tickers in
         the Toolkit instance (excluding the synthetic "Portfolio" and "Benchmark"
         columns), and the resulting single reading is broadcast to every ticker column
         so it lines up with the other breadth indicators.
 
-        The formula is a follows:
+        The formula is as follows:
 
-        - New Highs — New Lows = (Number of tickers at a window-period high) — (Number of tickers at a window-period low)
+        - New Highs - New Lows = (Number of tickers at a window-period high) - (Number of tickers at a window-period low)
+
+        The reading counts tickers at a high or low of the lookback window, so it needs a broad
+        universe and a history of at least one window before the start of the period of interest:
+        in the first periods every ticker is compared with only a few prices, so it is often counted
+        at a high or a low, and on the first date at both. Persistently more new lows than new highs
+        while an index still rises is a classic sign of narrowing breadth.
 
         Also known as: new highs minus new lows, record high percent.
 
         Args:
             period (str, optional): The time period to consider for historical data.
-                Can be "daily", "weekly", "quarterly", or "yearly". Defaults to "daily".
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
             close_column (str, optional): The name of the column containing the close prices.
                 Defaults to "Adj Close".
             window (int, optional): Number of periods for the new high / new low lookback.
@@ -7378,17 +7845,17 @@ class Technicals:
             growth (bool, optional): Whether to calculate the growth of the indicator values.
                 Defaults to False.
             lag (int | list[int], optional): The lag to use for the growth calculation.
+                Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
-                Defaults to 1.
 
         Returns:
-            pd.Series or pd.DataFrame: New Highs — New Lows values.
+            pd.Series or pd.DataFrame: New Highs - New Lows values.
 
         Notes:
         - The method retrieves historical data based on the specified `period` and calculates
-          the New Highs — New Lows across all tickers in the Toolkit instance.
+          the New Highs - New Lows across all tickers in the Toolkit instance.
         - If `growth` is set to True, the method calculates the growth of the indicator values
           using the specified `lag`.
 
@@ -7397,25 +7864,26 @@ class Technicals:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(tickers=["AAPL", "MSFT"])
+        toolkit = Toolkit(
+            tickers=["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2024-10-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.technicals.get_new_highs_new_lows()
+        # New Highs - New Lows is one market-wide reading, repeated in every ticker column
+        toolkit.technicals.get_new_highs_new_lows(window=20).loc[:, ["XLK"]].tail(5)
         ```
 
         Which returns:
 
-        | Date       |   AAPL |   MSFT |   Benchmark |
-        |:-----------|-------:|-------:|------------:|
-        | 2026-06-18 |      0 |      0 |           0 |
-        | 2026-06-22 |      0 |      0 |           0 |
-        | 2026-06-23 |     -1 |     -1 |          -1 |
-        | 2026-06-24 |      0 |      0 |           0 |
-        | 2026-06-25 |     -1 |     -1 |          -1 |
-        | 2026-06-26 |      0 |      0 |           0 |
-        | 2026-06-29 |      0 |      0 |           0 |
-        | 2026-06-30 |      1 |      1 |           1 |
-        | 2026-07-01 |      1 |      1 |           1 |
-        | 2026-07-02 |      1 |      1 |           1 |
+        | Date       |   XLK |
+        |:-----------|------:|
+        | 2025-12-24 |     5 |
+        | 2025-12-26 |     1 |
+        | 2025-12-29 |     0 |
+        | 2025-12-30 |     2 |
+        | 2025-12-31 |     0 |
         """
         if period not in [
             "intraday",
@@ -7467,4 +7935,354 @@ class Technicals:
             standardize=standardize,
             axis="rows",
             apply_slice=False,
+        )
+
+    def _close_prices(self, period: str, close_column: str) -> pd.DataFrame:
+        """The closes of a period between the start and end date, with the intraday check."""
+        if period not in PERIODS:
+            raise ValueError(
+                "Period must be intraday, daily, weekly, monthly, quarterly, or yearly."
+            )
+        if period == "intraday":
+            if self._historical_data[period].empty:
+                raise ValueError(
+                    "Please define the 'intraday_period' parameter when initializing the Toolkit."
+                )
+            close_column = "Close"
+        return self._historical_data[period][close_column]
+
+    @handle_errors
+    def get_market_breadth(
+        self,
+        period: str = "daily",
+        close_column: str = "Adj Close",
+        short_window: int = 50,
+        long_window: int = 200,
+        high_low_window: int | None = None,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate the breadth of the market the Toolkit's tickers make up: how many of them take
+        part in a move. An index can rise on the strength of a few large companies while most
+        of its members fall; breadth shows that divergence, which often comes before the index
+        itself turns. Breadth is most meaningful across many tickers, such as the constituents
+        of an index, which `Discovery.get_index_constituents` lists (e.g. the 500 tickers of the
+        S&P 500). Those are today's members: breadth of past dates computed from them leaves out
+        the companies that were removed from the index since (often after falling behind), so
+        it is biased towards the survivors, the further back the more.
+
+        Per date it returns:
+
+        - Advancers, Decliners and Unchanged: the number of tickers whose close rose, fell or
+          stayed the same, and the Net Advances.
+        - Advance-Decline Line: the running total of the net advances. A rising index with a
+          falling line is the classic negative divergence.
+        - Advance-Decline Ratio: the advancers divided by the decliners.
+        - McClellan Oscillator: the ratio-adjusted version, the 19-period minus the 39-period
+          exponential moving average (smoothing constants of 0.10 and 0.05) of the net advances
+          divided by advancers plus decliners (times 1,000); unchanged issues are left out.
+          Each average starts from the simple average of its first 19 or 39 values, so the
+          oscillator starts once the 39-period average exists (NaN before), as does its running
+          total, the McClellan Summation Index.
+        - Percentage Above the short and long moving average: the share of tickers trading
+          above their 50 and 200-period average, a gauge of how broad a trend is.
+        - New Highs and New Lows: the tickers whose close is above the highest (below the
+          lowest) close of the previous `high_low_window` - 1 periods, so the highest or
+          lowest of the last `high_low_window` periods; a close that only equals the previous
+          high is no new high. NaN until at least one ticker has a full window.
+
+        The Benchmark (and a Portfolio) are left out.
+
+        For more information, see the following book:
+
+        - McClellan, S. and McClellan, M. (1970). "Patterns for Profit: The McClellan
+          Oscillator and Summation Index." Trade Levels Inc.
+
+        Also known as: market breadth, advance-decline line, McClellan oscillator, percentage
+        above 200-day moving average, new highs new lows.
+
+        Args:
+            period (str, optional): The time period to consider for historical data.
+                Can be "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
+            close_column (str, optional): The name of the column containing the close prices.
+                Defaults to "Adj Close".
+            short_window (int, optional): The short moving average window. Defaults to 50.
+            long_window (int, optional): The long moving average window. Defaults to 200.
+            high_low_window (int | None, optional): The number of periods, including the current
+                one, of the new highs and lows. Defaults to None, which uses a year of periods:
+                252 daily, 52 weekly, 12 monthly, 4 quarterly and 1 yearly (too short for a new
+                high or low, so those stay NaN), and 252 for intraday data.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None, which uses the rounding of the Toolkit.
+
+        Returns:
+            pd.DataFrame: The breadth measures per date.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Discovery, Toolkit
+
+        discovery = Discovery(api_key="FINANCIAL_MODELING_PREP_KEY")
+
+        constituents = discovery.get_index_constituents("Dow Jones")
+
+        toolkit = Toolkit(
+            constituents.index.tolist(),
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2024-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.technicals.get_market_breadth().tail()
+        ```
+
+        Which returns:
+
+        | Date       |   Advancers |   Decliners |   Unchanged |   Net Advances |   Advance-Decline Line |   Advance-Decline Ratio |   McClellan Oscillator |   McClellan Summation Index |   Percentage Above 50-Period Average |   Percentage Above 200-Period Average |   New Highs |   New Lows |
+        |:-----------|------------:|------------:|------------:|---------------:|-----------------------:|------------------------:|-----------------------:|----------------------------:|-------------------------------------:|--------------------------------------:|------------:|-----------:|
+        | 2025-12-24 |          26 |           3 |           1 |             23 |                    978 |                  8.6667 |                65.5048 |                    -814.088 |                               0.7333 |                                   0.8 |           3 |          0 |
+        | 2025-12-26 |          14 |          16 |           0 |             -2 |                    976 |                  0.875  |                49.8424 |                    -764.246 |                               0.7    |                                   0.8 |           1 |          0 |
+        | 2025-12-29 |          10 |          20 |           0 |            -10 |                    966 |                  0.5    |                22.8684 |                    -741.377 |                               0.7333 |                                   0.8 |           0 |          0 |
+        | 2025-12-30 |           9 |          21 |           0 |            -12 |                    954 |                  0.4286 |                -3.642  |                    -745.019 |                               0.7    |                                   0.8 |           0 |          0 |
+        | 2025-12-31 |           3 |          27 |           0 |            -24 |                    930 |                  0.1111 |               -46.2902 |                    -791.309 |                               0.5667 |                                   0.8 |           0 |          0 |
+        """
+        prices = self._close_prices(period, close_column)
+        constituents = [
+            ticker
+            for ticker in prices.columns
+            if ticker not in ("Portfolio", "Benchmark")
+        ]
+        # A year of periods, so weekly data looks for 52-week highs rather than 252-week ones. Intraday bars have no fixed number per year and keep the daily count.  # noqa: E501
+        if high_low_window is None:
+            high_low_window = PERIODS_PER_YEAR.get(period, PERIODS_PER_YEAR["daily"])
+        breadth = breadth_model.get_market_breadth(
+            prices[constituents], short_window, long_window, high_low_window
+        ).loc[self._start_date : self._end_date]
+
+        return apply_rounding(
+            breadth, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_seasonality(
+        self,
+        frequency: str = "month",
+        close_column: str = "Adj Close",
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate the seasonality of every ticker's returns: the average return per calendar
+        month (from monthly returns) or per day of the week (from daily returns), with the
+        median, the hit rate (the share of positive returns), the t-statistic of the average
+        and the number of observations. Well-known examples are the January effect and the
+        "sell in May" pattern. A pattern needs many years and a t-statistic well above 2 before
+        it says much, and even then it can fade once it is widely traded on.
+
+        A monthly return runs from one month's last close to the next, so a final month that is
+        not complete yet (an end date before that month's last business day, as with the
+        default end date of today) is left out rather than averaged as a full month. The
+        Benchmark is included as a ticker, so its seasonality is there to compare with; a
+        Portfolio is left out.
+
+        For more information, see the following paper:
+
+        - Heston, S.L. and Sadka, R. (2008). "Seasonality in the Cross-Section of Stock
+          Returns." Journal of Financial Economics, 87(2), 418-445.
+
+        Also known as: seasonality, monthly seasonality, day of the week effect, January
+        effect, calendar anomalies.
+
+        Args:
+            frequency (str, optional): "month" (per calendar month) or "weekday" (per day of
+                the week). Defaults to "month".
+            close_column (str, optional): The name of the column containing the close prices.
+                Defaults to "Adj Close".
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None, which uses the rounding of the Toolkit.
+
+        Returns:
+            pd.DataFrame: The Average Return, Median Return, Hit Rate, t-Statistic and
+            Observations per month or weekday, with a column per statistic and ticker.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2000-01-01",
+            end_date="2025-12-31",
+        )
+
+        seasonality = toolkit.technicals.get_seasonality()
+
+        seasonality.xs("AAPL", level=1, axis="columns")
+        ```
+
+        Which returns:
+
+        | Month     |   Average Return |   Median Return |   Hit Rate |   t-Statistic |   Observations |
+        |:----------|-----------------:|----------------:|-----------:|--------------:|---------------:|
+        | January   |           0.0239 |          0.0477 |     0.6    |        0.8733 |             25 |
+        | February  |           0.0139 |          0.0245 |     0.5385 |        0.7962 |             26 |
+        | March     |           0.0486 |          0.0529 |     0.6538 |        2.6472 |             26 |
+        | April     |           0.028  |          0.0057 |     0.5769 |        1.5009 |             26 |
+        | May       |           0.018  |          0.0457 |     0.5769 |        0.7223 |             26 |
+        | June      |           0.0171 |          0.0096 |     0.5385 |        0.8119 |             26 |
+        | July      |           0.0523 |          0.0501 |     0.7692 |        2.7965 |             26 |
+        | August    |           0.0501 |          0.0466 |     0.6538 |        3.2948 |             26 |
+        | September |          -0.0252 |         -0.0128 |     0.4231 |       -0.8129 |             26 |
+        | October   |           0.0529 |          0.0616 |     0.7308 |        2.4423 |             26 |
+        | November  |           0.0306 |          0.0334 |     0.5769 |        1.4177 |             26 |
+        | December  |          -0.0061 |          0.0112 |     0.5385 |       -0.4179 |             26 |
+        """
+        if frequency not in ("month", "weekday"):
+            raise ValueError(
+                f"The frequency must be 'month' or 'weekday', not {frequency!r}."
+            )
+        prices = self._close_prices(
+            "monthly" if frequency == "month" else "daily", close_column
+        )
+        returns = prices.pct_change(fill_method=None).loc[
+            self._start_date : self._end_date
+        ]
+
+        seasonality = pd.concat(
+            {
+                ticker: seasonality_model.get_seasonality(
+                    returns[ticker], frequency, end_date=self._end_date
+                )
+                for ticker in returns.columns
+                if ticker != "Portfolio"
+            },
+            axis=1,
+        ).swaplevel(0, 1, axis=1)
+
+        return apply_rounding(
+            seasonality, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_relative_strength(
+        self,
+        period: str = "daily",
+        close_column: str = "Adj Close",
+        window: int | None = None,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate the relative strength of every ticker against the Benchmark and against the
+        other tickers. Relative strength investing buys what has been outperforming, the
+        momentum effect that has held across markets and decades.
+
+        - Relative Strength: the price divided by the Benchmark's, set to 1 on the first date.
+          It rises while the ticker outperforms the Benchmark.
+        - Mansfield Relative Strength: the relative strength against its own moving average
+          (of `window` periods, a year by default) minus 1. Above zero the ticker is gaining on
+          the Benchmark.
+        - Relative Strength Rating: the ticker's performance over the last year, the last quarter
+          weighing most (the 3, 6, 9 and 12-month returns weighted 0.4, 0.2, 0.2 and
+          0.2), ranked against the other tickers from 1 (weakest) to 99 (strongest), from daily
+          prices. Investor's Business Daily publishes the original rating with a proprietary
+          formula; this weighting is its common public approximation. Tickers with the same
+          score share the highest rank among them, so the rating reads as the share of the
+          other tickers outperformed or matched and tied leaders both rate 99. It needs many
+          tickers to be meaningful, such as the constituents of an index (see
+          `Discovery.get_index_constituents`, whose current members leave out the companies
+          removed from the index since).
+
+        For more information, see the following papers and books:
+
+        - Jegadeesh, N. and Titman, S. (1993). "Returns to Buying Winners and Selling Losers:
+          Implications for Stock Market Efficiency." The Journal of Finance, 48(1), 65-91.
+        - Weinstein, S. (1988). "Stan Weinstein's Secrets for Profiting in Bull and Bear
+          Markets." McGraw-Hill.
+        - O'Neil, W.J. (1988). "How to Make Money in Stocks." McGraw-Hill.
+
+        Also known as: relative strength, price relative, Mansfield relative strength, RS
+        rating, relative performance.
+
+        Args:
+            period (str, optional): The time period to consider for historical data.
+                Can be "daily", "weekly", "monthly", "quarterly" or "yearly". Defaults to "daily".
+            close_column (str, optional): The name of the column containing the close prices.
+                Defaults to "Adj Close".
+            window (int | None, optional): The moving average window of the Mansfield relative
+                strength, in periods. Defaults to None, which uses a year of periods: 252 daily,
+                52 weekly, 12 monthly, 4 quarterly and 1 yearly (a single period, which makes the
+                measure zero, so pass a longer window for yearly data).
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None, which uses the rounding of the Toolkit.
+
+        Returns:
+            pd.DataFrame: The Relative Strength, Mansfield Relative Strength and Relative Strength
+            Rating per date, with a column per measure and ticker.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2022-01-01",
+            end_date="2025-12-31",
+        )
+
+        relative_strength = toolkit.technicals.get_relative_strength()
+
+        relative_strength["Relative Strength Rating"].tail()
+        ```
+
+        Which returns:
+
+        | Date       |   AAPL |   MSFT |   NVDA |   AMZN |   GOOGL |
+        |:-----------|-------:|-------:|-------:|-------:|--------:|
+        | 2025-12-24 |     50 |      1 |     74 |     26 |      99 |
+        | 2025-12-26 |     50 |      1 |     74 |     26 |      99 |
+        | 2025-12-29 |     50 |      1 |     74 |     26 |      99 |
+        | 2025-12-30 |     50 |      1 |     74 |     26 |      99 |
+        | 2025-12-31 |     50 |      1 |     74 |     26 |      99 |
+        """
+        if period == "intraday":
+            raise ValueError("The relative strength needs daily or longer periods.")
+        prices = self._close_prices(period, close_column)
+        if "Benchmark" not in prices:
+            raise ValueError(
+                "The relative strength needs the Benchmark of the Toolkit."
+            )
+        tickers = [
+            ticker
+            for ticker in prices.columns
+            if ticker not in ("Portfolio", "Benchmark")
+        ]
+        # A year of periods whatever the period: 252 periods would be almost five years of weekly and 21 years of monthly prices, leaving most histories without a value.  # noqa: E501
+        relative, mansfield = seasonality_model.get_relative_strength(
+            prices[tickers],
+            prices["Benchmark"],
+            window if window is not None else PERIODS_PER_YEAR[period],
+        )
+
+        rating = seasonality_model.get_relative_strength_rating(
+            self._historical_data["daily"][close_column][tickers]
+        )
+        if period != "daily":
+            rating = rating.groupby(rating.index.asfreq(prices.index.freqstr)).last()
+            rating = rating.reindex(prices.index)
+
+        relative_strength = pd.concat(
+            {
+                "Relative Strength": relative,
+                "Mansfield Relative Strength": mansfield,
+                "Relative Strength Rating": rating,
+            },
+            axis=1,
+        ).loc[self._start_date : self._end_date]
+
+        return apply_rounding(
+            relative_strength, rounding if rounding is not None else self._rounding
         )

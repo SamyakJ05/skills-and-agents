@@ -1,5 +1,7 @@
 # Copyright (C) 2018, 2019, 2020 Dominic O'Kane
 
+from enum import Enum
+from typing import Any, Dict, Union
 from math import ceil
 
 import numpy as np
@@ -11,7 +13,7 @@ from ..utils.error import FinError
 from ..utils.math import normcdf, accrued_interpolator
 from ..market.curves.interpolator import InterpTypes, _uinterpolate
 from ..utils.helpers import label_to_string
-from ..utils.global_types import ExerciseTypes, HWEuropeanCalcTypes
+from ..utils.global_types import ExerciseTypes
 from ..utils.global_vars import G_SMALL
 
 INTERP_TYPE_VALUE = InterpTypes.FLAT_FWD_RATES.value
@@ -25,11 +27,13 @@ J_MAX_LIMIT = 0.184
 ########################################################################################
 
 
+class HWEuropeanCalcTypes(Enum):
+
+    JAMSHIDIAN = 1
+    EXPIRY_ONLY = 2
+    EXPIRY_TREE = 3
 
 ########################################################################################
-
-
-from typing import Any, Dict, List, Optional, Union
 
 
 def option_exercise_types_to_int(option_exercise_type: Any) -> int:
@@ -1427,12 +1431,12 @@ class HWTree:
 
         time_step = int(t_mat / self.dt) + 1
 
-        p = 0.0
+        df = 0.0
         for i in range(0, num_nodes):
             ad = self.qq[time_step, i]
-            p += ad
-        zero_rate = -np.log(p) / t_mat
-        return p, zero_rate
+            df += ad
+        zero_rate = -np.log(df) / t_mat
+        return df, zero_rate
 
     ####################################################################################
 

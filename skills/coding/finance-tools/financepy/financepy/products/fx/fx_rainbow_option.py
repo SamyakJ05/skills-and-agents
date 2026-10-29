@@ -4,19 +4,21 @@
 
 from enum import Enum
 
-from typing import List
-
 import numpy as np
 
 from ...utils.date import Date
 from ...utils.math import normcdf, M
 from ...utils.global_vars import G_DAYS_IN_YEAR
 from ...utils.error import FinError
-from ...models.gbm_process_simulator import get_assets_paths_times
+from ...models.gbm_process_simulator import get_assets_paths
 from ...products.fx.fx_option import FXOption
 
 from ...utils.helpers import check_argument_types
+from ...utils.check_values import check_curve_dt
 
+from ...models.model import Model
+from ...market.curves.discount_curve import DiscountCurve
+from ...utils.helpers import option_years
 
 ########################################################################################
 
@@ -47,13 +49,13 @@ def payoff_value(s, payoff_type_value, payoff_params):
         k = payoff_params[0]
         payoff = np.maximum(k - np.max(s, axis=1), 0.0)
     elif payoff_type_value == FXRainbowOptionTypes.CALL_ON_NTH.value:
-        n = payoff_params[0]
+        n = int(payoff_params[0])
         k = payoff_params[1]
         ssorted = np.sort(s)
         assetn = ssorted[:, -n]
         payoff = np.maximum(assetn - k, 0.0)
     elif payoff_type_value == FXRainbowOptionTypes.PUT_ON_NTH.value:
-        n = payoff_params[0]
+        n = int(payoff_params[0])
         k = payoff_params[1]
         ssorted = np.sort(s)
         assetn = ssorted[:, -n]
@@ -69,35 +71,41 @@ def payoff_value(s, payoff_type_value, payoff_params):
 
 def value_mc_fast(
     t,
-    stock_prices,
-    discount_curve,
-    dividend_yields,
-    volatilities,
+    stock_prices: float,
+    r,
+    foreign_rates: float,
+    volatilities: np.ndarray,
     betas,
-    num_assets,
+    num_assets: int,
     payoff_type,
     payoff_params,
-    num_paths=10000,
+    num_paths: int = 10000,
     seed=4242,
 ):
 
     np.random.seed(seed)
-    df = discount_curve.df(t)
-    r = -np.log(df) / t
-    mus = r - dividend_yields
 
-    num_time_steps = 2
-    s_all = get_assets_paths_times(
+    mus = r - foreign_rates
+
+    # One-factor model: the correlation between two rates is the product of
+    # their betas. The path generator takes the full correlation matrix.
+    betas = np.asarray(betas, dtype=float)
+    corr_matrix = np.outer(betas, betas)
+    np.fill_diagonal(corr_matrix, 1.0)
+
+    _, s_all = get_assets_paths(
         num_assets,
         num_paths,
-        num_time_steps,
         t,
         mus,
         stock_prices,
         volatilities,
-        betas,
+        corr_matrix,
         seed,
     )
+    # get_assets_paths returns (num_assets, num_paths); the payoff functions
+    # below work on (num_paths, num_assets)
+    s_all = s_all.T
 
     payoff = payoff_value(s_all, payoff_type.value, payoff_params)
     payoff = np.mean(payoff)
@@ -116,7 +124,7 @@ class FXRainbowOption(FXOption):
         payoff_type: FXRainbowOptionTypes,
         payoff_params: np.ndarray,
         num_assets: int,
-    ):
+    ) -> None:
 
         check_argument_types(self.__init__, locals())
 
@@ -129,29 +137,23 @@ class FXRainbowOption(FXOption):
 
     ###########################################################################
 
-    def validate(self, stock_prices, dividend_yields, volatilities, betas):
+    def validate(self, stock_prices: float, foreign_rates: float, volatilities: np.ndarray, betas):
 
         if len(stock_prices) != self.num_assets:
-            raise FinError(
-                "Stock prices must be a vector of length " + str(self.num_assets)
-            )
+            raise FinError("Stock prices must be a vector of length " + str(self.num_assets))
 
-        if len(dividend_yields) != self.num_assets:
-            raise FinError(
-                "Dividend yields must be a vector of length " + str(self.num_assets)
-            )
+        if len(foreign_rates) != self.num_assets:
+            raise FinError("Dividend yields must be a vector of length " + str(self.num_assets))
 
         if len(volatilities) != self.num_assets:
-            raise FinError(
-                "Volatilities must be a vector of length " + str(self.num_assets)
-            )
+            raise FinError("Volatilities must be a vector of length " + str(self.num_assets))
 
         if len(betas) != self.num_assets:
             raise FinError("Betas must be a vector of length " + str(self.num_assets))
 
     ###########################################################################
 
-    def validate_payoff(self, payoff_type, payoff_params, num_assets):
+    def validate_payoff(self, payoff_type, payoff_params, num_assets: int):
 
         num_params = 0
 
@@ -171,18 +173,17 @@ class FXRainbowOption(FXOption):
             raise FinError("Unknown payoff type")
 
         if len(payoff_params) != num_params:
-            raise FinError(
-                "Number of parameters required for "
-                + str(payoff_type)
-                + " must be "
-                + str(num_params)
-            )
+            raise FinError("Number of parameters required for " + str(payoff_type) + " must be " + str(num_params))
 
-        if (
-            payoff_type == FXRainbowOptionTypes.CALL_ON_NTH
-            or payoff_type == FXRainbowOptionTypes.PUT_ON_NTH
-        ):
+        if payoff_type == FXRainbowOptionTypes.CALL_ON_NTH or payoff_type == FXRainbowOptionTypes.PUT_ON_NTH:
             n = payoff_params[0]
+            if (
+                isinstance(n, (bool, np.bool_))
+                or not isinstance(n, (int, float, np.integer, np.floating))
+                or not np.isfinite(n)
+                or int(n) != n
+            ):
+                raise FinError("Nth parameter must be an integer rank")
             if n < 1 or n > num_assets:
                 raise FinError("Nth parameter must be 1 to " + str(num_assets))
 
@@ -190,12 +191,12 @@ class FXRainbowOption(FXOption):
 
     def value(
         self,
-        value_dt,
-        stock_prices,
-        domestic_curve,
-        foreign_curve,
-        volatilities,
-        betas,
+        value_dt: Date,
+        stock_prices: np.ndarray,
+        domestic_curve: DiscountCurve,
+        foreign_rates: np.ndarray,
+        volatilities: np.ndarray,
+        betas: np.ndarray,
     ):
 
         if isinstance(value_dt, Date) is False:
@@ -204,13 +205,7 @@ class FXRainbowOption(FXOption):
         if value_dt > self.expiry_dt:
             raise FinError("Valuation date after expiry date.")
 
-        if domestic_curve.value_dt != value_dt:
-            raise FinError(
-                "Domestic Curve valuation date not same as option value date"
-            )
-
-        if foreign_curve.value_dt != value_dt:
-            raise FinError("Foreign Curve valuation date not same as option value date")
+        check_curve_dt(value_dt, domestic_curve)
 
         if self.num_assets != 2:
             raise FinError("Analytical results for two assets only.")
@@ -218,17 +213,19 @@ class FXRainbowOption(FXOption):
         if value_dt > self.expiry_dt:
             raise FinError("Value date after expiry date.")
 
-        self.validate(stock_prices, foreign_curve, volatilities, betas)
+        self.validate(stock_prices, foreign_rates, volatilities, betas)
 
         # Use result by Stulz (1982) given by Haug Page 211
-        t = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
+        t_exp = option_years(value_dt, self.expiry_dt)
 
-        df = domestic_curve.df(t)
-        r = -np.log(df) / t
+        r = domestic_curve.zero_rate_cc(self.expiry_dt)
 
-        q1 = foreign_curve[0]
-        q2 = foreign_curve[1]
-        rho = betas[0] ** 2
+        q1 = foreign_rates[0]
+        q2 = foreign_rates[1]
+
+        # One-factor model: the correlation of the two rates is the product of
+        # their betas, as in the Monte Carlo valuation.
+        rho = betas[0] * betas[1]
         s1 = stock_prices[0]
         s2 = stock_prices[1]
         b1 = r - q1
@@ -238,27 +235,27 @@ class FXRainbowOption(FXOption):
         k = self.payoff_params[0]
 
         v = np.sqrt(v1 * v1 + v2 * v2 - 2 * rho * v1 * v2)
-        d = (np.log(s1 / s2) + (b1 - b2 + v * v / 2) * t) / v / np.sqrt(t)
-        y1 = (np.log(s1 / k) + (b1 + v1 * v1 / 2) * t) / v1 / np.sqrt(t)
-        y2 = (np.log(s2 / k) + (b2 + v2 * v2 / 2) * t) / v2 / np.sqrt(t)
+        d = (np.log(s1 / s2) + (b1 - b2 + v * v / 2) * t_exp) / v / np.sqrt(t_exp)
+        y1 = (np.log(s1 / k) + (b1 + v1 * v1 / 2) * t_exp) / v1 / np.sqrt(t_exp)
+        y2 = (np.log(s2 / k) + (b2 + v2 * v2 / 2) * t_exp) / v2 / np.sqrt(t_exp)
         rho1 = (v1 - rho * v2) / v
         rho2 = (v2 - rho * v1) / v
-        dq1 = np.exp(-q1 * t)
-        dq2 = np.exp(-q2 * t)
-        df = np.exp(-r * t)
-        sqrtt = np.sqrt(t)
+        dq1 = np.exp(-q1 * t_exp)
+        dq2 = np.exp(-q2 * t_exp)
+        df = np.exp(-r * t_exp)
+        sqrtt = np.sqrt(t_exp)
 
         if self.payoff_type == FXRainbowOptionTypes.CALL_ON_MAXIMUM:
             v = (
                 s1 * dq1 * M(y1, d, rho1)
                 + s2 * dq2 * M(y2, -d + v * sqrtt, rho2)
-                - k * df * (1.0 - M(-y1 + v1 * np.sqrt(t), -y2 + v2 * sqrtt, rho))
+                - k * df * (1.0 - M(-y1 + v1 * np.sqrt(t_exp), -y2 + v2 * sqrtt, rho))
             )
         elif self.payoff_type == FXRainbowOptionTypes.CALL_ON_MINIMUM:
             v = (
                 s1 * dq1 * M(y1, -d, -rho1)
-                + s2 * dq2 * M(y2, d - v * np.sqrt(t), -rho2)
-                - k * df * M(y1 - v1 * np.sqrt(t), y2 - v2 * np.sqrt(t), rho)
+                + s2 * dq2 * M(y2, d - v * np.sqrt(t_exp), -rho2)
+                - k * df * M(y1 - v1 * np.sqrt(t_exp), y2 - v2 * np.sqrt(t_exp), rho)
             )
         elif self.payoff_type == FXRainbowOptionTypes.PUT_ON_MAXIMUM:
             cmax1 = s2 * dq2 + s1 * dq1 * normcdf(d) - s2 * dq2 * normcdf(d - v * sqrtt)
@@ -285,29 +282,30 @@ class FXRainbowOption(FXOption):
 
     def value_mc(
         self,
-        value_dt,
-        expiry_dt,
-        stock_prices,
-        discount_curve,
-        dividend_yields,
-        volatilities,
+        value_dt: Date,
+        expiry_dt: Date,
+        stock_prices: float,
+        discount_curve: DiscountCurve,
+        foreign_rates: float,
+        volatilities: np.ndarray,
         betas,
-        num_paths=10000,
+        num_paths: int = 10000,
         seed=4242,
     ):
 
-        self.validate(stock_prices, dividend_yields, volatilities, betas)
+        t_exp = option_years(value_dt, self.expiry_dt)
 
-        if value_dt > expiry_dt:
-            raise FinError("Value date after expiry date.")
+        check_curve_dt(value_dt, discount_curve)
 
-        t = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
+        self.validate(stock_prices, foreign_rates, volatilities, betas)
+
+        r = discount_curve.zero_rate_cc(expiry_dt)
 
         v = value_mc_fast(
-            t,
+            t_exp,
             stock_prices,
-            discount_curve,
-            dividend_yields,
+            r,
+            foreign_rates,
             volatilities,
             betas,
             self.num_assets,

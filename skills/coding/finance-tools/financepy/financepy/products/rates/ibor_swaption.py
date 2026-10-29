@@ -18,10 +18,11 @@ from ...utils.calendar import DateGenRuleTypes
 from ...utils.day_count import DayCountTypes
 from ...utils.frequency import FrequencyTypes
 from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.error import FinError
 from ...utils.helpers import label_to_string, check_argument_types
 from ...utils.date import Date
+from ...market.curves.discount_curve import DiscountCurve
 
 from ...products.rates.ibor_swap import IborSwap
 
@@ -36,6 +37,9 @@ from ...models.bdt_tree import BDTTree
 from ...utils.global_types import OptionTypes
 from ...utils.global_types import SwapTypes
 from ...utils.global_types import ExerciseTypes
+
+from ...utils.check_values import check_curve_dt
+from ...models.model import Model
 
 ########################################################################################
 
@@ -60,7 +64,7 @@ class IborSwaption:
         cal_type: CalendarTypes | list | tuple = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
         """Create a European-style swaption by defining the exercise date of
         the swaption, and all of the details of the underlying interest rate
         swap including the fixed cpn and the details of the fixed and the
@@ -100,7 +104,9 @@ class IborSwaption:
 
     ###########################################################################
 
-    def value(self, value_dt, discount_curve, model):
+    def value(self, value_dt: Date,
+              discount_curve: DiscountCurve,
+              model: Model):
         """Valuation of a Ibor European-style swaption using a choice of
         models on a specified valuation date. Models include FinModelBlack,
         FinModelBlackShifted, SABR, SABRShifted, FinModelHW,
@@ -128,6 +134,11 @@ class IborSwaption:
 
         k = self.fixed_cpn
 
+        check_curve_dt(value_dt, discount_curve)
+
+        if value_dt > self.exercise_dt:
+            raise FinError("Valuation date after exercise date")
+
         # The pv01 is the value of the swap cash flows as of the curve date
         pv01 = swap.pv01(value_dt, discount_curve)
 
@@ -135,8 +146,8 @@ class IborSwaption:
         # date that makes the forward swap worth par including principal
         s = swap.swap_rate(value_dt, discount_curve)
 
-        t_exp = (self.exercise_dt - self.settle_dt) / G_DAYS_IN_YEAR
-        t_mat = (self.maturity_dt - self.settle_dt) / G_DAYS_IN_YEAR
+        t_exp = (self.exercise_dt - value_dt) / G_DAYS_IN_YEAR
+        t_mat = (self.maturity_dt - value_dt) / G_DAYS_IN_YEAR
 
         # Discounting is done via the PV01 annuity so no discounting in Black
         df = 1.0
@@ -284,9 +295,7 @@ class IborSwaption:
 
     ###########################################################################
 
-    def cash_settled_value(
-        self, value_dt: Date, discount_curve, swap_rate: float, model
-    ):
+    def cash_settled_value(self, value_dt: Date, discount_curve: DiscountCurve, swap_rate: float, model: Model):
         """Valuation of a Ibor European-style swaption using a cash settled
         approach which is a market convention that used Black's model and that
         discounts all of the future payments at a flat swap rate. Note that the
@@ -294,6 +303,11 @@ class IborSwaption:
         Black volatility for the standard arbitrage-free valuation."""
 
         float_spread = 0.0
+
+        check_curve_dt(value_dt, discount_curve)
+
+        if value_dt > self.exercise_dt:
+            raise FinError("Valuation date after exercise date")
 
         swap = IborSwap(
             self.exercise_dt,
@@ -316,7 +330,7 @@ class IborSwaption:
 
         pv01 = swap.cash_settled_pv01(value_dt, swap_rate, self.fixed_freq_type)
 
-        t_exp = (self.exercise_dt - self.settle_dt) / G_DAYS_IN_YEAR
+        t_exp = (self.exercise_dt - value_dt) / G_DAYS_IN_YEAR
 
         # Discounting is done via the PV01 annuity so no discounting in Black
         df = 1.0
@@ -329,9 +343,7 @@ class IborSwaption:
             elif self.fixed_leg_type == SwapTypes.RECEIVE:
                 swaption_price = model.value(s, k, t_exp, df, OptionTypes.EUROPEAN_PUT)
         else:
-            raise FinError(
-                "Cash settled swaptions must be priced using" + " Black's model."
-            )
+            raise FinError("Cash settled swaptions must be priced using" + " Black's model.")
 
         self.fwd_swap_rate = swap_rate
         self.forward_df = discount_curve.df(self.exercise_dt)

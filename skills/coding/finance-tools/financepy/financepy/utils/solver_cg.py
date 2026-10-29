@@ -1,13 +1,14 @@
 import warnings
 import numpy as np
 from scipy.optimize.linesearch import (
-    LineSearchWarning,
     line_search_wolfe1,
     line_search_wolfe2,
 )
 
+from scipy.optimize import LineSearchWarning
+
 Inf = np.inf
-EPSILON = 1e-20
+EPSILON = 1.4901161193847656e-8
 
 _status_message = {
     "success": "Optimization terminated successfully.",
@@ -36,7 +37,7 @@ class ScalarFunction:
         epsilon=1.4901161193847656e-8,
         bounds=None,
         finite_diff_rel_step=None,
-    ):
+    ) -> None:
         self.fun = lambda x: fun(x, *args)
         if callable(grad):
             self.grad = lambda x: grad(x, *args)
@@ -291,7 +292,19 @@ def fmin_cg(
     #     "return_all": retall,
     # }
 
-    res = _minimize_cg(f, x0, args=fargs, jac=fprime, callback=callback)
+    res = _minimize_cg(
+        f,
+        x0,
+        args=fargs,
+        jac=fprime,
+        callback=callback,
+        gtol=gtol,
+        norm=norm,
+        eps=epsilon,
+        maxiter=maxiter,
+        disp=bool(disp),
+        return_all=bool(retall),
+    )
 
     if full_output:
         retlist = res["x"], res["fun"], res["nfev"], res["njev"], res["status"]

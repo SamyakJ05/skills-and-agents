@@ -2,14 +2,15 @@
 
 __docformat__ = "google"
 
+
 import pandas as pd
 
 
 def get_earnings_per_share(
-    net_income: pd.Series,
-    preferred_dividends: pd.Series,
-    average_outstanding_shares: pd.Series,
-) -> pd.Series:
+    net_income: pd.Series | pd.DataFrame,
+    preferred_dividends: pd.Series | float,
+    average_outstanding_shares: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the earnings per share (EPS), a valuation ratio that measures the
     amount of net income earned per share of outstanding common stock.
@@ -26,8 +27,9 @@ def get_earnings_per_share(
 
 
 def get_revenue_per_share(
-    total_revenue: pd.Series, shares_outstanding: pd.Series
-) -> pd.Series:
+    total_revenue: pd.Series | pd.DataFrame,
+    shares_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the revenue per share, a valuation ratio that measures the amount of
     revenue generated per outstanding share of a company's stock.
@@ -43,8 +45,8 @@ def get_revenue_per_share(
 
 
 def get_price_to_earnings_ratio(
-    stock_price: pd.Series, earnings_per_share: pd.Series
-) -> pd.Series:
+    stock_price: pd.Series | pd.DataFrame, earnings_per_share: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price earnings ratio (P/E), a valuation ratio that compares a company's
     stock price to its earnings per share.
@@ -60,8 +62,9 @@ def get_price_to_earnings_ratio(
 
 
 def get_price_to_earnings_growth_ratio(
-    price_earnings: pd.Series, growth_rate: pd.Series
-) -> pd.Series:
+    price_earnings: pd.Series | pd.DataFrame,
+    growth_rate: pd.Series | pd.DataFrame | float,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price earnings to growth (PEG) ratio, a valuation metric that measures the ratio
     of the price-to-earnings ratio to a company specific growth rate.
@@ -83,38 +86,55 @@ def get_price_to_earnings_growth_ratio(
 def get_estimated_eps_growth_rate(
     estimated_eps: float | pd.Series | pd.DataFrame,
     trailing_eps: float | pd.Series | pd.DataFrame,
+    years: float | pd.Series | pd.DataFrame = 1,
 ) -> float | pd.Series | pd.DataFrame:
     """
-    Calculate the estimated EPS growth rate, i.e. the growth implied by the analyst
-    consensus (average) EPS estimate for a future period relative to the company's
+    Calculate the estimated EPS growth rate, i.e. the annualized growth implied by the
+    analyst consensus (average) EPS estimate for a future period relative to the company's
     most recently reported actual (trailing) EPS.
 
     Unlike the generic `growth=True` parameter available on every ratio and model
     method — which compares two already-reported historical periods — this bridges an
     actual reported figure to a forward-looking analyst estimate, which is what a
-    forward-looking metric such as the PEG ratio needs.
+    forward-looking metric such as the PEG ratio needs. The growth is annualized over
+    the years between the two, so the estimates of later years give a yearly rate that
+    is comparable with that of the next year.
 
     The formula is as follows:
 
-        Estimated EPS Growth Rate = (Estimated EPS - Trailing EPS) / |Trailing EPS|
+        Estimated EPS Growth Rate = (Estimated EPS / Trailing EPS) ^ (1 / Years) - 1
+
+    A compound rate only exists when both EPS figures are positive and the estimate lies
+    in the future (Years > 0); otherwise the growth rate is NaN.
 
     Args:
         estimated_eps (float | pd.Series | pd.DataFrame): The analyst consensus
-        (average) EPS estimate for a future period.
+            (average) EPS estimate for a future period.
         trailing_eps (float | pd.Series | pd.DataFrame): The company's most recently
-        reported actual EPS.
+            reported actual EPS.
+        years (float | pd.Series | pd.DataFrame, optional): The number of years between the
+            trailing EPS and the estimate. Defaults to 1.
 
     Returns:
-        float | pd.Series | pd.DataFrame: The estimated EPS growth rate.
+        float | pd.Series | pd.DataFrame: The annualized estimated EPS growth rate.
     """
-    return (estimated_eps - trailing_eps) / abs(trailing_eps)
+    eps_ratio = estimated_eps / trailing_eps
+
+    valid = (estimated_eps > 0) & (trailing_eps > 0) & (years > 0)
+
+    growth_rate = eps_ratio ** (1 / years) - 1
+
+    if isinstance(growth_rate, pd.Series | pd.DataFrame):
+        return growth_rate.where(valid)
+
+    return growth_rate if valid else float("nan")
 
 
 def get_book_value_per_share(
-    total_shareholder_equity: pd.Series,
-    preferred_equity: pd.Series,
-    common_shares_outstanding: pd.Series,
-) -> pd.Series:
+    total_shareholder_equity: pd.Series | pd.DataFrame,
+    preferred_equity: pd.Series | pd.DataFrame,
+    common_shares_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the book value per share, a valuation ratio that measures the amount of
     common equity value per share outstanding.
@@ -131,8 +151,9 @@ def get_book_value_per_share(
 
 
 def get_price_to_book_ratio(
-    price_per_share: pd.Series, book_value_per_share: pd.Series
-) -> pd.Series:
+    price_per_share: pd.Series | pd.DataFrame,
+    book_value_per_share: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price to book ratio, a valuation ratio that compares a company's market
     price to its book value per share.
@@ -148,10 +169,10 @@ def get_price_to_book_ratio(
 
 
 def get_interest_debt_per_share(
-    interest_expense: pd.Series,
-    total_debt: pd.Series,
-    shares_outstanding: pd.Series,
-) -> pd.Series:
+    interest_expense: pd.Series | pd.DataFrame,
+    total_debt: pd.Series | pd.DataFrame,
+    shares_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the interest debt per share, a valuation ratio that measures the
     combined interest expense and debt burden of a company per outstanding share
@@ -176,8 +197,9 @@ def get_interest_debt_per_share(
 
 
 def get_capex_per_share(
-    capital_expenditures: pd.Series, shares_outstanding: pd.Series
-) -> pd.Series:
+    capital_expenditures: pd.Series | pd.DataFrame,
+    shares_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the capex per share, a valuation ratio that measures the amount of
     capital expenditures made per outstanding share of a company's stock.
@@ -193,9 +215,8 @@ def get_capex_per_share(
 
 
 def get_dividend_yield(
-    dividends: pd.Series,
-    stock_price: pd.Series,
-) -> pd.Series:
+    dividends: pd.Series | pd.DataFrame, stock_price: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the dividend yield ratio, a valuation ratio that measures the amount of
     dividends distributed per share of stock relative to the stock's price.
@@ -211,10 +232,10 @@ def get_dividend_yield(
 
 
 def get_weighted_dividend_yield(
-    dividends_paid: pd.Series,
-    shares_outstanding: pd.Series,
-    stock_price: pd.Series,
-) -> pd.Series:
+    dividends_paid: pd.Series | pd.DataFrame,
+    shares_outstanding: pd.Series | pd.DataFrame,
+    stock_price: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the weighted dividend yield ratio, a valuation ratio that measures the amount of
     dividends distributed per share of stock relative to the stock's price.
@@ -234,8 +255,8 @@ def get_weighted_dividend_yield(
 
 
 def get_price_to_cash_flow_ratio(
-    market_cap: pd.Series, operations_cash_flow: pd.Series
-) -> pd.Series:
+    market_cap: pd.Series | pd.DataFrame, operations_cash_flow: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price to cash flow ratio, a valuation ratio that compares a company's market
     price to its cash flow per share.
@@ -251,8 +272,8 @@ def get_price_to_cash_flow_ratio(
 
 
 def get_price_to_free_cash_flow_ratio(
-    market_cap: pd.Series, free_cash_flow: pd.Series
-) -> pd.Series:
+    market_cap: pd.Series | pd.DataFrame, free_cash_flow: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price to free cash flow ratio, a valuation ratio that compares a company's market
     price to its free cash flow per share.
@@ -268,8 +289,8 @@ def get_price_to_free_cash_flow_ratio(
 
 
 def get_price_to_sales_ratio(
-    market_cap: pd.Series, total_revenue: pd.Series
-) -> pd.Series:
+    market_cap: pd.Series | pd.DataFrame, total_revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the price to sales ratio (P/S), a valuation ratio that compares a
     company's market capitalization to its total revenue.
@@ -300,9 +321,9 @@ def get_price_to_sales_ratio(
 
 
 def get_market_cap(
-    share_price: pd.Series,
-    total_shares_outstanding: pd.Series,
-) -> pd.Series:
+    share_price: pd.Series | pd.DataFrame,
+    total_shares_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the market capitalization of the company.
 
@@ -319,12 +340,12 @@ def get_market_cap(
 
 
 def get_enterprise_value(
-    market_cap: pd.Series,
-    total_debt: pd.Series,
-    minority_interest: pd.Series,
-    preferred_equity: pd.Series,
-    cash_and_cash_equivalents: pd.Series,
-) -> pd.Series:
+    market_cap: pd.Series | pd.DataFrame,
+    total_debt: pd.Series | pd.DataFrame,
+    minority_interest: pd.Series | pd.DataFrame,
+    preferred_equity: pd.Series | pd.DataFrame,
+    cash_and_cash_equivalents: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the Enterprise Value (EV) of a company. The Enterprise Value (EV)
     is a measure of a company's total value, often used as a more comprehensive
@@ -339,7 +360,8 @@ def get_enterprise_value(
         total_debt (float or pd.Series): The total debt of the company.
         minority_interest (float or pd.Series): The value of minority interest in the company.
         preferred_equity (float or pd.Series): The value of the preferred equity in the company.
-        cash_and_cash_equivalents (float or pd.Series): The value of cash and cash equivalents of the company.
+        cash_and_cash_equivalents (float or pd.Series): The value of cash and cash equivalents of the
+            company, or of cash and short-term investments to also deduct marketable securities.
 
     Returns:
         float | pd.Series: The Enterprise Value (EV) of the company.
@@ -354,8 +376,8 @@ def get_enterprise_value(
 
 
 def get_ev_to_sales_ratio(
-    enterprise_value: pd.Series, total_revenue: pd.Series
-) -> pd.Series:
+    enterprise_value: pd.Series | pd.DataFrame, total_revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the EV to sales ratio, a valuation ratio that compares a company's enterprise value
     (EV) to its total revenue.
@@ -371,10 +393,10 @@ def get_ev_to_sales_ratio(
 
 
 def get_ev_to_ebitda_ratio(
-    enterprise_value: pd.Series,
-    operating_income: pd.Series,
-    depreciation_and_amortization: pd.Series,
-) -> pd.Series:
+    enterprise_value: pd.Series | pd.DataFrame,
+    operating_income: pd.Series | pd.DataFrame,
+    depreciation_and_amortization: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the enterprise value over EBITDA ratio, which is a valuation ratio
     that measures a company's total value (including debt and equity) relative to its
@@ -393,8 +415,9 @@ def get_ev_to_ebitda_ratio(
 
 
 def get_ev_to_operating_cashflow_ratio(
-    enterprise_value: pd.Series, operating_cashflow: pd.Series
-) -> pd.Series:
+    enterprise_value: pd.Series | pd.DataFrame,
+    operating_cashflow: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the enterprise value over operating cash flow ratio, which is a valuation ratio
     that measures a company's total value (including debt and equity) relative to its
@@ -412,8 +435,9 @@ def get_ev_to_operating_cashflow_ratio(
 
 
 def get_earnings_yield(
-    earnings_per_share: pd.Series, market_price_per_share: pd.Series
-) -> pd.Series:
+    earnings_per_share: pd.Series | pd.DataFrame,
+    market_price_per_share: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the earnings yield ratio, which measures the earnings per share relative
     to the market price per share.
@@ -428,7 +452,9 @@ def get_earnings_yield(
     return earnings_per_share / market_price_per_share
 
 
-def get_dividend_payout_ratio(dividends: pd.Series, net_income: pd.Series) -> pd.Series:
+def get_dividend_payout_ratio(
+    dividends: pd.Series | pd.DataFrame, net_income: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the dividend payout ratio, which measures the proportion of net income paid out as
     dividends to shareholders.
@@ -443,7 +469,9 @@ def get_dividend_payout_ratio(dividends: pd.Series, net_income: pd.Series) -> pd
     return abs(dividends) / net_income
 
 
-def get_reinvestment_ratio(dividend_payout_ratio: pd.Series) -> pd.Series:
+def get_reinvestment_ratio(
+    dividend_payout_ratio: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the reinvestment ratio, which measures the proportion of net income
     retained by the company to reinvest in the business.
@@ -458,29 +486,34 @@ def get_reinvestment_ratio(dividend_payout_ratio: pd.Series) -> pd.Series:
 
 
 def get_tangible_asset_value(
-    total_assets: pd.Series,
-    total_liabilities: pd.Series,
-    goodwill: pd.Series,
-) -> pd.Series:
+    total_assets: pd.Series | pd.DataFrame,
+    total_liabilities: pd.Series | pd.DataFrame,
+    goodwill_and_intangible_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
-    Calculate the tangible asset value, which represents the total value of a company's assets
-    that can be used to generate revenue.
+    Calculate the tangible asset value, the book value of a company's equity after
+    deducting goodwill and other intangible assets.
+
+    The formula is as follows:
+
+        Tangible Asset Value = Total Assets - Total Liabilities - Goodwill and Intangible Assets
 
     Args:
         total_assets (float or pd.Series): The total assets of the company.
         total_liabilities (float or pd.Series): The total liabilities of the company.
-        goodwill (float or pd.Series): The goodwill of the company.
+        goodwill_and_intangible_assets (float or pd.Series): The goodwill and other intangible
+            assets of the company.
 
     Returns:
         float | pd.Series: The tangible asset value.
     """
-    return total_assets - total_liabilities - goodwill
+    return total_assets - total_liabilities - goodwill_and_intangible_assets
 
 
 def get_net_current_asset_value(
-    total_current_assets: pd.Series,
-    total_liabilities: pd.Series,
-) -> pd.Series:
+    total_current_assets: pd.Series | pd.DataFrame,
+    total_liabilities: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the net current asset value (Benjamin Graham's NCAV), which is the total value
     of a company's current assets minus its total liabilities (not just its current liabilities).
@@ -496,9 +529,9 @@ def get_net_current_asset_value(
 
 
 def get_ev_to_ebit(
-    enterprise_value: pd.Series,
-    earnings_before_interest_and_taxes: pd.Series,
-) -> pd.Series:
+    enterprise_value: pd.Series | pd.DataFrame,
+    earnings_before_interest_and_taxes: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the enterprise value multiplier, a financial ratio that measures the total value of a
     company's operations (including debt and equity) relative to its earnings before interest and taxes.
@@ -514,8 +547,8 @@ def get_ev_to_ebit(
 
 
 def get_ev_to_free_cash_flow_ratio(
-    enterprise_value: pd.Series, free_cash_flow: pd.Series
-) -> pd.Series:
+    enterprise_value: pd.Series | pd.DataFrame, free_cash_flow: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the EV to free cash flow ratio, a valuation ratio that compares a company's
     enterprise value (EV) to its free cash flow.
@@ -531,10 +564,10 @@ def get_ev_to_free_cash_flow_ratio(
 
 
 def get_buyback_yield(
-    repurchase_of_common_stock: pd.Series,
-    issuance_of_common_stock: pd.Series,
-    market_capitalization: pd.Series,
-) -> pd.Series:
+    repurchase_of_common_stock: pd.Series | pd.DataFrame,
+    issuance_of_common_stock: pd.Series | pd.DataFrame,
+    market_capitalization: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the buyback yield, a valuation ratio that measures the net amount of
     common stock repurchased (net of new shares issued) relative to the company's
@@ -561,8 +594,8 @@ def get_buyback_yield(
 
 
 def get_shareholder_yield(
-    dividend_yield: pd.Series, buyback_yield: pd.Series
-) -> pd.Series:
+    dividend_yield: pd.Series | pd.DataFrame, buyback_yield: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the total shareholder yield, a valuation ratio that combines the dividend
     yield and the buyback yield to measure the total cash returned to shareholders
@@ -579,8 +612,9 @@ def get_shareholder_yield(
 
 
 def get_sbc_adjusted_free_cash_flow(
-    free_cash_flow: pd.Series, stock_based_compensation: pd.Series
-) -> pd.Series:
+    free_cash_flow: pd.Series | pd.DataFrame,
+    stock_based_compensation: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the stock-based compensation (SBC) adjusted free cash flow, which
     deducts non-cash SBC expenses from free cash flow to give a more conservative

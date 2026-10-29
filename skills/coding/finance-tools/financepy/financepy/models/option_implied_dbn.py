@@ -7,7 +7,7 @@ import numpy as np
 from ..utils.global_types import OptionTypes
 from ..utils.error import FinError
 
-from .black_scholes_analytic import european_value
+from .bs_european_analytic import european_value
 from typing import Sequence
 
 ###############################################################################
@@ -130,7 +130,7 @@ def option_implied_dbn(
 
     second_diffs = values[2:] - 2.0 * values[1:-1] + values[:-2]
 
-    density_dk[1:-1] = inflator * second_diffs / dk
+    density_dk[1:-1] = inflator * second_diffs / dk / dk
 
     return density_dk
 

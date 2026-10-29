@@ -2,13 +2,13 @@
 
 __docformat__ = "google"
 
+
 import pandas as pd
 
 
 def get_asset_turnover_ratio(
-    sales: pd.Series,
-    average_total_assets: pd.Series,
-) -> pd.Series:
+    sales: pd.Series | pd.DataFrame, average_total_assets: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the asset turnover ratio, an efficiency ratio that measures how
     efficiently a company uses its assets to generate sales.
@@ -25,9 +25,9 @@ def get_asset_turnover_ratio(
 
 
 def get_inventory_turnover_ratio(
-    cost_of_goods_sold: pd.Series,
-    average_inventory: pd.Series,
-) -> pd.Series:
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_inventory: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the inventory turnover ratio, an efficiency ratio that measures
     how quickly a company sells its inventory.
@@ -44,10 +44,10 @@ def get_inventory_turnover_ratio(
 
 
 def get_days_of_inventory_outstanding(
-    average_inventory: pd.Series,
-    cost_of_goods_sold: pd.Series,
+    average_inventory: pd.Series | pd.DataFrame,
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
     days: int | float = 365,
-) -> pd.Series:
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the days sales in inventory ratio, an efficiency ratio that measures
     how long it takes a company to sell its inventory.
@@ -56,7 +56,8 @@ def get_days_of_inventory_outstanding(
         average_inventory (float or pd.Series): Average inventory of the company.
         This is typically calculated as (beginning inventory + ending inventory) / 2.
         cost_of_goods_sold (float or pd.Series): Total cost of goods sold of the company.
-        days (int, optional): Number of days in the year. Defaults to 365.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
 
     Returns:
         float | pd.Series: The days sales in inventory ratio value.
@@ -65,10 +66,10 @@ def get_days_of_inventory_outstanding(
 
 
 def get_days_of_sales_outstanding(
-    average_accounts_receivable: pd.Series,
-    net_credit_sales: pd.Series,
+    average_accounts_receivable: pd.Series | pd.DataFrame,
+    net_credit_sales: pd.Series | pd.DataFrame,
     days: int | float = 365,
-) -> pd.Series:
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the days of sales outstanding, an efficiency ratio that measures
     the average number of days it takes a company to collect payment on its
@@ -78,7 +79,8 @@ def get_days_of_sales_outstanding(
         average_accounts_receivable (float or pd.Series): Average accounts receivable of the company.
         This is typically calculated as (beginning accounts receivable + ending accounts receivable) / 2.
         net_credit_sales (float or pd.Series): Net credit sales of the company.
-        days (int, optional): Number of days in the year. Defaults to 365.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
 
     Returns:
         float | pd.Series: The days of sales outstanding value.
@@ -87,8 +89,9 @@ def get_days_of_sales_outstanding(
 
 
 def get_operating_cycle(
-    days_of_inventory: pd.Series, days_of_sales_outstanding: pd.Series
-) -> pd.Series:
+    days_of_inventory: pd.Series | pd.DataFrame,
+    days_of_sales_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the operating cycle, an efficiency ratio that measures the average
     number of days it takes a company to turn its inventory into cash.
@@ -104,9 +107,9 @@ def get_operating_cycle(
 
 
 def get_accounts_payables_turnover_ratio(
-    cost_of_goods_sold: pd.Series,
-    average_accounts_payable: pd.Series,
-) -> pd.Series:
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_accounts_payable: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the accounts payable turnover ratio is an efficiency ratio that measures how
     quickly a company pays its suppliers.
@@ -122,10 +125,10 @@ def get_accounts_payables_turnover_ratio(
 
 
 def get_days_of_accounts_payable_outstanding(
-    cost_of_goods_sold: pd.Series,
-    average_accounts_payable: pd.Series,
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_accounts_payable: pd.Series | pd.DataFrame,
     days: int | float = 365,
-) -> pd.Series:
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the days payables outstanding, an efficiency ratio that measures the
     number of days it takes a company to pay its suppliers.
@@ -134,7 +137,8 @@ def get_days_of_accounts_payable_outstanding(
         cost_of_goods_sold (float or pd.Series): Total Costs of Goods Sold of the company.
         average_accounts_payable (float or pd.Series): Average accounts payable of the company.
         This is typically calculated as (beginning accounts payable + ending accounts payable) / 2.
-        days (int, optional): Number of days in the year. Defaults to 365.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
 
     Returns:
         float | pd.Series: The days payables outstanding value.
@@ -143,10 +147,10 @@ def get_days_of_accounts_payable_outstanding(
 
 
 def get_cash_conversion_cycle(
-    days_inventory: pd.Series,
-    days_sales_outstanding: pd.Series,
-    days_payables_outstanding: pd.Series,
-) -> pd.Series:
+    days_inventory: pd.Series | pd.DataFrame,
+    days_sales_outstanding: pd.Series | pd.DataFrame,
+    days_payables_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the Cash Conversion Cycle, which measures the amount of time it takes for a company to convert
     its investments in inventory and accounts receivable into cash, while considering the time it takes to pay
@@ -164,9 +168,9 @@ def get_cash_conversion_cycle(
 
 
 def get_receivables_turnover(
-    average_accounts_receivable: pd.Series,
-    net_credit_sales: pd.Series,
-) -> pd.Series:
+    average_accounts_receivable: pd.Series | pd.DataFrame,
+    net_credit_sales: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the receivables turnover, an efficiency ratio that measures how many
     times per period a company collects its average accounts receivable, i.e. how
@@ -191,7 +195,9 @@ def get_receivables_turnover(
     return net_credit_sales / average_accounts_receivable
 
 
-def get_sga_to_revenue_ratio(sga_expenses: pd.Series, revenue: pd.Series) -> pd.Series:
+def get_sga_to_revenue_ratio(
+    sga_expenses: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculates the sales, general, and administrative (SG&A) expenses to revenue ratio,
     which measures the SG&A expenses relative to the revenue of the company.
@@ -207,16 +213,17 @@ def get_sga_to_revenue_ratio(sga_expenses: pd.Series, revenue: pd.Series) -> pd.
 
 
 def get_fixed_asset_turnover(
-    net_sales: pd.Series,
-    average_net_fixed_assets: pd.Series,
-) -> pd.Series:
+    net_sales: pd.Series | pd.DataFrame,
+    average_net_fixed_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the Fixed Asset Turnover ratio, an efficiency ratio that
     measures how efficiently a company uses its fixed assets to generate sales.
 
     Args:
         net_sales (float or pd.Series): Total sales of the company.
-        average_net_fixed_assets (float or pd.Series): Average net fixed assets of the company.
+        average_net_fixed_assets (float or pd.Series): Average net property, plant and equipment
+            of the company.
 
     Returns:
         float | pd.Series: The Fixed Asset Turnover ratio value.
@@ -225,9 +232,8 @@ def get_fixed_asset_turnover(
 
 
 def get_operating_margin(
-    operating_income: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    operating_income: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the operating margin, a financial metric that measures the
     percentage of revenue that remains after covering operating expenses.
@@ -244,10 +250,10 @@ def get_operating_margin(
 
 
 def get_operating_ratio(
-    operating_expenses: pd.Series,
-    cost_of_goods_sold: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    operating_expenses: pd.Series | pd.DataFrame,
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the operating ratio, a financial metric that measures the efficiency
     of a company's operations by comparing its operating expenses to its revenue.
@@ -282,9 +288,9 @@ def get_cash_conversion_efficiency(
 
 
 def get_research_and_development_ratio(
-    research_and_development_expenses: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    research_and_development_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the research and development (R&D) intensity ratio, an efficiency ratio
     that measures how much a company reinvests in research and development relative
@@ -306,9 +312,9 @@ def get_research_and_development_ratio(
 
 
 def get_selling_and_marketing_ratio(
-    selling_and_marketing_expenses: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    selling_and_marketing_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the selling and marketing (S&M) expenses to revenue ratio, an efficiency
     ratio that measures the proportion of revenue spent on selling and marketing
@@ -330,9 +336,9 @@ def get_selling_and_marketing_ratio(
 
 
 def get_general_and_administrative_ratio(
-    general_and_administrative_expenses: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    general_and_administrative_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the general and administrative (G&A) expenses to revenue ratio, an
     efficiency ratio that measures the proportion of revenue spent on general and
@@ -354,9 +360,9 @@ def get_general_and_administrative_ratio(
 
 
 def get_stock_based_compensation_ratio(
-    stock_based_compensation: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    stock_based_compensation: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the stock-based compensation (SBC) to revenue ratio, an efficiency
     ratio that measures how much of a company's revenue is being used to compensate
@@ -378,9 +384,8 @@ def get_stock_based_compensation_ratio(
 
 
 def get_working_capital_turnover_ratio(
-    revenue: pd.Series,
-    average_working_capital: pd.Series,
-) -> pd.Series:
+    revenue: pd.Series | pd.DataFrame, average_working_capital: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the working capital turnover ratio, an efficiency ratio that measures how
     effectively a company uses its working capital to generate revenue.
@@ -409,9 +414,8 @@ def get_working_capital_turnover_ratio(
 
 
 def get_deferred_revenue_ratio(
-    deferred_revenue: pd.Series,
-    revenue: pd.Series,
-) -> pd.Series:
+    deferred_revenue: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the deferred revenue ratio, an efficiency ratio that measures the size
     of a company's deferred revenue (payments collected for goods or services not yet

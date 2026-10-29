@@ -3,7 +3,6 @@
 ##############################################################################
 
 from typing import Union
-from enum import Enum
 
 import numpy as np
 
@@ -14,15 +13,15 @@ from ...utils.frequency import FrequencyTypes
 from ...utils.calendar import CalendarTypes, DateGenRuleTypes
 from ...utils.calendar import Calendar, BusDayAdjustTypes
 from ...utils.helpers import check_argument_types, label_to_string
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.global_types import SwapTypes
 from ...market.curves.discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
 
 from .swap_fixed_leg import SwapFixedLeg
 from .swap_float_leg import SwapFloatLeg
 
 ########################################################################################
-
 
 
 ########################################################################################
@@ -73,7 +72,7 @@ class OIS:
         cal_type: CalendarTypes = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
         """Create an overnight index swap contract giving the contract start
         date, its maturity, fixed cpn, fixed leg frequency, fixed leg day
         count convention and notional. The floating leg parameters have default
@@ -136,36 +135,29 @@ class OIS:
 
     ##########################################################################
 
-    def value(
-        self, value_dt: Date, ois_curve: DiscountCurve, first_fixing_rate=None
-    ):
+    def value(self, value_dt: Date, ois_curve: DiscountCurve, first_fixing_rate: float=None):
         """Value the interest rate swap on a value date given a single Ibor
         discount curve."""
 
+        check_curve_dt(value_dt, ois_curve)
+
         fixed_leg_value = self.fixed_leg.value(value_dt, ois_curve)
 
-        float_leg_value = self.float_leg.value(
-            value_dt, ois_curve, ois_curve, first_fixing_rate
-        )
+        float_leg_value = self.float_leg.value(value_dt, ois_curve, ois_curve, first_fixing_rate)
 
         value = fixed_leg_value + float_leg_value
         return value
 
     ###########################################################################
 
-    def pv01(self, value_dt, discount_curve):
+    def pv01(self, value_dt: Date, discount_curve: DiscountCurve):
         """Calculate the value of 1 basis point cpn on the fixed leg."""
 
-        pv = self.fixed_leg.value(value_dt, discount_curve)
-        pv01 = pv / self.fixed_leg.cpn / self.fixed_leg.notional
-
-        # Needs to be positive even if it is a payer leg and/or cpn < 0
-        pv01 = np.abs(pv01)
-        return pv01
+        return self.fixed_leg.pv01(value_dt, discount_curve)
 
     ###########################################################################
 
-    def swap_rate(self, value_dt, ois_curve, first_fixing_rate=None):
+    def swap_rate(self, value_dt: Date, ois_curve: DiscountCurve, first_fixing_rate: float=None):
         """Calculate the fixed leg cpn that makes the swap worth zero.
         If the valuation date is before the swap payments start then this
         is the forward swap rate as it starts in the future. The swap rate
@@ -175,9 +167,10 @@ class OIS:
 
         pv01 = self.pv01(value_dt, ois_curve)
 
-        float_leg_value = self.float_leg.value(
-            value_dt, ois_curve, ois_curve, first_fixing_rate
-        )
+        float_leg_value = self.float_leg.value(value_dt, ois_curve, ois_curve, first_fixing_rate)
+
+        if self.float_leg.leg_type == SwapTypes.PAY:
+            float_leg_value = -float_leg_value
 
         cpn = float_leg_value / pv01 / self.fixed_leg.notional
         return cpn

@@ -2,37 +2,23 @@
 # Copyright (C) 2018, 2019, 2020 Dominic O'Kane
 ##############################################################################
 
-
-from enum import Enum
+from copy import deepcopy
 from typing import Union
 
 from financepy.models.model import Model
 
 from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...models.black_scholes import BlackScholes
 from ...market.curves.discount_curve import DiscountCurve
 from ...utils.date import Date
 
 ########################################################################################
-
-BUMP = 1e-4
-
-########################################################################################
-
-
-class EquityOptionModelTypes(Enum):
-    BLACK_SCHOLES = 1
-    ANOTHER = 2
 
 
 ########################################################################################
 
 
 class EquityOption:
-    """This class is a parent class for all equitu option classes that
-    require any perturbatory risk."""
-
-    ###########################################################################
+    """Parent class for equity options requiring perturbatory risk."""
 
     def value(
         self,
@@ -41,10 +27,9 @@ class EquityOption:
         discount_curve: Union[DiscountCurve, float],
         dividend_curve: Union[DiscountCurve, float],
         model: Model,
+        **kwargs,
     ):
-
-        print("You should not be here!")
-        return 0.0
+        raise NotImplementedError("value() must be implemented by subclass")
 
     ###########################################################################
 
@@ -54,18 +39,32 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option delta by perturbation of stock price and
-        revaluation."""
-        v = self.value(value_dt, stock_price, discount_curve, dividend_curve, model)
+        """Calculate option delta by perturbation of stock price."""
 
-        v_bumped = self.value(
-            value_dt, stock_price + BUMP, discount_curve, dividend_curve, model
+        bump = stock_price * 1e-3
+
+        v_dn = self.value(
+            value_dt,
+            stock_price - bump,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
         )
 
-        delta = (v_bumped - v) / BUMP
-        return delta
+        v_up = self.value(
+            value_dt,
+            stock_price + bump,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
+        )
+
+        return (v_up - v_dn) / (2.0 * bump)
 
     ###########################################################################
 
@@ -75,23 +74,41 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option gamma by perturbation of stock price and
-        revaluation."""
+        """Calculate option gamma by perturbation of stock price."""
 
-        v = self.value(value_dt, stock_price, discount_curve, dividend_curve, model)
+        bump = 1e-3 * stock_price
+
+        v = self.value(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
+        )
 
         v_bumped_dn = self.value(
-            value_dt, stock_price - BUMP, discount_curve, dividend_curve, model
+            value_dt,
+            stock_price - bump,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
         )
 
         v_bumped_up = self.value(
-            value_dt, stock_price + BUMP, discount_curve, dividend_curve, model
+            value_dt,
+            stock_price + bump,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
         )
 
-        gamma = (v_bumped_up - 2.0 * v + v_bumped_dn) / BUMP / BUMP
-        return gamma
+        return (v_bumped_up - 2.0 * v + v_bumped_dn) / bump**2
 
     ###########################################################################
 
@@ -101,23 +118,35 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option vega by perturbing vol and revaluation."""
+        """Calculate option vega by perturbing volatility by 1%."""
 
-        # The bump should be 1% (0.01) not 1bp (0.0001)
         bump = 0.01
 
-        v = self.value(value_dt, stock_price, discount_curve, dividend_curve, model)
-
-        model = BlackScholes(model.volatility + bump)
-
-        v_bumped = self.value(
-            value_dt, stock_price, discount_curve, dividend_curve, model
+        v = self.value(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
         )
 
-        vega = v_bumped - v
-        return vega
+        bumped_model = deepcopy(model)
+        bumped_model.volatility += bump
+
+        v_bumped = self.value(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            bumped_model,
+            **kwargs,
+        )
+
+        return v_bumped - v
 
     ###########################################################################
 
@@ -127,21 +156,34 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option vanna by perturbing delta with respect to the
-        stock price volatility."""
+        """Calculate option vanna by perturbing delta with respect to vol."""
+        bump = 0.01
 
-        delta = self.delta(value_dt, stock_price, discount_curve, dividend_curve, model)
-
-        model = BlackScholes(model.volatility + BUMP)
-
-        delta_bumped = self.delta(
-            value_dt, stock_price, discount_curve, dividend_curve, model
+        delta = self.delta(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
         )
 
-        vanna = (delta_bumped - delta) / BUMP
-        return vanna
+        bumped_model = deepcopy(model)
+        bumped_model.volatility += bump
+
+        delta_bumped = self.delta(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            bumped_model,
+            **kwargs,
+        )
+
+        return (delta_bumped - delta) / bump
 
     ###########################################################################
 
@@ -151,31 +193,45 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option theta by perturbing value date by one
-        calendar date (not a business date) and then doing revaluation and
-        calculating the difference divided by dt = 1 / G_DAYS_IN_YEAR."""
+        """Calculate option theta by moving valuation date one calendar day."""
 
-        v = self.value(value_dt, stock_price, discount_curve, dividend_curve, model)
+        v = self.value(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
+        )
 
         next_dt = value_dt.add_days(1)
 
-        # Need to do this carefully. This is a bit hacky.
-        discount_curve.value_dt = next_dt
-        dividend_curve.value_dt = next_dt
+        old_discount_anchor_dt = discount_curve.anchor_dt
+        old_dividend_anchor_dt = dividend_curve.anchor_dt
+
+        discount_curve.anchor_dt = next_dt
+        dividend_curve.anchor_dt = next_dt
+
         time_bump = (next_dt - value_dt) / G_DAYS_IN_YEAR
 
-        v_bumped = self.value(
-            next_dt, stock_price, discount_curve, dividend_curve, model
-        )
+        try:
+            v_bumped = self.value(
+                next_dt,
+                stock_price,
+                discount_curve,
+                dividend_curve,
+                model,
+                **kwargs,
+            )
+        finally:
+            # Always restore curves, even if valuation raises.
+            discount_curve.anchor_dt = old_discount_anchor_dt
+            dividend_curve.anchor_dt = old_dividend_anchor_dt
 
-        # restore valuation dates
-        discount_curve.value_dt = value_dt
-        dividend_curve.value_dt = value_dt
-
-        theta = (v_bumped - v) / time_bump
-        return theta
+        return (v_bumped - v) / time_bump
 
     ###########################################################################
 
@@ -185,23 +241,31 @@ class EquityOption:
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
+        **kwargs,
     ):
-        """Calculation of option rho by perturbing interest rate and
-        revaluation."""
+        """Calculate option rho by perturbing the interest-rate curve."""
 
-        v = self.value(value_dt, stock_price, discount_curve, dividend_curve, model)
+        bump = 0.0001
+
+        v = self.value(
+            value_dt,
+            stock_price,
+            discount_curve,
+            dividend_curve,
+            model,
+            **kwargs,
+        )
 
         v_bumped = self.value(
             value_dt,
             stock_price,
-            discount_curve.bump_parallel(BUMP),
+            discount_curve.bump_parallel(bump),
             dividend_curve,
             model,
+            **kwargs,
         )
 
-        rho = (v_bumped - v) / BUMP
-        return rho
+        return (v_bumped - v) / bump
 
-
-########################################################################################
+    ###########################################################################

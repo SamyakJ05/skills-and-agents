@@ -13,7 +13,7 @@ Vendored from [goldmansachs/gs-quant](https://github.com/goldmansachs/gs-quant) 
 GS Quant is built and maintained by Goldman Sachs quants. It provides:
 
 - **Instrument definitions** — dataclass-style objects for swaps, swaptions, caps/floors, FX/equity/rates options, bonds, and more (`gs_quant/target/instrument.py`, re-exported via `gs_quant.instrument`).
-- **Risk measures** — objects like `DollarPrice`, `IRDelta`, `EqDelta`, `Theta`, `Vega` that you pass to an instrument's `.calc()` (`gs_quant.risk`).
+- **Risk measures** — objects like `DollarPrice`, `IRDelta`, `EqDelta`, `Theta`, `IRVega`/`EqVega`/`FXVega` that you pass to an instrument's `.calc()` (`gs_quant.risk`).
 - **Markets / PricingContext** — a context manager that batches and dispatches pricing/risk requests (`gs_quant.markets.core.PricingContext`).
 - **Timeseries analytics** — a large library of pure pandas/numpy functions for smoothing, returns, volatility, correlation, technical indicators, etc. (`gs_quant.timeseries`).
 - **Backtesting** — a strategy/engine framework (`gs_quant.backtests`) for simulating trading strategies over historical periods.
@@ -25,7 +25,7 @@ GS Quant is built and maintained by Goldman Sachs quants. It provides:
 pip install gs-quant
 ```
 
-Requires Python 3.9+. For the vendored copy in this skill, treat `src/gs_quant/` as reference source to read/search rather than reinstalling — install the real package from PyPI to actually run code (`pip install gs-quant`), since this vendored tree omits `gs_quant/test/` and `gs_quant/content/`.
+Requires Python 3.10+. For the vendored copy in this skill, treat `src/gs_quant/` as reference source to read/search rather than reinstalling — install the real package from PyPI to actually run code (`pip install gs-quant`), since this vendored tree omits `gs_quant/test/` and `gs_quant/content/`.
 
 ## The critical caveat: what needs a GS session, what doesn't
 
@@ -73,7 +73,7 @@ cap = IRCap('1y', 'USD')
 delta = cap.calc(IRDelta)   # dispatches through PricingContext -> GsSession.current
 ```
 
-Common measures: `DollarPrice`, `IRDelta`, `EqDelta`, `Theta`, `Vega` (defined in `gs_quant/target/measures.py` and `gs_quant/risk/measures.py`).
+Common measures: `DollarPrice`, `IRDelta`, `EqDelta`, `Theta`, `IRVega`/`EqVega`/`FXVega` (defined in `gs_quant/target/measures.py` and `gs_quant/risk/measures.py`).
 
 ### Markets / PricingContext — requires a session
 
@@ -138,6 +138,7 @@ gs-quant/
     ├── timeseries/                          analytics (standalone-capable submodules + GS-data measures)
     ├── backtests/                           Strategy/engine backtesting framework
     ├── data/                                Dataset, market data access
+    ├── skills/gs-quant-overview/            upstream-authored agent guide (pricing, backtesting, datasets, ...)
     └── session.py                           GsSession / authentication
 ```
 

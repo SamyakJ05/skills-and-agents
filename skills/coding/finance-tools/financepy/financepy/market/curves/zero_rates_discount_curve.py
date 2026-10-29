@@ -1,22 +1,20 @@
 # Copyright (C) 2018, 2019, 2020 Dominic O'Kane
 
+import matplotlib.pyplot as plt
+from ...market.curves.interpolator import InterpTypes, Interpolator
+from ...utils.helpers import check_argument_types
+from ...market.curves.discount_curve import DiscountCurve
+from ...utils.helpers import times_from_dates
+from ...utils.helpers import label_to_string
+from ...utils.math import test_monotonicity
+from ...utils.day_count import DayCountTypes
+from ...utils.date import Date
+from ...utils.error import FinError
+from ...utils.frequency import FrequencyTypes
 from typing import Union
 
 import numpy as np
 
-
-from ...utils.frequency import FrequencyTypes
-from ...utils.error import FinError
-from ...utils.date import Date
-from ...utils.day_count import DayCountTypes
-from ...utils.math import test_monotonicity
-from ...utils.helpers import label_to_string
-from ...utils.helpers import times_from_dates
-from ...market.curves.discount_curve import DiscountCurve
-from ...utils.helpers import check_argument_types
-from ...market.curves.interpolator import InterpTypes, Interpolator
-
-import matplotlib.pyplot as plt
 
 # TODO: Fix up __repr__ function
 
@@ -36,13 +34,13 @@ class ZeroRatesDiscountCurve(DiscountCurve):
 
     def __init__(
         self,
-        value_dt: Date,
+        anchor_dt: Date,
         zero_dts: list,
         zero_rates: Union[list, np.ndarray],
         freq_type: FrequencyTypes = FrequencyTypes.ANNUAL,
+        curve_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
         interp_type: InterpTypes = InterpTypes.FLAT_FWD_RATES,
-        time_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
-    ):
+    ) -> None:
         """Create the discount curve from a vector of dates and zero rates
         factors. The first date is the curve anchor. Then a vector of zero
         dates and then another same-length vector of rates. The rate is to the
@@ -63,19 +61,19 @@ class ZeroRatesDiscountCurve(DiscountCurve):
         if freq_type not in FrequencyTypes:
             raise FinError("Unknown Frequency type " + str(freq_type))
 
-        self.value_dt = value_dt
+        self.anchor_dt = anchor_dt
         self.freq_type = freq_type
 
-        if not isinstance(time_dc_type, DayCountTypes):
+        if not isinstance(curve_dc_type, DayCountTypes):
             raise FinError("Invalid time day count type.")
 
-        if zero_dts[0] < value_dt:
+        if zero_dts[0] < anchor_dt:
             raise FinError("Zero rate dates must be on or after the valuation date.")
 
-        self.time_dc_type = time_dc_type
+        self.curve_dc_type = curve_dc_type
         zero_rates = np.asarray(zero_rates, dtype=float)
 
-        zero_times = times_from_dates(value_dt, zero_dts, time_dc_type)
+        zero_times = times_from_dates(anchor_dt, zero_dts, self.curve_dc_type)
         zero_times = np.asarray(zero_times, dtype=float)
 
         if test_monotonicity(zero_times) is False:
@@ -87,8 +85,8 @@ class ZeroRatesDiscountCurve(DiscountCurve):
         if zero_times[0] > 0.0:
             self._times = np.concatenate(([0.0], zero_times))
             self._dfs = np.concatenate(([1.0], dfs))
-            self._df_dates = [value_dt] + list(zero_dts)
-            self._zero_dts = [value_dt] + list(zero_dts)
+            self._df_dates = [anchor_dt] + list(zero_dts)
+            self._zero_dts = [anchor_dt] + list(zero_dts)
             self._zero_rates = np.concatenate(([np.nan], zero_rates))
         else:
             self._times = zero_times
@@ -97,6 +95,8 @@ class ZeroRatesDiscountCurve(DiscountCurve):
             self._zero_dts = list(zero_dts)
             self._zero_rates = zero_rates
 
+        # We do not need a curve_dc_type as we have a rate dc_type but we specify it
+        self.curve_dc_type = self.curve_dc_type
         self._interp_type = interp_type
         self._interpolator = Interpolator(self._interp_type)
         self.fit(self._times, self._dfs)
@@ -105,22 +105,22 @@ class ZeroRatesDiscountCurve(DiscountCurve):
 
     def bump_parallel(self, bump_size: float):
         """Return a new curve with all quoted zero rates bumped in parallel."""
-    
+
         if not np.isscalar(bump_size):
             raise FinError("Bump size must be a scalar.")
-    
+
         bump_size = float(bump_size)
-    
+
         bumped_zero_rates = self._zero_rates[1:] + bump_size
         zero_dts = self._zero_dts[1:]
-    
+
         return ZeroRatesDiscountCurve(
-            value_dt=self.value_dt,
+            anchor_dt=self.anchor_dt,
             zero_dts=zero_dts.copy(),
             zero_rates=bumped_zero_rates,
             freq_type=self.freq_type,
+            curve_dc_type=self.curve_dc_type,
             interp_type=self._interp_type,
-            time_dc_type=self.time_dc_type,
         )
 
     ###########################################################################
@@ -145,7 +145,7 @@ class ZeroRatesDiscountCurve(DiscountCurve):
             }
         )
 
-        plt.figure(figsize=(12, 6))
+        plt.figure()
         plt.title(title)
 
         if times is None:
@@ -166,15 +166,14 @@ class ZeroRatesDiscountCurve(DiscountCurve):
         # Bump the forwards by 1bp in case the curve is flat so they can be seen
         cc_fwds = cc_fwds + 1e-4
 
-        plt.plot(times, zeros * 100, label="Zero Rates", color="blue")
-        plt.plot(times, cc_fwds * 100, label="Inst Fwd Rates", color="orange")
+        plt.plot(times, zeros * 100, label="Zero Rates")
+        plt.plot(times, cc_fwds * 100, label="Inst Fwd Rates")
         plt.plot(
             self._times,
             self._zero_rates * 100,
             "o",
             markersize=10,
             label="Input Zero Rates",
-            color="blue",
         )
 
         plt.xlabel("Time to Maturity (years)")
@@ -185,7 +184,7 @@ class ZeroRatesDiscountCurve(DiscountCurve):
             plt.ylim(ymin, ymax)
 
         plt.grid(True, alpha=0.3)
-#        plt.tight_layout()
+        #        plt.tight_layout()
 
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight", pad_inches=0.02)
@@ -202,6 +201,8 @@ class ZeroRatesDiscountCurve(DiscountCurve):
 
         for dt, rate in zip(self._zero_dts, self._zero_rates):
             s += label_to_string(str(dt), f"{rate:12.8f}")
+
+        s += label_to_string("CURVE DC_TYPE", self.curve_dc_type)
 
         s += "\n"
         s += super().__repr__()

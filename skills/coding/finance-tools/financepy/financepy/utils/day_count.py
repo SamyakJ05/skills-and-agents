@@ -67,7 +67,7 @@ class DayCount:
     """Calculate the fractional day count between two dates according to a
     specified day count convention."""
 
-    def __init__(self, dcc_type: DayCountTypes):
+    def __init__(self, dcc_type: DayCountTypes) -> None:
         """Create Day Count convention by passing in the Day Count Type."""
 
         if dcc_type not in DayCountTypes:
@@ -255,9 +255,9 @@ class DayCount:
             frequency = annual_frequency(freq_type)
 
             if dt3 is None:
-                y3 = y2
-            else:
-                y3 = dt3.y
+                dt3 = dt2
+
+            y3 = dt3.y
 
             num = dt2 - dt1
             den = 365

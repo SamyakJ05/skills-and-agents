@@ -4,9 +4,11 @@
 
 # UNDER CONSTRUCTION
 
+from ...utils.global_types import SolverTypes
+from ...utils.solver_nm import nelder_mead
 import matplotlib.pyplot as plt
 
-from typing import Union, Any, Sequence, Optional, Tuple, List
+from typing import Any, List
 
 import numpy as np
 from scipy.optimize import minimize
@@ -27,9 +29,6 @@ from ...models.sabr import vol_function_sabr
 from ...models.sabr import vol_function_sabr_beta_half
 from ...models.sabr import vol_function_sabr_beta_one
 
-
-from ...utils.solver_nm import nelder_mead
-from ...utils.global_types import SolverTypes
 
 ########################################################################################
 # ISSUES
@@ -199,9 +198,7 @@ def _solve_to_horizon(
     cache=True,
     fastmath=True,
 )
-def vol_function(
-    vol_function_type_value: int, params: np.ndarray, f: float, k: float, t: float
-) -> float:
+def vol_function(vol_function_type_value: int, params: np.ndarray, f: float, k: float, t: float) -> float:
     """Return the volatility for a strike using a given polynomial
     interpolation following Section 3.9 of Iain Clark book."""
 
@@ -395,7 +392,7 @@ class SwaptionVolSurface:
 
     def __init__(
         self,
-        value_dt: Date,
+        anchor_dt: Date,
         expiry_dts: List[Date],
         fwd_swap_rates: np.ndarray,
         strike_grid: np.ndarray,
@@ -408,7 +405,7 @@ class SwaptionVolSurface:
 
         check_argument_types(self.__init__, locals())
 
-        self.value_dt = value_dt
+        self.anchor_dt = anchor_dt
 
         if len(strike_grid.shape) != 2:
             raise FinError("Strike grid must be a 2D grid of values")
@@ -459,7 +456,7 @@ class SwaptionVolSurface:
         interpolation is done in variance space and then converted back to a
         lognormal volatility."""
 
-        t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+        t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
         vol_type_value = self._vol_func_type.value
 
@@ -534,7 +531,7 @@ class SwaptionVolSurface:
     #     """ Interpolates the strike at a delta and expiry date. Linear
     #     interpolation is used in strike."""
 
-    #     t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+    #     t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
     #     vol_type_value = self._vol_func_type.value
 
@@ -637,7 +634,7 @@ class SwaptionVolSurface:
     #     interpolation is done in variance space and then converted back to a
     #     lognormal volatility."""
 
-    #     t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+    #     t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
     #     vol_type_value = self._vol_func_type.value
 
@@ -744,9 +741,7 @@ class SwaptionVolSurface:
 
     ####################################################################################
 
-    def _build_vol_surface(
-        self, fin_solver_type: SolverTypes = SolverTypes.NELDER_MEAD
-    ) -> None:
+    def _build_vol_surface(self, fin_solver_type: SolverTypes = SolverTypes.NELDER_MEAD) -> None:
         """Main function to construct the vol surface."""
 
         if self._vol_func_type == VolFuncTypes.CLARK:
@@ -781,7 +776,7 @@ class SwaptionVolSurface:
         for i in range(0, num_expiry_dts):
 
             expiry_dt = self._expiry_dts[i]
-            t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+            t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
             self._t_exp[i] = t_exp
 
         #######################################################################
@@ -792,6 +787,25 @@ class SwaptionVolSurface:
 
         x_inits = []
         x_init = np.zeros(num_parameters)
+
+        # A zero alpha and nu is a degenerate starting point for the fixed
+        # beta SABR smiles (z = nu * log(f/k) / alpha), so start from the
+        # vol nearest the money at the first expiry instead.
+        if self._vol_func_type in (
+            VolFuncTypes.SABR_BETA_ONE,
+            VolFuncTypes.SABR_BETA_HALF,
+        ):
+            f0 = self._fwd_swap_rates[0]
+            atm_index = np.argmin(np.abs(self._strike_grid[:, 0] - f0))
+            atm_vol = self._vol_grid[atm_index][0]
+
+            if self._vol_func_type == VolFuncTypes.SABR_BETA_ONE:
+                alpha = atm_vol
+            else:
+                alpha = atm_vol * f0**0.5
+
+            x_init = np.array([alpha, 0.0, 0.3])
+
         x_inits.append(x_init)
 
         for i in range(0, num_expiry_dts):
@@ -817,25 +831,29 @@ class SwaptionVolSurface:
 
     ###########################################################################
 
-    def check_calibration(self, verbose: bool, tol: float = 1e-6) -> None:
-        """Compare calibrated vol surface with market and output a report
-        which sets out the quality of fit to the ATM and 10 and 25 delta market
-        strangles and risk reversals."""
+    def check_calibration(self, verbose: bool, tol: float = 1e-6) -> float:
+        """Compare the calibrated vol surface with the market vol grid and
+        return the largest absolute difference between fitted and market
+        vols. If verbose, print a report with one line per expiry and strike,
+        flagging with an asterisk any point whose error exceeds tol."""
 
-        if self._vol_grid == []:
+        if self._vol_grid.size == 0:
             raise FinError("Error: Vol Grid is empty")
 
         if verbose:
+            print("==========================================================")
+            print("VALUE DATE:", self.anchor_dt)
+            print("==========================================================")
 
-            print("==========================================================")
-            print("VALUE DATE:", self.value_dt)
-            print("STOCK PRICE:", self._stock_price)
-            print("==========================================================")
+        max_abs_diff = 0.0
 
         for i in range(0, self._num_expiry_dts):
 
             expiry_dt = self._expiry_dts[i]
-            print("==========================================================")
+
+            if verbose:
+                print("==========================================================")
+                print("FWD SWAP RATE:", self._fwd_swap_rates[i])
 
             for j in range(0, self._num_strikes):
 
@@ -843,19 +861,26 @@ class SwaptionVolSurface:
                 fitted_vol = self.vol_from_strike_dt(strike, expiry_dt)
                 mkt_vol = self._vol_grid[j][i]
                 diff = fitted_vol - mkt_vol
+                max_abs_diff = max(max_abs_diff, abs(diff))
 
-                print(
-                    "%s %12.3f %7.4f %7.4f %7.5f"
-                    % (
-                        expiry_dt,
-                        strike,
-                        fitted_vol * 100.0,
-                        mkt_vol * 100,
-                        diff * 100,
+                if verbose:
+                    flag = "*" if abs(diff) > tol else ""
+                    print(
+                        "%s %12.5f %7.4f %7.4f %7.5f %s"
+                        % (
+                            expiry_dt,
+                            strike,
+                            fitted_vol * 100.0,
+                            mkt_vol * 100,
+                            diff * 100,
+                            flag,
+                        )
                     )
-                )
 
-        print("==========================================================")
+        if verbose:
+            print("==========================================================")
+
+        return max_abs_diff
 
     ###########################################################################
 
@@ -955,10 +980,7 @@ class SwaptionVolSurface:
     def __repr__(self) -> str:
 
         s = label_to_string("OBJECT_TYPE", type(self).__name__)
-        s += label_to_string("VALUE DATE", self.value_dt)
-        s += label_to_string("STOCK PRICE", self._stock_price)
-        s += label_to_string("ATM METHOD", self._atm_method)
-        s += label_to_string("DELTA METHOD", self._delta_method)
+        s += label_to_string("VALUE DATE", self.anchor_dt)
         s += label_to_string("VOL FUNCTION", self._vol_func_type)
 
         for i in range(0, self._num_expiry_dts):
@@ -967,15 +989,13 @@ class SwaptionVolSurface:
 
             s += label_to_string("EXPIRY DATE", self._expiry_dts[i])
             s += label_to_string("TIME (YRS)", self._t_exp[i])
-            s += label_to_string("FWD FX", self._fwd_0_t[i])
-            s += label_to_string("ATM VOLS", self._atm_vols[i] * 100.0)
+            s += label_to_string("FWD SWAP RATE", self._fwd_swap_rates[i])
 
             for j in range(0, self._num_strikes):
 
-                expiry_dt = self._expiry_dts[i]
-                k = self._strikes[j]
-                vol = self._vol_grid[i][j]
-                print(expiry_dt, k, vol)
+                k = self._strike_grid[j][i]
+                vol = self._vol_grid[j][i]
+                s += label_to_string("STRIKE, VOL", "%9.6f %9.6f" % (k, vol))
 
         return s
 

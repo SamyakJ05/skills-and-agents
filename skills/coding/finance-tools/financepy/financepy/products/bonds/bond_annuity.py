@@ -12,6 +12,7 @@ from ...utils.day_count import DayCount, DayCountTypes
 from ...utils.error import FinError
 from ...utils.helpers import check_argument_types, label_to_string
 from ...market.curves.discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
 
 ########################################################################################
 
@@ -31,7 +32,7 @@ class BondAnnuity:
         cal_type: CalendarTypes = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
 
         check_argument_types(self.__init__, locals())
 
@@ -51,13 +52,13 @@ class BondAnnuity:
         self.cpn_dts = []
 
         self.settle_dt = Date(1, 1, 1900)
-        self.accrued_int = None
+        self.accrued_int = 0.0
         self.accrued_days = 0.0
         self.alpha = 0.0
 
         self._pcd = None
         self._ncd = None
-        self.flow_amounts = None
+        self.flow_amounts = []
 
     ###########################################################################
 
@@ -66,6 +67,8 @@ class BondAnnuity:
     ):
         """Calculate the bond price using some discount curve to present-value
         the bond's cash flows."""
+
+        check_curve_dt(settle_dt, discount_curve)
 
         dirty_price = self.dirty_price_from_discount_curve(settle_dt, discount_curve)
         accrued = self.accrued_int * self.par
@@ -79,6 +82,8 @@ class BondAnnuity:
     ):
         """Calculate the bond price using some discount curve to present-value
         the bond's cash flows."""
+
+        check_curve_dt(settle_dt, discount_curve)
 
         self.calculate_payments(settle_dt, 1.0)
         pv = 0.0
@@ -97,10 +102,6 @@ class BondAnnuity:
 
     def calculate_payments(self, settle_dt: Date, face: float):
         """Calculate bond payments"""
-        # No need to generate flows if settlement date has not changed
-        if settle_dt == self.settle_dt:
-            return
-
         if settle_dt == self.maturity_dt:
             raise FinError("Settlement date is maturity date.")
 
@@ -109,12 +110,7 @@ class BondAnnuity:
         dg_type = DateGenRuleTypes.BACKWARD
 
         self.cpn_dts = Schedule(
-            settle_dt,
-            self.maturity_dt,
-            self.freq_type,
-            self.cal_type,
-            bd_type,
-            dg_type,
+            settle_dt, self.maturity_dt, self.freq_type, self.cal_type, bd_type, dg_type
         ).generate()
 
         self._pcd = self.cpn_dts[0]

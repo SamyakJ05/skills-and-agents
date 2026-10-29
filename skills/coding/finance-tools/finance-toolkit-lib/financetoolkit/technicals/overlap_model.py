@@ -2,9 +2,11 @@
 
 __docformat__ = "google"
 
+import math
+
 import numpy as np
 import pandas as pd
-from scipy.signal import argrelextrema
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 def get_moving_average(prices: pd.Series, window: int) -> pd.Series:
@@ -15,7 +17,7 @@ def get_moving_average(prices: pd.Series, window: int) -> pd.Series:
     window, used both as a standalone trend-following signal (e.g. price crossing above or
     below the average) and as a building block for many other indicators in this module.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - SMA = Mean(Close, window)
 
@@ -36,7 +38,9 @@ def get_moving_average(prices: pd.Series, window: int) -> pd.Series:
     return prices.rolling(window=window).mean()
 
 
-def get_exponential_moving_average(prices: pd.Series, window: int) -> pd.Series:
+def get_exponential_moving_average(
+    prices: pd.Series | pd.DataFrame, window: int
+) -> pd.Series | pd.DataFrame:
     """
     Calculate the Exponential Moving Average (EMA) of a given price series.
 
@@ -45,10 +49,11 @@ def get_exponential_moving_average(prices: pd.Series, window: int) -> pd.Series:
     is, so that it reacts to new price information faster than a Simple Moving Average of
     the same window while still smoothing out noise.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - Smoothing Factor (alpha) = 2 / (window + 1)
-    - EMA(t) = alpha * Close(t) + (1 — alpha) * EMA(t-1)
+    - First EMA = SMA(Close, window), on the window-th period
+    - EMA(t) = alpha * Close(t) + (1 - alpha) * EMA(t-1)
 
     Also known as: EMA.
 
@@ -57,14 +62,39 @@ def get_exponential_moving_average(prices: pd.Series, window: int) -> pd.Series:
     standard technical-analysis treatment is Murphy, J.J. (1999). "Technical Analysis of the
     Financial Markets." New York Institute of Finance.
 
+    Notes:
+        - The recursion is seeded with the Simple Moving Average of the first `window`
+          values, placed on the last of them, and the periods before it are missing. This
+          is the convention of TA-Lib (`ta_EMA.c`) and StockCharts. Seeding with the first
+          price instead gives every early value a weight on that single price that a
+          `window`-period average does not have.
+        - A missing value inside the series leaves the average unchanged on that period
+          and the recursion continues from it on the next value, as with Wilder's
+          smoothing.
+        - A DataFrame is smoothed per column, each column seeded on its own first
+          `window` values, so tickers with a later first price get their own warm-up.
+
     Args:
-        prices (pd.Series): Series of prices.
+        prices (pd.Series | pd.DataFrame): Series (or DataFrame with one column per
+            ticker) of prices.
         window (int): Number of periods to consider for EMA calculation.
 
     Returns:
-        pd.Series: EMA values.
+        pd.Series | pd.DataFrame: EMA values, missing for the first `window` - 1 periods.
     """
-    return prices.ewm(span=window, min_periods=1, adjust=False).mean()
+    # The first full window marks the seed; every period before it stays missing.
+    simple_moving_average = prices.rolling(window=window).mean()
+    has_seed = simple_moving_average.notna().astype(bool).cummax()
+    seed_period = has_seed & ~has_seed.shift(1, fill_value=False).astype(bool)
+
+    # The seed replaces the price on its own period, after which ewm with adjust=False
+    # runs the plain recursion EMA(t) = alpha * Price(t) + (1 - alpha) * EMA(t-1).
+    seeded_prices = prices.where(has_seed).mask(seed_period, simple_moving_average)
+    exponential_moving_average = seeded_prices.ewm(
+        span=window, adjust=False, ignore_na=True
+    ).mean()
+
+    return exponential_moving_average.where(has_seed)
 
 
 def get_double_exponential_moving_average(prices: pd.Series, window: int) -> pd.Series:
@@ -76,11 +106,11 @@ def get_double_exponential_moving_average(prices: pd.Series, window: int) -> pd.
     the first, subtracting it out (after doubling the first) removes much of the delay a
     plain EMA of the same window would have.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - EMA1 = EMA(Close, window)
     - EMA2 = EMA(EMA1, window)
-    - DEMA = 2 * EMA1 — EMA2
+    - DEMA = 2 * EMA1 - EMA2
 
     Also known as: DEMA.
 
@@ -94,8 +124,10 @@ def get_double_exponential_moving_average(prices: pd.Series, window: int) -> pd.
     Returns:
         pd.Series: DEMA values.
     """
-    ema_first = prices.ewm(span=window, min_periods=1, adjust=False).mean()
-    ema_second = ema_first.ewm(span=window, min_periods=1, adjust=False).mean()
+    # The second EMA is seeded on the first `window` values of the first, so DEMA starts
+    # at period 2 * (window - 1), as in TA-Lib's ta_DEMA.c.
+    ema_first = get_exponential_moving_average(prices, window)
+    ema_second = get_exponential_moving_average(ema_first, window)
     dema = 2 * ema_first - ema_second
 
     return dema
@@ -111,12 +143,12 @@ def get_trix(prices_close: pd.Series, window: int) -> pd.Series:
     fluctuations have already been smoothed away, the result oscillates around zero mainly
     in response to genuine trend changes.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - EMA1 = EMA(Close, window)
     - EMA2 = EMA(EMA1, window)
     - EMA3 = EMA(EMA2, window)
-    - Trix = ((EMA3(t) — EMA3(t-1)) / EMA3(t-1)) * 100
+    - Trix = ((EMA3(t) - EMA3(t-1)) / EMA3(t-1)) * 100
 
     Also known as: TRIX, Triple Exponential Average.
 
@@ -149,7 +181,7 @@ def get_triangular_moving_average(prices: pd.Series, window: int) -> pd.Series:
     least, which reduces the impact of outliers and short-term fluctuations more than a
     single SMA of the same overall length.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - For an odd window: Sub-window Length = (window + 1) / 2, applied for both passes.
     - For an even window: the two passes use different sub-window lengths, window / 2
@@ -174,8 +206,10 @@ def get_triangular_moving_average(prices: pd.Series, window: int) -> pd.Series:
         sub_window_first = max(window // 2, 1)
         sub_window_second = sub_window_first + 1
 
-    first_pass = prices.rolling(window=sub_window_first, min_periods=1).mean()
-    tri_ma = first_pass.rolling(window=sub_window_second, min_periods=1).mean()
+    # Both passes need full windows, so the first value is the full triangular average at
+    # period window - 1 (as in TA-Lib) rather than an average over fewer prices.
+    first_pass = prices.rolling(window=sub_window_first).mean()
+    tri_ma = first_pass.rolling(window=sub_window_second).mean()
 
     return tri_ma
 
@@ -188,7 +222,7 @@ def get_weighted_moving_average(prices: pd.Series, window: int) -> pd.Series:
     prices within the window, making it more responsive to recent price changes than
     a Simple Moving Average while remaining smoother than an Exponential Moving Average.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - WMA = Sum(Price(i) * i, i = 1..window) / Sum(i, i = 1..window), where i = 1 is the
       oldest price in the window and i = window is the most recent
@@ -205,11 +239,40 @@ def get_weighted_moving_average(prices: pd.Series, window: int) -> pd.Series:
     Returns:
         pd.Series: WMA values.
     """
-    weights = np.arange(1, window + 1)
+    weights = np.arange(1, window + 1, dtype=float)
 
-    return prices.rolling(window=window).apply(
-        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+    # One matrix product over every window at once instead of a Python call per window.
+    # A window holding a missing price is missing, as with rolling().apply().
+    return apply_to_rolling_windows(
+        prices, window, lambda windows: windows @ weights / weights.sum()
     )
+
+
+def apply_to_rolling_windows(
+    data: pd.Series | pd.DataFrame, window: int, calculation
+) -> pd.Series | pd.DataFrame:
+    """
+    Apply a calculation to every rolling window of a Series or of each DataFrame column.
+
+    Args:
+        data (pd.Series | pd.DataFrame): The values, with time as index.
+        window (int): The number of values in each window.
+        calculation (Callable): Takes an array of windows, with the values of each window
+            along the last axis, and returns one value per window.
+
+    Returns:
+        pd.Series | pd.DataFrame: The result, missing for the first window - 1 rows.
+    """
+    values = data.to_numpy(dtype=float)
+    result = np.full(values.shape, np.nan)
+
+    if window >= 1 and len(values) >= window:
+        result[window - 1 :] = calculation(sliding_window_view(values, window, axis=0))
+
+    if isinstance(data, pd.DataFrame):
+        return pd.DataFrame(result, index=data.index, columns=data.columns)
+
+    return pd.Series(result, index=data.index, name=data.name)
 
 
 def get_kaufman_adaptive_moving_average(
@@ -230,23 +293,24 @@ def get_kaufman_adaptive_moving_average(
     and KAMA flattens out, behaving like a slow EMA — reducing whipsaw signals in choppy
     markets while still reacting quickly during strong trends.
 
-    The formula is a follows:
+    The formula is as follows:
 
-    - Change = |Close(t) — Close(t - window)|
-    - Volatility = Sum(|Close(i) — Close(i - 1)|, window)
-    - Efficiency Ratio (ER) = Change / Volatility
+    - Change = |Close(t) - Close(t - window)|
+    - Volatility = Sum(|Close(i) - Close(i - 1)|, window)
+    - Efficiency Ratio (ER) = Change / Volatility, and 1 when Volatility ≤ Change (flat prices)
     - Fastest SC = 2 / (fast_window + 1), Slowest SC = 2 / (slow_window + 1)
-    - Smoothing Constant (SC) = [ER * (Fastest SC — Slowest SC) + Slowest SC]^2
-    - KAMA(t) = KAMA(t-1) + SC * (Close(t) — KAMA(t-1))
+    - Smoothing Constant (SC) = [ER * (Fastest SC - Slowest SC) + Slowest SC]^2
+    - KAMA(t) = KAMA(t-1) + SC * (Close(t) - KAMA(t-1))
 
     Also known as: KAMA, Kaufman's Adaptive Moving Average.
 
     Reference: Kaufman, P.J. (1998). "Trading Systems and Methods." 3rd ed. Wiley.
 
     Notes:
-        - The recursion is seeded with the closing price on the first period where the
-          Efficiency Ratio is defined, matching TA-Lib's `ta_KAMA.c` (`prevKAMA =
-          inReal[today-1]`). StockCharts instead describes seeding with a Simple Moving
+        - The recursion is seeded with the closing price of the period before the first
+          period where the Efficiency Ratio is defined, and the first KAMA value is one
+          update of that seed, matching TA-Lib's `ta_KAMA.c` (`prevKAMA = inReal[today-1]`
+          followed by one step). StockCharts instead describes seeding with a Simple Moving
           Average; the two conventions differ only in a transient that decays geometrically
           over the periods that follow, and neither affects the steady-state values.
 
@@ -270,7 +334,12 @@ def get_kaufman_adaptive_moving_average(
 
     change = (prices - prices.shift(window)).abs()
     volatility = prices.diff().abs().rolling(window=window).sum()
-    efficiency_ratio = change / volatility
+    # When the path is no longer than the net move (only possible with equal values, as on
+    # flat prices where both are 0) the move is fully efficient and the ratio is 1, as in
+    # TA-Lib's ta_KAMA.c (sumROC1 <= change). Dividing would give 0 / 0 on flat prices and
+    # stall the average; the ratio stays NaN only where prices are missing.  # noqa: E501
+    efficiency_ratio = (change / volatility).where(volatility > change, 1.0)
+    efficiency_ratio = efficiency_ratio.where(change.notna() & volatility.notna())
 
     fastest_smoothing_constant = 2 / (fast_window + 1)
     slowest_smoothing_constant = 2 / (slow_window + 1)
@@ -291,19 +360,26 @@ def get_kaufman_adaptive_moving_average(
         return kama
 
     start_position = prices.index.get_loc(first_valid_index)
-    kama.iloc[start_position] = prices.iloc[start_position]
 
-    for i in range(start_position + 1, length):
-        smoothing_constant_value = smoothing_constant.iloc[i]
-        if pd.isna(smoothing_constant_value):
-            kama.iloc[i] = kama.iloc[i - 1]
-            continue
+    # The recursion runs on plain Python lists, since writing a pandas Series one element
+    # at a time costs tens of microseconds per element.
+    price_values = prices.to_numpy(dtype="float64").tolist()
+    constants = smoothing_constant.to_numpy(dtype="float64").tolist()
+    averages = [math.nan] * length
 
-        kama.iloc[i] = kama.iloc[i - 1] + smoothing_constant_value * (
-            prices.iloc[i] - kama.iloc[i - 1]
-        )
+    # The Efficiency Ratio needs the previous `window` changes, so the price before the first defined ratio always exists and seeds the recursion; the first output is already one update of it, as in TA-Lib.  # noqa: E501
+    previous_average = price_values[start_position - 1]
 
-    return kama
+    for i in range(start_position, length):
+        smoothing_constant_value = constants[i]
+        if not math.isnan(smoothing_constant_value):
+            previous_average = previous_average + smoothing_constant_value * (
+                price_values[i] - previous_average
+            )
+
+        averages[i] = previous_average
+
+    return pd.Series(averages, index=prices.index, dtype="float64")
 
 
 def get_hull_moving_average(prices: pd.Series, window: int) -> pd.Series:
@@ -314,9 +390,9 @@ def get_hull_moving_average(prices: pd.Series, window: int) -> pd.Series:
     while improving smoothing, by combining a WMA of half the window length, a WMA of
     the full window length, and a further WMA over the square root of the window length.
 
-    The formula is a follows:
+    The formula is as follows:
 
-    - Raw HMA = 2 * WMA(Close, window / 2) — WMA(Close, window)
+    - Raw HMA = 2 * WMA(Close, window / 2) - WMA(Close, window)
     - HMA = WMA(Raw HMA, sqrt(window))
 
     Also known as: HMA.
@@ -354,7 +430,7 @@ def get_volume_weighted_average_price(
     filled at or better than VWAP is generally considered to have avoided excess market
     impact.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - Typical Price = (High + Low + Close) / 3
     - VWAP = Sum(Typical Price * Volume, window) / Sum(Volume, window)
@@ -420,48 +496,48 @@ def get_parabolic_sar(
     if length == 0:
         return sar
 
+    # The recursion runs on plain Python lists, since reading and writing pandas Series
+    # one element at a time costs tens of microseconds per element.
+    high = prices_high.to_numpy(dtype="float64").tolist()
+    low = prices_low.to_numpy(dtype="float64").tolist()
+
     uptrend = True
     af = af_start
-    extreme_point = prices_high.iloc[0]
-    sar.iloc[0] = prices_low.iloc[0]
+    extreme_point = high[0]
+    sar_values = [math.nan] * length
+    sar_values[0] = low[0]
 
     for i in range(1, length):
-        prior_sar = sar.iloc[i - 1]
+        prior_sar = sar_values[i - 1]
 
         if uptrend:
             current_sar = prior_sar + af * (extreme_point - prior_sar)
-            current_sar = min(
-                current_sar, prices_low.iloc[i - 1], prices_low.iloc[max(i - 2, 0)]
-            )
+            current_sar = min(current_sar, low[i - 1], low[max(i - 2, 0)])
 
-            if prices_low.iloc[i] < current_sar:
+            if low[i] < current_sar:
                 uptrend = False
-                current_sar = max(
-                    extreme_point, prices_high.iloc[i], prices_high.iloc[i - 1]
-                )
-                extreme_point = prices_low.iloc[i]
+                current_sar = max(extreme_point, high[i], high[i - 1])
+                extreme_point = low[i]
                 af = af_start
-            elif prices_high.iloc[i] > extreme_point:
-                extreme_point = prices_high.iloc[i]
+            elif high[i] > extreme_point:
+                extreme_point = high[i]
                 af = min(af + af_increment, af_max)
         else:
             current_sar = prior_sar - af * (prior_sar - extreme_point)
-            current_sar = max(
-                current_sar, prices_high.iloc[i - 1], prices_high.iloc[max(i - 2, 0)]
-            )
+            current_sar = max(current_sar, high[i - 1], high[max(i - 2, 0)])
 
-            if prices_high.iloc[i] > current_sar:
+            if high[i] > current_sar:
                 uptrend = True
-                current_sar = min(
-                    extreme_point, prices_low.iloc[i], prices_low.iloc[i - 1]
-                )
-                extreme_point = prices_high.iloc[i]
+                current_sar = min(extreme_point, low[i], low[i - 1])
+                extreme_point = high[i]
                 af = af_start
-            elif prices_low.iloc[i] < extreme_point:
-                extreme_point = prices_low.iloc[i]
+            elif low[i] < extreme_point:
+                extreme_point = low[i]
                 af = min(af + af_increment, af_max)
 
-        sar.iloc[i] = current_sar
+        sar_values[i] = current_sar
+
+    sar = pd.Series(sar_values, index=prices_high.index, dtype="float64")
 
     return sar
 
@@ -476,15 +552,15 @@ def get_pivot_points(
     and are used to identify potential support and resistance levels for the current
     period. This is the "floor trader" (classic) variant.
 
-    The formula is a follows:
+    The formula is as follows:
 
     - Pivot Point (P) = (Previous High + Previous Low + Previous Close) / 3
-    - Resistance 1 = (2 * P) — Previous Low
-    - Support 1 = (2 * P) — Previous High
-    - Resistance 2 = P + (Previous High — Previous Low)
-    - Support 2 = P — (Previous High — Previous Low)
-    - Resistance 3 = Previous High + 2 * (P — Previous Low)
-    - Support 3 = Previous Low — 2 * (Previous High — P)
+    - Resistance 1 = (2 * P) - Previous Low
+    - Support 1 = (2 * P) - Previous High
+    - Resistance 2 = P + (Previous High - Previous Low)
+    - Support 2 = P - (Previous High - Previous Low)
+    - Resistance 3 = Previous High + 2 * (P - Previous Low)
+    - Support 3 = Previous Low - 2 * (Previous High - P)
 
     Also known as: floor pivots, classic pivot points, standard pivot points.
 
@@ -642,6 +718,9 @@ def get_support_resistance_levels(
             "Support", reindexed to `prices` and forward-filled, so that every date carries
             the most recently confirmed level (NaN before the first level is confirmed).
     """
+    # scipy.signal takes around a second to import, so only where it is needed.
+    from scipy.signal import argrelextrema  # noqa: PLC0415
+
     local_maxima_indices = argrelextrema(prices.to_numpy(), np.greater, order=window)[0]
     local_minima_indices = argrelextrema(prices.to_numpy(), np.less, order=window)[0]
 
@@ -676,10 +755,10 @@ def get_fibonacci_retracement_levels(
     caller — so that a full set of retracement levels is produced for every date rather than
     for a single, hand-picked swing.
 
-    The formula is a follows:
+    The formula is as follows:
 
-    - Uptrend (retracing down from the high): Level = High — Ratio * (High — Low)
-    - Downtrend (retracing up from the low): Level = Low + Ratio * (High — Low)
+    - Uptrend (retracing down from the high): Level = High - Ratio * (High - Low)
+    - Downtrend (retracing up from the low): Level = Low + Ratio * (High - Low)
 
     Also known as: Fibonacci retracement, Fib levels, retracement levels.
 

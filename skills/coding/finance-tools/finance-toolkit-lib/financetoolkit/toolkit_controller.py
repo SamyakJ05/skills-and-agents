@@ -4,9 +4,7 @@ __docformat__ = "google"
 
 
 import os
-import re
 import warnings
-from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -16,48 +14,71 @@ import pandas as pd
 from financetoolkit import currencies_model
 from financetoolkit.cache import cache_controller, policy_model, ticker_model
 from financetoolkit.discovery.discovery_model import (
+    search_crypto_news as _search_crypto_news,
+    search_forex_news as _search_forex_news,
     search_press_releases as _search_press_releases,
     search_stock_news as _search_stock_news,
 )
-from financetoolkit.economics.economics_controller import Economics
-from financetoolkit.fixedincome.fixedincome_controller import FixedIncome
 from financetoolkit.fmp_model import (
     determine_subscription_plan as _determine_subscription_plan,
     get_analyst_estimates as _get_analyst_estimates,
     get_commitment_of_traders as _get_commitment_of_traders,
+    get_company_notes as _get_company_notes,
     get_dividend_calendar as _get_dividend_calendar,
     get_earnings_calendar as _get_earnings_calendar,
+    get_earnings_call_transcripts as _get_earnings_call_transcripts,
+    get_employee_count as _get_employee_count,
     get_esg_scores as _get_esg_scores,
+    get_etf_country_weightings as _get_etf_country_weightings,
+    get_etf_holdings as _get_etf_holdings,
+    get_etf_information as _get_etf_information,
+    get_etf_sector_weightings as _get_etf_sector_weightings,
+    get_executive_compensation as _get_executive_compensation,
+    get_executives as _get_executives,
+    get_insider_trade_statistics as _get_insider_trade_statistics,
     get_market_risk_premium as _get_market_risk_premium,
+    get_mergers_acquisitions as _get_mergers_acquisitions,
     get_profile as _get_profile,
     get_quote as _get_quote,
     get_rating as _get_rating,
+    get_ratios_ttm as _get_ratios_ttm,
     get_revenue_segmentation as _get_revenue_segmentation,
+    get_shares_float as _get_shares_float,
+    get_stock_grades as _get_stock_grades,
+    get_stock_splits as _get_stock_splits,
 )
 from financetoolkit.fundamentals_model import collect_financial_statements
+from financetoolkit.helpers import LazyDict, determine_period_end_dates
 from financetoolkit.historical_model import (
+    calculate_period_average as _calculate_period_average,
     convert_daily_to_other_period as _convert_daily_to_other_period,
     get_historical_data as _get_historical_data,
     get_historical_statistics as _get_historical_statistics,
 )
-from financetoolkit.models.models_controller import Models
 from financetoolkit.normalization_model import (
-    copy_normalization_files as _copy_normalization_files,
+    get_normalization_files as _get_normalization_files,
     initialize_statements_and_normalization as _initialize_statements_and_normalization,
 )
-from financetoolkit.options.options_controller import Options
-from financetoolkit.performance.performance_controller import Performance
-from financetoolkit.ratios.ratios_controller import Ratios
-from financetoolkit.risk.risk_controller import Risk
-from financetoolkit.technicals.technicals_controller import Technicals
-from financetoolkit.utilities import logger_model
+from financetoolkit.utilities import logger_model, validation_model
 from financetoolkit.utilities.dataframe_model import filter_columns
-from financetoolkit.utilities.requests_model import convert_isin_to_ticker
 from financetoolkit.utilities.statistics_model import apply_rounding, calculate_growth
 
 if TYPE_CHECKING:
-    # TYPE_CHECKING only: the econometrics extra is imported lazily at runtime.
+    # TYPE_CHECKING only: the module controllers are imported when first used, so that
+    # importing the Finance Toolkit does not load every module and its dependencies.
     from financetoolkit.econometrics.econometrics_controller import Econometrics
+    from financetoolkit.economics.economics_controller import Economics
+    from financetoolkit.etf.etf_controller import ETF
+    from financetoolkit.fixedincome.fixedincome_controller import FixedIncome
+    from financetoolkit.models.models_controller import Models
+    from financetoolkit.options.options_controller import Options
+    from financetoolkit.performance.performance_controller import Performance
+    from financetoolkit.portfolio.construction_controller import (
+        PortfolioConstruction,
+    )
+    from financetoolkit.ratios.ratios_controller import Ratios
+    from financetoolkit.risk.risk_controller import Risk
+    from financetoolkit.technicals.technicals_controller import Technicals
 
 # Displays messages, warnings and errors when the Finance Toolkit hits issues.
 logger_model.setup_logger()
@@ -95,7 +116,7 @@ class Toolkit:
         start_date: str | None = None,
         end_date: str | None = None,
         quarterly: bool = False,
-        use_cached_data: bool | str = False,
+        use_cached_data: bool | str | cache_controller.Cache | None = None,
         risk_free_rate: str = "10y",
         benchmark_ticker: str | None = "SPY",
         enforce_source: str | None = None,
@@ -118,10 +139,10 @@ class Toolkit:
         Initializes a Toolkit object with a ticker or a list of tickers. The way the Toolkit is initialized
         will define how the data is collected. For example, if you enable the quarterly flag, you will
         be able to collect quarterly data. Next to that, you can define the start and end date to specify
-        a specific range. Another option is to work with cached data. This is useful when you have collected
-        data before and want to use this data again. This can be done by setting the use_cached_data variable
-        to True. If you want to use a specific location to store the cached data, you can define this as a string,
-        e.g. "datasets".
+        a specific range. Data retrieved from an external source (statements, prices, economic indicators and so on)
+        is cached by default, so it is only retrieved again once it may have changed; what the Finance Toolkit
+        calculates itself is never cached. Set use_cached_data to False to switch this off, or to a string, e.g.
+        "datasets", to store the cache in a specific location.
 
         The cache keeps track of what it already holds per ticker and per date range, so changing a parameter
         does not throw the rest away. Widening the period only retrieves the years that were missing, adding a
@@ -137,29 +158,32 @@ class Toolkit:
         Args:
             tickers (list | str | None): A string or a list of strings containing the company ticker(s). E.g. 'TSLA' or 'MSFT'.
             Find tickers on various websites or via the FinanceDatabase: https://github.com/JerBouma/financedatabase. Defaults to None.
-            api_key (str): An API key from FinancialModelingPrep. Obtain one here: https://www.jeroenbouma.com/fmp. Defaults to
-            the value of the FINANCIAL_MODELING_PREP_API_KEY environment variable if set, otherwise an empty string.
+            api_key (str): An API key from FinancialModelingPrep. Obtain one at https://www.jeroenbouma.com/fmp or leave it
+            empty to use Yahoo Finance where possible. Defaults to the value of the FINANCIAL_MODELING_PREP_API_KEY
+            environment variable if set, otherwise an empty string.
             start_date (str | None): A string containing the start date of the data. Needs to be formatted as YYYY-MM-DD.
             Defaults to 5 years/quarters back from today depending on the 'quarterly' flag.
             end_date (str | None): A string containing the end date of the data. Needs to be formatted as YYYY-MM-DD.
             Defaults to today.
             quarterly (bool): A boolean indicating whether to collect quarterly data. Defaults to False (yearly).
             Note that historical data can still be collected for any period and interval.
-            use_cached_data (bool | str): A boolean indicating whether to use cached data. If True, uses the shared
-            cache database in the user configuration directory, which is also the one the MCP server reads and writes.
-            If a string is provided, uses that string as the path to a dedicated cache folder or database file.
-            Defaults to False.
+            use_cached_data (bool | str | None): Whether to cache the data retrieved from external sources. None or
+            True uses the shared cache database in the user configuration directory, which is also the one the MCP
+            server reads and writes, False retrieves everything every time and a string is the path to a dedicated
+            cache folder or database file. Defaults to None, which caches unless the FINANCE_TOOLKIT_CACHE_ENABLED environment
+            variable is set to 0.
             risk_free_rate (str): The risk-free rate identifier ('13w', '5y', '10y', '30y'). Based on US Treasury Yields.
             Used for calculations like Excess Returns. Defaults to "10y".
             benchmark_ticker (str | None): The benchmark ticker (e.g., 'SPY' for S&P 500). Used for comparative analysis
             (CAPM, Alpha, Beta). Defaults to "SPY". Set to None to disable benchmark comparison.
             enforce_source (str | None): Enforce data source ('FinancialModelingPrep' or 'YahooFinance').
             Defaults to None (uses FMP if api_key provided, otherwise YahooFinance, with fallback).
-            historical (pd.DataFrame): Custom historical price data. See notebook:
-            https://www.jeroenbouma.com/projects/financetoolkit/external-datasets. Defaults to an empty DataFrame.
-            balance (pd.DataFrame): Custom balance sheet data. See notebook link above. Defaults to an empty DataFrame.
-            income (pd.DataFrame): Custom income statement data. See notebook link above. Defaults to an empty DataFrame.
-            cash (pd.DataFrame): Custom cash flow statement data. See notebook link above. Defaults to an empty DataFrame.
+            historical (pd.DataFrame): Custom historical price data. See
+            https://www.jeroenbouma.com/projects/financetoolkit/docs/external-datasets for how to supply your own data.
+            Defaults to an empty DataFrame.
+            balance (pd.DataFrame): Custom balance sheet data. See the external datasets guide linked above. Defaults to an empty DataFrame.
+            income (pd.DataFrame): Custom income statement data. See the external datasets guide linked above. Defaults to an empty DataFrame.
+            cash (pd.DataFrame): Custom cash flow statement data. See the external datasets guide linked above. Defaults to an empty DataFrame.
             format_location (str): Path to custom normalization files. Defaults to "".
             convert_currency (bool | None): Convert financial statements currency to match historical data currency.
             Important for cross-ticker comparison and calculations involving both data types.
@@ -201,6 +225,13 @@ class Toolkit:
             neither are fiscal years ending in June through December. Which tickers were relabelled is
             reported in the log and available on the Toolkit as _fiscal_year_adjustments.
 
+            The last day of each fiscal period is kept as well: daily ratios apply a period's figures
+            from that day on (not from the end of its calendar label), and currency translation uses
+            the closing rate on that day and the average rate over the fiscal period. The dates come
+            from the Period End Date in the statistics statement; when a source does not report it,
+            the latest day the period can end on given its label is used, so that figures are never
+            applied before the period ended.
+
             This convention is what makes financial statements line up with price history, since prices
             are always in calendar time. It also means the labels are not the company's own fiscal year
             numbering: what NVIDIA calls fiscal 2024 appears here as 2023.
@@ -235,12 +266,12 @@ class Toolkit:
             quarterly=True,
             api_key="FINANCIAL_MODELING_PREP_KEY")
 
-        # Working with cached data
+        # Storing the cache in a specific folder, or use_cached_data=False to not cache
         toolkit = Toolkit(
             tickers=["WMT", "AAPL"],
             quarterly=True,
             api_key="FINANCIAL_MODELING_PREP_KEY",
-            use_cached_data=True)
+            use_cached_data="datasets")
 
         # Changing the benchmark and risk free rate
         toolkit = Toolkit(
@@ -250,48 +281,38 @@ class Toolkit:
             api_key="FINANCIAL_MODELING_PREP_KEY")
         ```
         """
+        # A copied documentation example passes the placeholder key, treated as no key at all.
+        api_key = validation_model.resolve_api_key(api_key)
+
         self._api_key = api_key
-        self._fred_api_key = fred_api_key
+        self._fred_api_key = validation_model.resolve_fred_api_key(fred_api_key)
         self._risk_free_rate = risk_free_rate
         self._rounding = rounding
         self._remove_invalid_tickers = remove_invalid_tickers
         self._invalid_tickers: list = []
 
-        (
-            self._use_cached_data,
-            self._cache_location,
-        ) = cache_controller.parse_use_cached_data(use_cached_data)
-        self._cache = cache_controller.get_cache(
-            location=self._cache_location, enabled=self._use_cached_data
-        )
+        self._cache = cache_controller.resolve_cache(use_cached_data)
+        self._use_cached_data = self._cache.enabled
+        self._cache_location = self._cache.location
 
         # Published so the OECD/FRED/ECB/Fed free functions pick up this cache too.
         cache_controller.set_active_cache(self._cache)
         self._allow_stale_oecd_cache = allow_stale_oecd_cache
         self._benchmark_ticker = benchmark_ticker
 
-        if start_date and re.match(r"^\d{4}-\d{2}-\d{2}$", start_date) is None:
-            raise ValueError(
-                "Please input a valid start date (%Y-%m-%d) like '2010-01-01'"
-            )
-        if end_date and re.match(r"^\d{4}-\d{2}-\d{2}$", end_date) is None:
-            raise ValueError(
-                "Please input a valid end date (%Y-%m-%d) like '2020-01-01'"
-            )
-        if start_date and end_date and start_date > end_date:
-            raise ValueError(
-                f"Please ensure the start date {start_date} is before the end date {end_date}"
-            )
-
-        if risk_free_rate not in [
-            "13w",
-            "5y",
-            "10y",
-            "30y",
-        ]:
-            raise ValueError(
-                "Please select a valid risk free rate (13w, 5y, 10y or 30y)"
-            )
+        # Everything the user can get wrong is checked in one place; this raises on
+        # invalid input and hands back the normalized ticker list (upper-cased, ISIN
+        # codes converted, duplicates and the benchmark ticker removed).
+        validated_tickers = validation_model.validate_toolkit_parameters(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            risk_free_rate=risk_free_rate,
+            enforce_source=enforce_source,
+            api_key=api_key,
+            intraday_period=intraday_period,
+            benchmark_ticker=benchmark_ticker,
+        )
 
         self._start_date = (
             start_date
@@ -316,58 +337,8 @@ class Toolkit:
 
         # The cache tracks each ticker and range, so these arguments are always used.
 
-        if isinstance(tickers, str):
-            tickers = [tickers.upper()]
-        elif isinstance(tickers, list):
-            tickers = [
-                ticker.upper() if ticker != "Portfolio" else ticker
-                for ticker in tickers
-            ]
-        elif tickers is None:
-            raise ValueError("Please input a ticker or a list of tickers.")
-        else:
-            raise TypeError("Tickers must be a string or a list of strings.")
-
-        self._tickers: list[str] = []
-
-        for ticker in tickers:
-            # Check whether the ticker is in ISIN format and if say so convert it to a ticker
-            self._tickers.append(convert_isin_to_ticker(ticker))
-
-        # Take out duplicate tickers if applicable; deduplicating through a set would make the ticker order, and therefore the column order of every single output, depend on the hash seed and change between runs.
-        deduplicated_tickers = list(dict.fromkeys(self._tickers))
-
-        if len(deduplicated_tickers) != len(self._tickers):
-            duplicate_tickers = [
-                ticker for ticker, count in Counter(self._tickers).items() if count > 1
-            ]
-            logger.warning(
-                "Found duplicate tickers, duplicate entries of the following tickers are removed: %s",
-                ", ".join(duplicate_tickers),
-            )
-            self._tickers = deduplicated_tickers
-
-        if self._benchmark_ticker in self._tickers:
-            logger.warning(
-                "Please note that the benchmark ticker (%s) is also "
-                "included in the tickers. Therefore, this ticker will be removed from the "
-                "tickers list. If this is not desired, please set the benchmark_ticker to None.",
-                self._benchmark_ticker,
-            )
-            self._tickers.remove(self._benchmark_ticker)
-
+        self._tickers: list[str] = validated_tickers
         self._enforce_source: str | None = enforce_source
-
-        if self._enforce_source not in [None, "FinancialModelingPrep", "YahooFinance"]:
-            raise ValueError(
-                "Please select either FinancialModelingPrep or YahooFinance as the "
-                "enforced source."
-            )
-        if self._enforce_source == "FinancialModelingPrep" and not self._api_key:
-            raise ValueError(
-                "Please input an API key from FinancialModelingPrep if you wish to use "
-                "historical data from FinancialModelingPrep."
-            )
 
         if sleep_timer is None:
             # Determines the plan, which drives the sleep timer and other components.
@@ -380,7 +351,7 @@ class Toolkit:
                 logger.error(
                     "You have entered an invalid API key from Financial Modeling Prep. Obtain your API key for free "
                     "and get 15% off the Premium plans by using the following affiliate link.\nThis also supports "
-                    "the project: https://www.jeroenbouma.com/fmp. Using Yahoo Finance as data source instead."
+                    "the project: https://www.jeroenbouma.com/fmp\nUsing Yahoo Finance as data source instead."
                 )
         else:
             self._fmp_plan = "Premium"
@@ -407,19 +378,27 @@ class Toolkit:
             self._revenue_product_segmentation_growth: pd.DataFrame = pd.DataFrame()
             self._market_risk_premium: pd.DataFrame = pd.DataFrame()
             self._commitment_of_traders: pd.DataFrame = pd.DataFrame()
+            self._executives: pd.DataFrame = pd.DataFrame()
+            self._executive_compensation: pd.DataFrame = pd.DataFrame()
+            self._company_notes: pd.DataFrame = pd.DataFrame()
+            self._employee_count: pd.DataFrame = pd.DataFrame()
+            self._shares_float: pd.DataFrame = pd.DataFrame()
+            self._mergers_acquisitions: pd.DataFrame = pd.DataFrame()
+            self._stock_splits: pd.DataFrame = pd.DataFrame()
+            self._insider_trade_statistics: pd.DataFrame = pd.DataFrame()
+            self._stock_grades: pd.DataFrame = pd.DataFrame()
+            self._etf_holdings: pd.DataFrame = pd.DataFrame()
+            self._etf_information: pd.DataFrame = pd.DataFrame()
+            self._etf_country_weightings: pd.DataFrame = pd.DataFrame()
+            self._etf_sector_weightings: pd.DataFrame = pd.DataFrame()
+            self._earnings_call_transcripts: pd.DataFrame = pd.DataFrame()
+            # Which selection the stored transcripts hold, so switching between the latest
+            # transcript and the full range does not serve the other one.
+            self._earnings_call_transcripts_selection: (
+                tuple[bool, str | None] | None
+            ) = None
 
             # Resolved per ticker on request, so a different list reuses what it shares.
-
-        if intraday_period and intraday_period not in [
-            "1min",
-            "5min",
-            "15min",
-            "30min",
-            "1hour",
-        ]:
-            raise ValueError(
-                "Please select a valid intraday period (1min, 5min, 15min, 30min or 1hour)"
-            )
 
         self._intraday_period = intraday_period
 
@@ -434,6 +413,8 @@ class Toolkit:
         )
         # None means "not fetched by us yet", so pre-supplied `historical` is never auto-invalidated below.
         self._daily_historical_data_params: tuple | None = None
+        # Per period, the daily data and the settings its conversion was made with.
+        self._period_historical_data_sources: dict[str, tuple] = {}
 
         # Initialize other periods as empty DataFrames. They will be populated on demand.
         self._weekly_historical_data: pd.DataFrame = pd.DataFrame()
@@ -511,7 +492,7 @@ class Toolkit:
         pd.set_option("display.float_format", str)
 
     @property
-    def ratios(self) -> Ratios:
+    def ratios(self) -> "Ratios":
         """
         The Ratios Module contains over 50+ ratios that can be used to analyse companies. These ratios
         are divided into 5 categories which are efficiency, liquidity, profitability, solvency and
@@ -532,7 +513,12 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         profitability_ratios = toolkit.ratios.collect_profitability_ratios()
 
@@ -541,105 +527,51 @@ class Toolkit:
 
         Which returns:
 
-        |                                             |     2018 |     2019 |     2020 |     2021 |     2022 |
-        |:--------------------------------------------|---------:|---------:|---------:|---------:|---------:|
-        | Gross Margin                                | 0.383437 | 0.378178 | 0.382332 | 0.417794 | 0.433096 |
-        | Operating Margin                            | 0.26694  | 0.24572  | 0.241473 | 0.297824 | 0.302887 |
-        | Net Profit Margin                           | 0.224142 | 0.212381 | 0.209136 | 0.258818 | 0.253096 |
-        | Interest Burden Ratio                       | 1.02828  | 1.02827  | 1.01211  | 1.00237  | 0.997204 |
-        | Income Before Tax Profit Margin             | 0.274489 | 0.252666 | 0.244398 | 0.298529 | 0.30204  |
-        | Effective Tax Rate                          | 0.183422 | 0.159438 | 0.144282 | 0.133023 | 0.162045 |
-        | Return on Assets (ROA)                      | 0.162775 | 0.16323  | 0.177256 | 0.269742 | 0.282924 |
-        | Return on Equity (ROE)                      | 0.555601 | 0.610645 | 0.878664 | 1.50071  | 1.96959  |
-        | Return on Invested Capital (ROIC)           | 0.269858 | 0.293721 | 0.344126 | 0.503852 | 0.562645 |
-        | Return on Capital Employed (ROCE)           | 0.305968 | 0.297739 | 0.320207 | 0.495972 | 0.613937 |
-        | Return on Tangible Assets                   | 0.555601 | 0.610645 | 0.878664 | 1.50071  | 1.96959  |
-        | Income Quality Ratio                        | 1.30073  | 1.25581  | 1.4052   | 1.09884  | 1.22392  |
-        | Net Income per EBT                          | 0.816578 | 0.840562 | 0.855718 | 0.866977 | 0.837955 |
-        | Free Cash Flow to Operating Cash Flow Ratio | 0.828073 | 0.848756 | 0.909401 | 0.893452 | 0.912338 |
-        | EBT to EBIT Ratio                           | 0.957448 | 0.948408 | 0.958936 | 0.976353 | 0.975982 |
-        | EBIT to Revenue                             | 0.286688 | 0.26641  | 0.254864 | 0.305759 | 0.309473 |
+        |                                             |    2021 |    2022 |    2023 |     2024 |     2025 |
+        |:--------------------------------------------|--------:|--------:|--------:|---------:|---------:|
+        | Gross Margin                                |  0.4178 |  0.4331 |  0.4413 |   0.4621 |   0.4691 |
+        | Operating Margin                            |  0.2978 |  0.3029 |  0.2982 |   0.3151 |   0.3197 |
+        | Net Profit Margin                           |  0.2588 |  0.2531 |  0.2531 |   0.2397 |   0.2692 |
+        | EBITDA Margin                               |  0.3287 |  0.331  |  0.3283 |   0.3444 |   0.3478 |
+        | Free Cash Flow Margin                       |  0.2541 |  0.2826 |  0.2598 |   0.2783 |   0.2373 |
+        | Interest Coverage Ratio                     | 41.1905 | 40.7496 | 29.062  | nan      | nan      |
+        | Income Before Tax Profit Margin             |  0.2985 |  0.302  |  0.2967 |   0.3158 |   0.3189 |
+        | Effective Tax Rate                          |  0.133  |  0.162  |  0.1472 |   0.2409 |   0.1561 |
+        | Return on Assets                            |  0.2806 |  0.2836 |  0.275  |   0.2613 |   0.3093 |
+        | Cash Return on Assets                       |  0.3083 |  0.3471 |  0.3134 |   0.3296 |   0.3079 |
+        | Return on Equity                            |  1.4744 |  1.7546 |  1.7195 |   1.5741 |   1.7142 |
+        | Return on Invested Capital                  |  0.4879 |  0.5229 |  0.528  |   0.5166 |   0.6201 |
+        | Return on Capital Employed                  |  0.4831 |  0.6009 |  0.5514 |   0.6534 |   0.6872 |
+        | Return on Tangible Assets                   |  0.2806 |  0.2836 |  0.275  |   0.2613 |   0.3093 |
+        | Income Quality Ratio                        |  1.0988 |  1.2239 |  1.1397 |   1.2616 |   0.9953 |
+        | Net Income per EBT                          |  0.867  |  0.838  |  0.8528 |   0.7591 |   0.8439 |
+        | Free Cash Flow to Operating Cash Flow Ratio |  0.8935 |  0.9123 |  0.9009 |   0.9201 |   0.8859 |
+        | EBT to EBIT Ratio                           |  0.9764 |  0.976  |  0.9666 |   1      |   1      |
+        | EBIT to Revenue                             |  0.3058 |  0.3095 |  0.307  |   0.3158 |   0.3189 |
+        | Cash Tax Rate                               |  0.2324 |  0.1643 |  0.1642 |   0.2114 |   0.3267 |
+        | Tax Rate Divergence                         |  0.0994 |  0.0023 |  0.017  |  -0.0295 |   0.1706 |
 
         """
-        empty_data: list = []
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.ratios.ratios_controller import Ratios  # noqa: PLC0415
 
-        if (
-            not self._api_key
-            and (
-                self._balance_sheet_statement.empty
-                or self._income_statement.empty
-                or self._cash_flow_statement.empty
-            )
-            and self._enforce_source == "FinancialModelingPrep"
-        ):
-            raise ValueError(
-                "The ratios class requires an API key from FinancialModelPrep if you wish to enforce the usage. "
-                "of Financial Modeling Prep. Get an API key here: https://www.jeroenbouma.com/fmp"
-            )
-
-        if self._balance_sheet_statement.empty:
-            empty_data.append("Balance Sheet Statement")
-        if self._income_statement.empty:
-            empty_data.append("Income Statement")
-        if self._cash_flow_statement.empty:
-            empty_data.append("Cash Flow Statement")
-
-        if empty_data:
-            logger.info("Obtaining financial statements")
-            for statement in empty_data:
-                if statement == "Balance Sheet Statement":
-                    self.get_balance_sheet_statement()
-                if statement == "Income Statement":
-                    self.get_income_statement()
-                if statement == "Cash Flow Statement":
-                    self.get_cash_flow_statement()
-
-        if (
-            self._balance_sheet_statement.empty
-            and self._income_statement.empty
-            and self._cash_flow_statement.empty
-        ):
-            raise ValueError(
-                "The datasets could not be populated and therefore the Ratios class cannot be initialized. "
-                "This is usually because no tickers are equities, you have reached the API limit or "
-                "entered an invalid API key."
-            )
-
-        if not self._start_date:
-            self._start_date = (
-                f"{self._balance_sheet_statement.columns[0].year - 5}-01-01"
-            )
-        if not self._end_date:
-            self._end_date = (
-                f"{self._balance_sheet_statement.columns[-1].year + 5}-01-01"
-            )
-
-        if self._quarterly:
-            self.get_historical_data(period="quarterly")
-        else:
-            self.get_historical_data(period="yearly")
-
-        historical = {
-            "period": (
-                self._quarterly_historical_data
-                if self._quarterly
-                else self._yearly_historical_data
-            ),
-            "daily": self._daily_historical_data,
-        }
-
-        tickers = (
-            self._balance_sheet_statement.index.get_level_values(0).unique().tolist()
-        )
+        # Every dataset is retrieved when a ratio first needs it, so a ratio downloads only
+        # what it uses (the gross margin only the income statement).
+        period = "quarterly" if self._quarterly else "yearly"
 
         ratios = Ratios(
-            tickers=(
-                tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
+            tickers=lambda: self._get_statement_tickers("Ratios")
+            + (["Portfolio"] if "Portfolio" in self._tickers else []),
+            historical=LazyDict(
+                lambda key: self._get_module_historical_data(
+                    period if key == "period" else key
+                )
             ),
-            historical=historical,
-            balance=self._balance_sheet_statement,
-            income=self._income_statement,
-            cash=self._cash_flow_statement,
+            balance=lambda: self._get_module_statement(
+                "balance_sheet_statement", "Ratios"
+            ),
+            income=lambda: self._get_module_statement("income_statement", "Ratios"),
+            cash=lambda: self._get_module_statement("cash_flow_statement", "Ratios"),
             quarterly=self._quarterly,
             rounding=self._rounding,
             start_date=self._start_date,
@@ -648,6 +580,9 @@ class Toolkit:
             sleep_timer=self._sleep_timer,
             user_subscription=self._fmp_plan,
             analyst_estimates_cache=self._analyst_estimates_cache,
+            period_end_dates=lambda: self._get_period_end_dates(
+                self._get_module_statement("balance_sheet_statement", "Ratios")
+            ),
         )
 
         if self._portfolio_weights:
@@ -656,7 +591,7 @@ class Toolkit:
         return ratios
 
     @property
-    def models(self) -> Models:
+    def models(self) -> "Models":
         """
         Gives access to the Models module. The Models module is meant to execute well-known models
         such as DUPONT and the Discounted Cash Flow (DCF) model. These models are also directly
@@ -669,7 +604,13 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["TSLA", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", quarterly=True, start_date='2022-12-31')
+        toolkit = Toolkit(
+            ["TSLA", "AMZN"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            quarterly=True,
+            start_date='2022-12-31',
+            end_date="2025-12-31",
+        )
 
         dupont_analysis = toolkit.models.get_extended_dupont_analysis()
 
@@ -678,102 +619,116 @@ class Toolkit:
 
         Which returns:
 
-        |                         |      2022Q2 |    2022Q3 |      2022Q4 |    2023Q1 |    2023Q2 |
-        |:------------------------|------------:|----------:|------------:|----------:|----------:|
-        | Interest Burden Ratio   |  -1.24465   | 0.858552  | -2.88409    | 1.20243   | 1.01681   |
-        | Tax Burden Ratio        |  -0.611396  | 1.13743   |  0.101571   | 0.640291  | 0.878792  |
-        | Operating Profit Margin |  -0.0219823 | 0.0231391 | -0.00636042 | 0.0323498 | 0.0562125 |
-        | Asset Turnover          | nan         | 0.299735  |  0.3349     | 0.274759  | 0.285319  |
-        | Equity Multiplier       | nan         | 3.15403   |  3.14263    | 3.08433   | 2.91521   |
-        | Return on Equity        | nan         | 0.0213618 |  0.00196098 | 0.0211066 | 0.0417791 |
+        |                         |   2022Q4 |   2023Q1 |   2023Q2 |   2023Q3 |   2023Q4 |   2024Q1 |   2024Q2 |   2024Q3 |   2024Q4 |   2025Q1 |   2025Q2 |   2025Q3 |   2025Q4 |
+        |:------------------------|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|---------:|
+        | Interest Burden Ratio   |  -0.3467 |   0.863  |   0.9835 |   1.0891 |   1.0361 |   0.8426 |   1.0395 |   1.0358 |   1.0531 |   1.1779 |   1.0872 |   1.6127 |   1.0465 |
+        | Tax Burden Ratio        |  -0.2929 |   0.7699 |   0.8936 |   0.8108 |   0.7763 |   0.8087 |   0.8841 |   0.85   |   0.8959 |   0.79   |   0.8715 |   0.7541 |   0.8108 |
+        | Operating Profit Margin |   0.0183 |   0.0375 |   0.0572 |   0.0782 |   0.0777 |   0.1068 |   0.0992 |   0.1096 |   0.1129 |   0.1182 |   0.1143 |   0.0967 |   0.1171 |
+        | Asset Turnover          | nan      |   0.2748 |   0.2853 |   0.2967 |   0.335  |   0.2707 |   0.2726 |   0.2789 |   0.3105 |   0.2455 |   0.2531 |   0.2555 |   0.2761 |
+        | Equity Multiplier       | nan      |   3.0843 |   2.9152 |   2.7433 |   2.6367 |   2.5298 |   2.3963 |   2.2991 |   2.2188 |   2.1427 |   2.0721 |   2.0047 |   1.9802 |
+        | Return on Equity        | nan      |   0.0211 |   0.0418 |   0.0562 |   0.0552 |   0.0498 |   0.0595 |   0.0619 |   0.0734 |   0.0579 |   0.0568 |   0.0602 |   0.0543 |
         """
-        empty_data: list = []
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.models.models_controller import Models  # noqa: PLC0415
 
-        if not self._api_key and (
-            self._balance_sheet_statement.empty
-            or self._income_statement.empty
-            or self._cash_flow_statement.empty
-        ):
-            raise ValueError(
-                "The models class requires an API key from FinancialModelPrep. "
-                "Get an API key here: https://www.jeroenbouma.com/fmp"
+        # Every dataset is retrieved when a model first needs it.
+
+        def compare_with_peers(peers: dict[str, list[str]] | None) -> pd.DataFrame:
+            # Imported when first used, as only the peer comparison needs them.
+            from financetoolkit.fmp_model import get_stock_peers  # noqa: PLC0415
+            from financetoolkit.models import peers_model  # noqa: PLC0415
+
+            tickers = self._get_statement_tickers("Models")
+
+            peer_map = {
+                ticker: list((peers or {}).get(ticker) or [])
+                or get_stock_peers(ticker, self._api_key, self._fmp_plan)
+                for ticker in tickers
+            }
+            universe = sorted(
+                set(tickers) | {peer for group in peer_map.values() for peer in group}
             )
-
-        if self._balance_sheet_statement.empty:
-            empty_data.append("Balance Sheet Statement")
-        if self._income_statement.empty:
-            empty_data.append("Income Statement")
-        if self._cash_flow_statement.empty:
-            empty_data.append("Cash Flow Statement")
-
-        if empty_data:
-            logger.info("Obtaining financial statements")
-            for statement in empty_data:
-                if statement == "Balance Sheet Statement":
-                    self.get_balance_sheet_statement()
-                if statement == "Income Statement":
-                    self.get_income_statement()
-                if statement == "Cash Flow Statement":
-                    self.get_cash_flow_statement()
-
-        if (
-            self._balance_sheet_statement.empty
-            and self._income_statement.empty
-            and self._cash_flow_statement.empty
-        ):
-            raise ValueError(
-                "The datasets could not be populated and therefore the Ratios class cannot be initialized. "
-                "This is usually because no tickers are equities, you have reached the API limit or "
-                "entered an invalid API key."
+            # The latest fiscal year is what is compared, so three years of data suffice.
+            others = Toolkit(
+                tickers=universe,
+                api_key=self._api_key,
+                start_date=(datetime.today() - timedelta(days=365 * 3)).strftime(
+                    "%Y-%m-%d"
+                ),
+                use_cached_data=self._cache,
+                enforce_source=self._enforce_source,
+                benchmark_ticker=None,
+                progress_bar=False,
             )
-
-        if not self._start_date:
-            self._start_date = (
-                f"{self._balance_sheet_statement.columns[0].year - 5}-01-01"
+            ratios = others.ratios
+            income = others.get_income_statement(growth=True)
+            metrics = pd.DataFrame(
+                {
+                    "Price-to-Earnings": peers_model.get_latest_values(
+                        ratios.get_price_to_earnings_ratio()
+                    ),
+                    "EV-to-EBITDA": peers_model.get_latest_values(
+                        ratios.get_ev_to_ebitda_ratio()
+                    ),
+                    "Price-to-Book": peers_model.get_latest_values(
+                        ratios.get_price_to_book_ratio()
+                    ),
+                    "Price-to-Sales": peers_model.get_latest_values(
+                        ratios.get_price_to_sales_ratio()
+                    ),
+                    "Gross Margin": peers_model.get_latest_values(
+                        ratios.get_gross_margin()
+                    ),
+                    "Operating Margin": peers_model.get_latest_values(
+                        ratios.get_operating_margin()
+                    ),
+                    "Net Profit Margin": peers_model.get_latest_values(
+                        ratios.get_net_profit_margin()
+                    ),
+                    "Return on Equity": peers_model.get_latest_values(
+                        ratios.get_return_on_equity()
+                    ),
+                    "Return on Invested Capital": peers_model.get_latest_values(
+                        ratios.get_return_on_invested_capital()
+                    ),
+                    "Revenue Growth": peers_model.get_latest_values(
+                        income.loc[:, "Revenue", :]
+                    ),
+                    "Debt-to-Equity": peers_model.get_latest_values(
+                        ratios.get_debt_to_equity_ratio()
+                    ),
+                    "Dividend Yield": peers_model.get_latest_values(
+                        ratios.get_dividend_yield()
+                    ),
+                }
             )
-        if not self._end_date:
-            self._end_date = (
-                f"{self._balance_sheet_statement.columns[-1].year + 5}-01-01"
+            return pd.concat(
+                {
+                    ticker: peers_model.get_peer_comparison(
+                        metrics, ticker, peer_map[ticker]
+                    )
+                    for ticker in tickers
+                }
             )
-
-        for period in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
-            self.get_historical_data(period=period)
-
-        historical_data = {
-            "daily": self._daily_historical_data,
-            "weekly": self._weekly_historical_data,
-            "monthly": self._monthly_historical_data,
-            "quarterly": self._quarterly_historical_data,
-            "yearly": self._yearly_historical_data,
-        }
-
-        risk_free_rate_data = {
-            "daily": self._daily_risk_free_rate,
-            "weekly": self._weekly_risk_free_rate,
-            "monthly": self._monthly_risk_free_rate,
-            "quarterly": self._quarterly_risk_free_rate,
-            "yearly": self._yearly_risk_free_rate,
-        }
-
-        tickers = (
-            self._balance_sheet_statement.index.get_level_values(0).unique().tolist()
-        )
 
         return Models(
-            tickers=tickers,
-            historical_data=historical_data,
-            risk_free_rate_data=risk_free_rate_data,
-            balance=self._balance_sheet_statement,
-            income=self._income_statement,
-            cash=self._cash_flow_statement,
+            tickers=lambda: self._get_statement_tickers("Models"),
+            historical_data=LazyDict(self._get_module_historical_data),
+            risk_free_rate_data=LazyDict(self._get_module_risk_free_rate),
+            balance=lambda: self._get_module_statement(
+                "balance_sheet_statement", "Models"
+            ),
+            income=lambda: self._get_module_statement("income_statement", "Models"),
+            cash=lambda: self._get_module_statement("cash_flow_statement", "Models"),
             quarterly=self._quarterly,
             rounding=self._rounding,
             start_date=self._start_date,
             end_date=self._end_date,
+            peer_function=compare_with_peers,
         )
 
     @property
-    def options(self) -> Options:
+    def options(self) -> "Options":
         """
         This gives access to the Options module. The Options Module is meant to provide Options valuations
         based on real market data. This includes the Black-Scholes model and in the future the Binomial model
@@ -790,7 +745,12 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["TSLA", "MU"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["TSLA", "MU"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         all_greeks = toolkit.options.collect_all_greeks(start_date='2024-01-03')
 
@@ -799,56 +759,71 @@ class Toolkit:
 
         Which returns:
 
-        |   Strike Price |   Delta |   Dual Delta |   Vega |   Theta |    Rho |   Epsilon |   Lambda |   Gamma |   Dual Gamma |   Vanna |    Charm |   Vomma |    Vera |      Veta |     PD |   Speed |   Zomma |   Color |   Ultima |
-        |---------------:|--------:|-------------:|-------:|--------:|-------:|----------:|---------:|--------:|-------------:|--------:|---------:|--------:|--------:|----------:|-------:|--------:|--------:|--------:|---------:|
-        |            180 |  1      |      -0.9999 | 0      | -0.0193 | 0.0049 |   -0.6533 |   0.0408 |  0      |       0      | -0      |   0      |  0      | -0      |    0      | 0      | -0      |  0      |  0      |   0      |
-        |            185 |  1      |      -0.9999 | 0      | -0.0198 | 0.0051 |   -0.6533 |   0.0446 |  0      |       0      | -0      |   0      |  0      | -0      |    0      | 0      | -0      |  0      |  0      |   0      |
-        |            190 |  1      |      -0.9999 | 0      | -0.0204 | 0.0052 |   -0.6533 |   0.0492 |  0      |       0      | -0      |   0      |  0      | -0      |    0      | 0      | -0      |  0      |  0      |   0      |
-        |            195 |  1      |      -0.9999 | 0      | -0.0209 | 0.0053 |   -0.6533 |   0.0549 |  0      |       0      | -0      |   0      |  0      | -0      |    0      | 0      | -0      |  0      |  0      |   0      |
-        |            200 |  1      |      -0.9999 | 0      | -0.0214 | 0.0055 |   -0.6533 |   0.062  |  0      |       0      | -0      |   0      |  0      | -0      |    0.0014 | 0      | -0      |  0      |  0      |   0      |
-        |            205 |  1      |      -0.9999 | 0      | -0.022  | 0.0056 |   -0.6533 |   0.0712 |  0      |       0      | -0      |   0.0005 |  0.0003 | -0      |    0.1236 | 0      | -0      |  0      |  0.0004 |   0.0001 |
-        |            210 |  1      |      -0.9999 | 0      | -0.0226 | 0.0058 |   -0.6533 |   0.0837 |  0      |       0      | -0.0002 |   0.0221 |  0.0119 | -0.0001 |    4.6313 | 0      | -0      |  0.0001 |  0.0132 |   0.0034 |
-        |            215 |  0.9998 |      -0.9997 | 0.0001 | -0.0254 | 0.0059 |   -0.6532 |   0.1016 |  0.0001 |       0.0001 | -0.0044 |   0.4426 |  0.1942 | -0.0029 |   77.6496 | 0.0001 | -0.0001 |  0.0021 |  0.209  |   0.0336 |
-        |            220 |  0.9973 |      -0.9969 | 0.001  | -0.0526 | 0.006  |   -0.6515 |   0.1287 |  0.0012 |       0.0014 | -0.0414 |   4.1955 |  1.4351 | -0.0273 |  600.92   | 0.0014 | -0.0005 |  0.0144 |  1.4569 |   0.1196 |
-        |            225 |  0.9777 |      -0.976  | 0.0066 | -0.2079 | 0.006  |   -0.6387 |   0.1723 |  0.0076 |       0.0086 | -0.1884 |  19.0888 |  4.7244 | -0.1249 | 2187.89   | 0.0086 | -0.0022 |  0.0407 |  4.1228 |   0.0829 |
-        |            230 |  0.8953 |      -0.8898 | 0.0226 | -0.6528 | 0.0056 |   -0.5849 |   0.2419 |  0.0261 |       0.028  | -0.3993 |  40.3564 |  6.2557 | -0.267  | 3816.31   | 0.028  | -0.0048 |  0.0253 |  2.5239 |  -0.1641 |
-        |            235 |  0.6978 |      -0.6874 | 0.0435 | -1.2304 | 0.0044 |   -0.4558 |   0.3442 |  0.0502 |       0.0516 | -0.306  |  30.653  |  1.9785 | -0.2119 | 3623.7    | 0.0516 | -0.0039 | -0.0672 | -6.8719 |  -0.0977 |
-        |            240 |  0.4192 |      -0.4078 | 0.0488 | -1.3691 | 0.0027 |   -0.2739 |   0.4789 |  0.0562 |       0.0555 |  0.1634 | -17.1438 |  0.4159 |  0.0934 | 3407.79   | 0.0555 |  0.0014 | -0.096  | -9.7512 |  -0.0222 |
-        |            245 |  0.1812 |      -0.1736 | 0.0329 | -0.9207 | 0.0012 |   -0.1184 |   0.6396 |  0.0379 |       0.0359 |  0.4445 | -45.5549 |  5.0536 |  0.2814 | 4080.87   | 0.0359 |  0.0048 | -0.0098 | -0.9474 |  -0.1945 |
-        |            250 |  0.0544 |      -0.0513 | 0.0138 | -0.3848 | 0.0004 |   -0.0355 |   0.8183 |  0.0159 |       0.0144 |  0.3232 | -33.01   |  6.468  |  0.2073 | 3328.37   | 0.0144 |  0.0036 |  0.0461 |  4.7176 |  -0.0443 |
-        |            255 |  0.0112 |      -0.0104 | 0.0037 | -0.1028 | 0.0001 |   -0.0073 |   1.0084 |  0.0042 |       0.0037 |  0.1223 | -12.477  |  3.4845 |  0.0789 | 1542.52   | 0.0037 |  0.0014 |  0.0325 |  3.3216 |   0.1424 |
-        |            260 |  0.0016 |      -0.0015 | 0.0006 | -0.018  | 0      |   -0.001  |   1.205  |  0.0007 |       0.0006 |  0.0276 |  -2.8148 |  1.0161 |  0.0179 |  421.028  | 0.0006 |  0.0003 |  0.0104 |  1.0578 |   0.1054 |
-        |            265 |  0.0002 |      -0.0001 | 0.0001 | -0.0021 | 0      |   -0.0001 |   1.4049 |  0.0001 |       0.0001 |  0.004  |  -0.4041 |  0.1783 |  0.0026 |   71.3544 | 0.0001 |  0      |  0.0019 |  0.1933 |   0.0322 |
-        |            270 |  0      |      -0      | 0      | -0.0002 | 0      |   -0      |   1.6059 |  0      |       0      |  0.0004 |  -0.0385 |  0.02   |  0.0002 |    7.8471 | 0      |  0      |  0.0002 |  0.0222 |   0.0054 |
-        |            275 |  0      |      -0      | 0      | -0      | 0      |   -0      |   1.8068 |  0      |       0      |  0      |  -0.0025 |  0.0015 |  0      |    0.5804 | 0      |  0      |  0      |  0.0017 |   0.0006 |
-        |            280 |  0      |      -0      | 0      | -0      | 0      |   -0      |   2.0066 |  0      |       0      |  0      |  -0.0001 |  0.0001 |  0      |    0.0297 | 0      |  0      |  0      |  0.0001 |   0      |
-        |            285 |  0      |      -0      | 0      | -0      | 0      |   -0      |   2.2048 |  0      |       0      |  0      |  -0      |  0      |  0      |    0.0011 | 0      |  0      |  0      |  0      |   0      |
-        |            290 |  0      |      -0      | 0      | -0      | 0      |   -0      |   2.401  |  0      |       0      |  0      |  -0      |  0      |  0      |    0      | 0      |  0      |  0      |  0      |   0      |
-        |            295 |  0      |      -0      | 0      | -0      | 0      |   -0      |   2.595  |  0      |       0      |  0      |  -0      |  0      |  0      |    0      | 0      |  0      |  0      |  0      |   0      |
+        |   Strike Price |   Delta |   Dual Delta |   Vega |   Theta |    Rho |   Epsilon |   Lambda |   Gamma |   Dual Gamma |   Vanna |    Charm |   Vomma |    Vera |    Veta |     PD |   Speed |   Zomma |   Color |   Ultima |
+        |---------------:|--------:|-------------:|-------:|--------:|-------:|----------:|---------:|--------:|-------------:|--------:|---------:|--------:|--------:|--------:|-------:|--------:|--------:|--------:|---------:|
+        |            180 |  1      |      -0.9999 | 0      | -0.0191 | 0.4931 |   -0.6533 |   4.0782 |  0      |       0      | -0      |   0      |  0      | -0      | -0      | 0      | -0      |  0      | -0      |   0      |
+        |            185 |  1      |      -0.9999 | 0      | -0.0196 | 0.5068 |   -0.6533 |   4.4595 |  0      |       0      | -0      |   0      |  0      | -0      | -0      | 0      | -0      |  0      | -0      |   0      |
+        |            190 |  1      |      -0.9999 | 0      | -0.0202 | 0.5205 |   -0.6533 |   4.9195 |  0      |       0      | -0      |   0      |  0      | -0      | -0      | 0      | -0      |  0      | -0      |   0      |
+        |            195 |  1      |      -0.9999 | 0      | -0.0207 | 0.5342 |   -0.6533 |   5.4853 |  0      |       0      | -0      |   0      |  0      | -0      | -0      | 0      | -0      |  0      | -0      |   0      |
+        |            200 |  1      |      -0.9999 | 0      | -0.0212 | 0.5479 |   -0.6533 |   6.1981 |  0      |       0      | -0      |   0      |  0      | -0      | -0      | 0      | -0      |  0      | -0      |   0.0001 |
+        |            205 |  1      |      -0.9999 | 0      | -0.0217 | 0.5616 |   -0.6533 |   7.1239 |  0      |       0      | -0      |   0.0002 |  0.0001 | -0      | -0      | 0      | -0      |  0      | -0.0002 |   0.0071 |
+        |            210 |  1      |      -0.9999 | 0      | -0.0223 | 0.5753 |   -0.6533 |   8.3748 |  0      |       0      | -0.0001 |   0.0124 |  0.0071 | -0.0001 | -0      | 0      | -0      |  0.0001 | -0.0079 |   0.2261 |
+        |            215 |  0.9999 |      -0.9998 | 0.0001 | -0.0243 | 0.5889 |   -0.6532 |  10.1573 |  0.0001 |       0.0001 | -0.0031 |   0.3048 |  0.1423 | -0.002  | -0.0004 | 0.0001 | -0      |  0.0016 | -0.1539 |   2.7483 |
+        |            220 |  0.9979 |      -0.9976 | 0.0008 | -0.0454 | 0.6013 |   -0.6519 |  12.8781 |  0.001  |       0.0011 | -0.0345 |   3.3891 |  1.2332 | -0.0227 | -0.0037 | 0.0011 | -0.0004 |  0.0129 | -1.2633 |  11.7212 |
+        |            225 |  0.9808 |      -0.9794 | 0.0058 | -0.1808 | 0.6037 |   -0.6408 |  17.297  |  0.0069 |       0.0078 | -0.1766 |  17.3444 |  4.5655 | -0.117  | -0.0152 | 0.0078 | -0.0022 |  0.0414 | -4.0652 |  10.4124 |
+        |            230 |  0.9022 |      -0.8971 | 0.0216 | -0.604  | 0.5653 |   -0.5894 |  24.4765 |  0.0256 |       0.0275 | -0.4047 |  39.6576 |  6.5361 | -0.2703 | -0.0283 | 0.0275 | -0.005  |  0.0303 | -2.9369 | -16.4877 |
+        |            235 |  0.7031 |      -0.6932 | 0.0432 | -1.1838 | 0.4463 |   -0.4593 |  35.2268 |  0.0513 |       0.0528 | -0.3236 |  31.4245 |  2.1541 | -0.2232 | -0.0273 | 0.0528 | -0.0043 | -0.0694 |  6.8815 | -10.901  |
+        |            240 |  0.4163 |      -0.4053 | 0.0487 | -1.3254 | 0.2665 |   -0.272  |  49.5371 |  0.0579 |       0.0571 |  0.173  | -17.5904 |  0.4562 |  0.0997 | -0.0256 | 0.0571 |  0.0016 | -0.1017 | 10.0098 |  -2.5045 |
+        |            245 |  0.1735 |      -0.1663 | 0.032  | -0.8684 | 0.1116 |   -0.1133 |  66.7011 |  0.038  |       0.036  |  0.4598 | -45.6744 |  5.3973 |  0.2916 | -0.0307 | 0.036  |  0.0051 | -0.0062 |  0.5668 | -20.8797 |
+        |            250 |  0.049  |      -0.0461 | 0.0127 | -0.343  | 0.0316 |   -0.032  |  85.8277 |  0.015  |       0.0137 |  0.316  | -31.292  |  6.5283 |  0.203  | -0.024  | 0.0137 |  0.0036 |  0.0497 | -4.9373 |  -2.5872 |
+        |            255 |  0.0092 |      -0.0086 | 0.0031 | -0.0841 | 0.006  |   -0.006  | 106.169  |  0.0037 |       0.0032 |  0.1099 | -10.8635 |  3.2297 |  0.0709 | -0.0103 | 0.0032 |  0.0013 |  0.0315 | -3.1218 |  15.635  |
+        |            260 |  0.0012 |      -0.0011 | 0.0005 | -0.0132 | 0.0008 |   -0.0008 | 127.197  |  0.0006 |       0.0005 |  0.0222 |  -2.1908 |  0.8418 |  0.0143 | -0.0025 | 0.0005 |  0.0003 |  0.0089 | -0.8831 |   9.8831 |
+        |            265 |  0.0001 |      -0.0001 | 0      | -0.0014 | 0.0001 |   -0.0001 | 148.561  |  0.0001 |       0      |  0.0028 |  -0.2741 |  0.1287 |  0.0018 | -0.0004 | 0      |  0      |  0.0014 | -0.1402 |   2.6    |
+        |            270 |  0      |      -0      | 0      | -0.0001 | 0      |   -0      | 170.037  |  0      |       0      |  0.0002 |  -0.0222 |  0.0123 |  0.0001 | -0      | 0      |  0      |  0.0001 | -0.0137 |   0.3703 |
+        |            275 |  0      |      -0      | 0      | -0      | 0      |   -0      | 191.483  |  0      |       0      |  0      |  -0.0012 |  0.0008 |  0      | -0      | 0      |  0      |  0      | -0.0009 |   0.0317 |
+        |            280 |  0      |      -0      | 0      | -0      | 0      |   -0      | 212.807  |  0      |       0      |  0      |  -0      |  0      |  0      | -0      | 0      |  0      |  0      | -0      |   0.0017 |
+        |            285 |  0      |      -0      | 0      | -0      | 0      |   -0      | 233.949  |  0      |       0      |  0      |  -0      |  0      |  0      | -0      | 0      |  0      |  0      | -0      |   0.0001 |
+        |            290 |  0      |      -0      | 0      | -0      | 0      |   -0      | 254.872  |  0      |       0      |  0      |  -0      |  0      |  0      | -0      | 0      |  0      |  0      | -0      |   0      |
+        |            295 |  0      |      -0      | 0      | -0      | 0      |   -0      | 275.552  |  0      |       0      |  0      |  -0      |  0      |  0      | -0      | 0      |  0      |  0      | -0      |   0      |
         """
-        if not self._start_date:
-            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
-                "%Y-%m-%d"
-            )
-        if not self._end_date:
-            self._end_date = datetime.today().strftime("%Y-%m-%d")
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.options.options_controller import Options  # noqa: PLC0415
 
-        self.get_historical_data(period="daily")
-        self.get_historical_data(period="yearly")
+        # The prices and the risk free rate are retrieved when a calculation first needs them.
+
+        def next_earnings_dates() -> dict[str, str]:
+            # The first announcement from today on, per ticker, for the implied earnings
+            # move. The earnings calendar stops at the end date, so the dates are read
+            # from the announcements Financial Modeling Prep lists, estimates included.
+            from financetoolkit.fmp_model import (  # noqa: PLC0415
+                get_upcoming_earnings_date,
+            )
+
+            if not self._api_key:
+                return {}
+            dates = {}
+            for ticker in self._tickers:
+                upcoming = get_upcoming_earnings_date(
+                    ticker, self._api_key, self._fmp_plan
+                )
+                if upcoming:
+                    dates[ticker] = upcoming
+            return dates
 
         return Options(
             tickers=self._tickers,
-            daily_historical=self._daily_historical_data,
-            annual_historical=self._yearly_historical_data,
-            risk_free_rate=self._daily_risk_free_rate,
+            daily_historical=lambda: self._get_module_historical_data("daily"),
+            annual_historical=lambda: self._get_module_historical_data("yearly"),
+            risk_free_rate=lambda: self._get_module_risk_free_rate("daily"),
             quarterly=self._quarterly,
             rounding=self._rounding,
             start_date=self._start_date,
             end_date=self._end_date,
+            earnings_function=next_earnings_dates,
         )
 
     @property
-    def technicals(self) -> Technicals:
+    def technicals(self) -> "Technicals":
         """
         This gives access to the Technicals module. The Technicals Module contains
         nearly 50 Technical Indicators that can be used to analyse companies. These indicators are
@@ -868,58 +843,36 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         average_directional_index = toolkit.technicals.get_average_directional_index()
         ```
 
         Which returns:
 
-        | Date       |    AAPL |    MSFT |
-        |:-----------|--------:|--------:|
-        | 2023-08-21 | 62.8842 | 36.7468 |
-        | 2023-08-22 | 65.7063 | 36.5525 |
-        | 2023-08-23 | 67.3596 | 35.5149 |
-        | 2023-08-24 | 66.4527 | 35.4399 |
-        | 2023-08-25 | 63.4837 | 32.3323 |
+        | Date       |    AAPL |    TSLA |   Benchmark |
+        |:-----------|--------:|--------:|------------:|
+        | 2025-12-24 | 22.018  | 24.0777 |     14.0995 |
+        | 2025-12-26 | 20.9256 | 24.3229 |     14.8314 |
+        | 2025-12-29 | 20.0592 | 23.2159 |     14.7624 |
+        | 2025-12-30 | 19.276  | 21.7824 |     14.6983 |
+        | 2025-12-31 | 18.7175 | 20.3475 |     13.7116 |
 
         """
-        if not self._start_date:
-            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
-                "%Y-%m-%d"
-            )
-        if not self._end_date:
-            self._end_date = datetime.today().strftime("%Y-%m-%d")
-
-        for period in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
-            self.get_historical_data(period=period)
-
-        if self._intraday_period:
-            if self._intraday_period in ["1min", "5min", "15min", "30min", "1hour"]:
-                self.get_intraday_data(period=self._intraday_period)
-            else:
-                raise ValueError(
-                    "The intraday period must be one of '1min', '5min', '15min', '30min' or '1hour'."
-                )
-
-        tickers = (
-            self._daily_historical_data.columns.get_level_values(1).unique().tolist()
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.technicals.technicals_controller import (  # noqa: PLC0415
+            Technicals,
         )
 
-        historical_data = {
-            "intraday": self._intraday_historical_data,
-            "daily": self._daily_historical_data,
-            "weekly": self._weekly_historical_data,
-            "monthly": self._monthly_historical_data,
-            "quarterly": self._quarterly_historical_data,
-            "yearly": self._yearly_historical_data,
-        }
-
+        # The prices of a period are retrieved when an indicator first asks for that period.
         technicals = Technicals(
-            tickers=(
-                tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
-            ),
-            historical_data=historical_data,
+            tickers=lambda: self._get_historical_tickers(include_benchmark=True),
+            historical_data=LazyDict(self._get_module_historical_data),
             rounding=self._rounding,
             start_date=self._start_date,
             end_date=self._end_date,
@@ -931,7 +884,7 @@ class Toolkit:
         return technicals
 
     @property
-    def performance(self) -> Performance:
+    def performance(self) -> "Performance":
         """
         This gives access to the Performance module. The Performance Module is meant to calculate metrics related
         to the risk-return relationship. These are things such as Beta, Sharpe Ratio, Sortino Ratio, CAPM,
@@ -948,7 +901,12 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_capital_asset_pricing_model(period='quarterly')
         ```
@@ -957,60 +915,39 @@ class Toolkit:
 
         | Date   |    AAPL |    TSLA |
         |:-------|--------:|--------:|
-        | 2022Q3 | -0.0684 | -0.1047 |
-        | 2022Q4 |  0.0857 |  0.0828 |
-        | 2023Q1 |  0.075  |  0.1121 |
-        | 2023Q2 |  0.0922 |  0.1342 |
-        | 2023Q3 |  0.0052 | -0.0482 |
+        | 2021Q2 |  0.1154 |  0.1364 |
+        | 2021Q3 |  0.0066 |  0.0052 |
+        | 2021Q4 |  0.1214 |  0.1869 |
+        | 2022Q1 | -0.0575 | -0.1007 |
+        | 2022Q2 | -0.2134 | -0.332  |
+        | 2022Q3 | -0.0594 | -0.0818 |
+        | 2022Q4 |  0.106  |  0.0998 |
+        | 2023Q1 |  0.083  |  0.1515 |
+        | 2023Q2 |  0.1032 |  0.1762 |
+        | 2023Q3 | -0.0414 | -0.1013 |
+        | 2023Q4 |  0.1021 |  0.2457 |
+        | 2024Q1 |  0.1038 |  0.1407 |
+        | 2024Q2 |  0.0524 |  0.0588 |
+        | 2024Q3 |  0.0571 |  0.1518 |
+        | 2024Q4 |  0.0215 |  0.0531 |
+        | 2025Q1 | -0.0386 | -0.1508 |
+        | 2025Q2 |  0.1473 |  0.2035 |
+        | 2025Q3 |  0.1029 |  0.1764 |
+        | 2025Q4 |  0.0236 |  0.0498 |
         """
-        if not self._start_date:
-            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
-                "%Y-%m-%d"
-            )
-        if not self._end_date:
-            self._end_date = datetime.today().strftime("%Y-%m-%d")
-
-        for period in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
-            self.get_historical_data(period=period)
-
-        if self._intraday_period:
-            if self._intraday_period in ["1min", "5min", "15min", "30min", "1hour"]:
-                self.get_intraday_data(period=self._intraday_period)
-            else:
-                raise ValueError(
-                    "The intraday period must be one of '1min', '5min', '15min', '30min' or '1hour'."
-                )
-
-        historical_data = {
-            "intraday": self._intraday_historical_data,
-            "daily": self._daily_historical_data,
-            "weekly": self._weekly_historical_data,
-            "monthly": self._monthly_historical_data,
-            "quarterly": self._quarterly_historical_data,
-            "yearly": self._yearly_historical_data,
-        }
-
-        risk_free_rate_data = {
-            "daily": self._daily_risk_free_rate["Adj Close"],
-            "weekly": self._weekly_risk_free_rate["Adj Close"],
-            "monthly": self._monthly_risk_free_rate["Adj Close"],
-            "quarterly": self._quarterly_risk_free_rate["Adj Close"],
-            "yearly": self._yearly_risk_free_rate["Adj Close"],
-        }
-
-        tickers = (
-            self._daily_historical_data.columns.get_level_values(1).unique().tolist()
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.performance.performance_controller import (  # noqa: PLC0415
+            Performance,
         )
 
-        if "Benchmark" in tickers:
-            tickers.remove("Benchmark")
-
+        # The prices and risk free rate of a period are retrieved when a metric first asks
+        # for that period.
         performance = Performance(
-            tickers=(
-                tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
+            tickers=lambda: self._get_historical_tickers(include_benchmark=False),
+            historical_data=LazyDict(self._get_module_historical_data),
+            risk_free_rate_data=LazyDict(
+                lambda period: self._get_module_risk_free_rate(period)["Adj Close"]
             ),
-            historical_data=historical_data,
-            risk_free_rate_data=risk_free_rate_data,
             quarterly=self._quarterly,
             rounding=self._rounding,
             start_date=self._start_date,
@@ -1025,7 +962,7 @@ class Toolkit:
         return performance
 
     @property
-    def risk(self) -> Risk:
+    def risk(self) -> "Risk":
         """
         This gives access to the Risk module. The Risk Module is meant to calculate metrics related to risk such
         as Value at Risk (VaR), Conditional Value at Risk (cVaR), EMWA/GARCH models and similar models. It also
@@ -1046,73 +983,35 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.risk.get_value_at_risk(period='yearly')
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2012   |  0      |  0      |
-        | 2013   |  0.1754 |  4.96   |
-        | 2014   |  1.7515 |  0.9481 |
-        | 2015   | -0.1958 |  0.1454 |
-        | 2016   |  0.4177 | -0.3437 |
-        | 2017   |  2.6368 |  1.2225 |
-        | 2018   | -0.2786 |  0.0718 |
-        | 2019   |  3.2243 |  0.4707 |
-        | 2020   |  1.729  |  8.3319 |
-        | 2021   |  1.3179 |  0.8797 |
-        | 2022   | -0.8026 | -1.0046 |
-        | 2023   |  1.8549 |  1.8238 |
+        |           |   Value |
+        |:----------|--------:|
+        | AAPL      | -0.2108 |
+        | TSLA      | -0.5357 |
+        | Benchmark | -0.1279 |
         """
-        if not self._start_date:
-            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
-                "%Y-%m-%d"
-            )
-        if not self._end_date:
-            self._end_date = datetime.today().strftime("%Y-%m-%d")
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.risk.risk_controller import Risk  # noqa: PLC0415
 
-        for period in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
-            self.get_historical_data(period=period)
-
-        if self._intraday_period:
-            if self._intraday_period in ["1min", "5min", "15min", "30min", "1hour"]:
-                self.get_intraday_data(period=self._intraday_period)
-            else:
-                raise ValueError(
-                    "The intraday period must be one of '1min', '5min', '15min', '30min' or '1hour'."
-                )
-
-        tickers = (
-            self._daily_historical_data.columns.get_level_values(1).unique().tolist()
-        )
-
-        historical_data = {
-            "intraday": self._intraday_historical_data,
-            "daily": self._daily_historical_data,
-            "weekly": self._weekly_historical_data,
-            "monthly": self._monthly_historical_data,
-            "quarterly": self._quarterly_historical_data,
-            "yearly": self._yearly_historical_data,
-        }
-
-        risk_free_rate_data = {
-            "daily": self._daily_risk_free_rate["Adj Close"],
-            "weekly": self._weekly_risk_free_rate["Adj Close"],
-            "monthly": self._monthly_risk_free_rate["Adj Close"],
-            "quarterly": self._quarterly_risk_free_rate["Adj Close"],
-            "yearly": self._yearly_risk_free_rate["Adj Close"],
-        }
-
+        # The prices and risk free rate of a period are retrieved when a metric first asks
+        # for that period.
         risk = Risk(
-            tickers=(
-                tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
+            tickers=lambda: self._get_historical_tickers(include_benchmark=True),
+            historical_data=LazyDict(self._get_module_historical_data),
+            risk_free_rate_data=LazyDict(
+                lambda period: self._get_module_risk_free_rate(period)["Adj Close"]
             ),
-            historical_data=historical_data,
-            risk_free_rate_data=risk_free_rate_data,
             intraday_period=self._intraday_period,
             quarterly=self._quarterly,
             rounding=self._rounding,
@@ -1168,42 +1067,10 @@ class Toolkit:
                 "pip install financetoolkit[econometrics]"
             ) from error
 
-        if not self._start_date:
-            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
-                "%Y-%m-%d"
-            )
-        if not self._end_date:
-            self._end_date = datetime.today().strftime("%Y-%m-%d")
-
-        for period in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
-            self.get_historical_data(period=period)
-
-        if self._intraday_period:
-            if self._intraday_period in ["1min", "5min", "15min", "30min", "1hour"]:
-                self.get_intraday_data(period=self._intraday_period)
-            else:
-                raise ValueError(
-                    "The intraday period must be one of '1min', '5min', '15min', '30min' or '1hour'."
-                )
-
-        tickers = (
-            self._daily_historical_data.columns.get_level_values(1).unique().tolist()
-        )
-
-        historical_data = {
-            "intraday": self._intraday_historical_data,
-            "daily": self._daily_historical_data,
-            "weekly": self._weekly_historical_data,
-            "monthly": self._monthly_historical_data,
-            "quarterly": self._quarterly_historical_data,
-            "yearly": self._yearly_historical_data,
-        }
-
+        # The prices of a period are retrieved when a method first asks for that period.
         econometrics = Econometrics(
-            tickers=(
-                tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
-            ),
-            historical_data=historical_data,
+            tickers=lambda: self._get_historical_tickers(include_benchmark=True),
+            historical_data=LazyDict(self._get_module_historical_data),
             intraday_period=self._intraday_period,
             quarterly=self._quarterly,
             rounding=self._rounding,
@@ -1217,7 +1084,182 @@ class Toolkit:
         return econometrics
 
     @property
-    def fixedincome(self) -> FixedIncome:
+    def etf(self) -> "ETF":
+        """
+        The ETF module analyzes the Toolkit's exchange traded funds (and other funds): their
+        holdings, sector and country weightings, profile and premium or discount to NAV, how closely
+        they track the Benchmark, how concentrated and how much alike they are, what their
+        holdings are valued at and how liquid they are.
+
+        See the following link for more information: https://www.jeroenbouma.com/projects/financetoolkit/docs/etf
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(["VOO", "QQQ", "AGG"], api_key="FINANCIAL_MODELING_PREP_KEY")
+
+        toolkit.etf.get_profile()
+        ```
+        """
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.etf.etf_controller import ETF  # noqa: PLC0415
+
+        if not self._start_date:
+            self._start_date = (datetime.today() - timedelta(days=365 * 10)).strftime(
+                "%Y-%m-%d"
+            )
+        if not self._end_date:
+            self._end_date = datetime.today().strftime("%Y-%m-%d")
+
+        def historical() -> pd.DataFrame:
+            # Only the analyses of prices need them, not the holdings and weightings.
+            self.get_historical_data(period="daily")
+            return self._daily_historical_data
+
+        def ratios(tickers: list[str]) -> pd.DataFrame:
+            ratios_ttm, _ = _get_ratios_ttm(
+                tickers, api_key=self._api_key, user_subscription=self._fmp_plan
+            )
+            return ratios_ttm
+
+        def currencies() -> pd.Series:
+            # The currency each ticker is listed in, to compare its close with the NAV.
+            statistics = self.get_historical_statistics()
+            if isinstance(statistics, pd.Series):
+                return pd.Series({self._tickers[0]: statistics.get("Currency")})
+            if statistics.empty or "Currency" not in statistics.index:
+                return pd.Series(dtype=object)
+            return statistics.loc["Currency"]
+
+        return ETF(
+            tickers=self._tickers,
+            historical_function=historical,
+            fund_data_function=self._collect_fund_data,
+            ratios_function=ratios,
+            start_date=self._start_date,
+            end_date=self._end_date,
+            rounding=self._rounding,
+            currency_function=currencies,
+        )
+
+    @property
+    def portfolio(self) -> "PortfolioConstruction":
+        """
+        This gives access to the Portfolio Construction module, which builds and examines
+        portfolios from the assets of this Toolkit: optimal weights (minimum variance,
+        maximum Sharpe ratio, mean-variance, risk parity, Hierarchical Risk Parity,
+        inverse volatility, minimum CVaR and Black-Litterman), the efficient frontier, risk
+        contributions, historical stress tests, look-through exposure of funds and a
+        Brinson-Fachler attribution against the benchmark.
+
+        When the Toolkit comes from a Portfolio (`Portfolio.toolkit`), the methods that take
+        weights use the Portfolio's latest weights by default.
+
+        See the following link for more information: https://www.jeroenbouma.com/projects/financetoolkit/docs/portfolio-optimization
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT", "JNJ", "XOM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.portfolio.get_risk_parity_weights()
+        ```
+        """
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.portfolio.construction_controller import (  # noqa: PLC0415
+            PortfolioConstruction,
+        )
+
+        # The prices and the risk free rate of a period are retrieved when a calculation
+        # first needs them.
+        historical_data = LazyDict(self._get_module_historical_data)
+        risk_free_rate_data = LazyDict(
+            lambda period: self._get_module_risk_free_rate(period)["Adj Close"]
+        )
+
+        def other_toolkit(tickers: list[str], start: str, end: str) -> "Toolkit":
+            # Other tickers (sector funds, the benchmark, earlier crises) get a Toolkit of
+            # their own that shares this one's key, cache and source.
+            return Toolkit(
+                tickers=tickers,
+                api_key=self._api_key,
+                start_date=start,
+                end_date=end,
+                use_cached_data=self._cache,
+                enforce_source=self._enforce_source,
+                benchmark_ticker=None,
+                progress_bar=False,
+            )
+
+        def prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+            historical = other_toolkit(tickers, start, end).get_historical_data(
+                period="daily"
+            )
+            if historical.empty:
+                return pd.DataFrame(columns=tickers)
+            adjusted = historical["Adj Close"]
+            if isinstance(adjusted, pd.Series):
+                adjusted = adjusted.to_frame(tickers[0])
+            return adjusted
+
+        def funds(kind: str, tickers: list[str]) -> pd.DataFrame:
+            own = set(tickers) <= set(self._tickers)
+            source = (
+                self
+                if own
+                else other_toolkit(tickers, self._start_date, self._end_date)
+            )
+            if kind == "sector":
+                result = source._collect_fund_data("sector_weightings")
+            elif kind == "country":
+                result = source._collect_fund_data("country_weightings")
+            else:
+                holdings = source._collect_fund_data("holdings")
+                if holdings is None or holdings.empty:
+                    return pd.DataFrame()
+                # One fund comes back indexed by holding, several by fund and holding.
+                if not isinstance(holdings.index, pd.MultiIndex):
+                    holdings = pd.concat({tickers[0]: holdings})
+                weights = pd.to_numeric(holdings["Weight"], errors="coerce")
+                result = pd.DataFrame(
+                    {
+                        fund: weights.loc[fund].groupby(level=0).sum()
+                        for fund in holdings.index.get_level_values(0).unique()
+                    }
+                )
+            if result is None:
+                return pd.DataFrame()
+            if isinstance(result, pd.Series):
+                result = result.to_frame(tickers[0])
+            return result
+
+        portfolio = PortfolioConstruction(
+            tickers=self._tickers,
+            historical_data=historical_data,
+            risk_free_rate_data=risk_free_rate_data,
+            benchmark_name=self._benchmark_ticker,
+            portfolio_weights=self._portfolio_weights,
+            price_function=prices,
+            profile_function=self.get_profile,
+            fund_function=funds,
+            rounding=self._rounding,
+            start_date=self._start_date,
+            end_date=self._end_date,
+        )
+
+        return portfolio
+
+    @property
+    def fixedincome(self) -> "FixedIncome":
         """
         This gives access to the Fixed Income module. This module contains a wide variety of fixed income
         related calculations such as the Effective Yield, the Macaulay Duration, the Modified Duration,
@@ -1241,27 +1283,33 @@ class Toolkit:
         fixedincome = FixedIncome(
             start_date='2024-01-01',
             end_date='2024-01-15',
+            fred_api_key='FRED_API_KEY',
         )
 
-        fixedincome.get_effective_yield(maturity=False)
+        fixedincome.get_ice_bofa_effective_yield(maturity=False)
         ```
 
         Which returns:
 
-        | Date       |    AAA |     AA |      A |    BBB |     BB |      B |    CCC |
-        |:-----------|-------:|-------:|-------:|-------:|-------:|-------:|-------:|
-        | 2024-01-01 | 0.0456 | 0.047  | 0.0505 | 0.054  | 0.0613 | 0.0752 | 0.1319 |
-        | 2024-01-02 | 0.0459 | 0.0473 | 0.0509 | 0.0543 | 0.0622 | 0.0763 | 0.1333 |
-        | 2024-01-03 | 0.0459 | 0.0474 | 0.051  | 0.0544 | 0.0634 | 0.0779 | 0.1358 |
-        | 2024-01-04 | 0.0466 | 0.0481 | 0.0518 | 0.0551 | 0.0639 | 0.0784 | 0.1367 |
-        | 2024-01-05 | 0.047  | 0.0485 | 0.0521 | 0.0554 | 0.0641 | 0.0787 | 0.137  |
-        | 2024-01-08 | 0.0465 | 0.0481 | 0.0517 | 0.055  | 0.0633 | 0.0776 | 0.1365 |
-        | 2024-01-09 | 0.0464 | 0.048  | 0.0516 | 0.0548 | 0.0629 | 0.0771 | 0.1359 |
-        | 2024-01-10 | 0.0464 | 0.048  | 0.0515 | 0.0547 | 0.0622 | 0.0762 | 0.1351 |
-        | 2024-01-11 | 0.0456 | 0.0472 | 0.0507 | 0.054  | 0.0619 | 0.076  | 0.1344 |
-        | 2024-01-12 | 0.0451 | 0.0467 | 0.0502 | 0.0534 | 0.0613 | 0.0753 | 0.1338 |
-        | 2024-01-15 | 0.0451 | 0.0467 | 0.0501 | 0.0533 | 0.0611 | 0.0751 | 0.1328 |
+        | Date       |      AAA |       AA |        A |      BBB |       BB |        B |      CCC |
+        |:-----------|---------:|---------:|---------:|---------:|---------:|---------:|---------:|
+        | 2024-01-01 | nan      | nan      | nan      | nan      | nan      | nan      | nan      |
+        | 2024-01-02 |   0.0459 |   0.0473 |   0.0509 |   0.0543 |   0.0622 |   0.0763 |   0.1333 |
+        | 2024-01-03 |   0.0459 |   0.0474 |   0.051  |   0.0544 |   0.0634 |   0.0779 |   0.1358 |
+        | 2024-01-04 |   0.0466 |   0.0481 |   0.0518 |   0.0551 |   0.0639 |   0.0784 |   0.1367 |
+        | 2024-01-05 |   0.047  |   0.0485 |   0.0521 |   0.0554 |   0.0641 |   0.0787 |   0.137  |
+        | 2024-01-08 |   0.0465 |   0.0481 |   0.0517 |   0.055  |   0.0633 |   0.0776 |   0.1365 |
+        | 2024-01-09 |   0.0464 |   0.048  |   0.0516 |   0.0548 |   0.0629 |   0.0771 |   0.1359 |
+        | 2024-01-10 |   0.0464 |   0.048  |   0.0515 |   0.0547 |   0.0622 |   0.0762 |   0.1351 |
+        | 2024-01-11 |   0.0456 |   0.0472 |   0.0507 |   0.054  |   0.0619 |   0.076  |   0.1344 |
+        | 2024-01-12 |   0.0451 |   0.0467 |   0.0502 |   0.0534 |   0.0613 |   0.0753 |   0.1338 |
+        | 2024-01-15 |   0.0451 |   0.0467 |   0.0501 |   0.0533 |   0.0611 |   0.0751 |   0.1328 |
         """
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.fixedincome.fixedincome_controller import (  # noqa: PLC0415
+            FixedIncome,
+        )
+
         return FixedIncome(
             start_date=self._start_date,
             end_date=self._end_date,
@@ -1273,7 +1321,7 @@ class Toolkit:
         )
 
     @property
-    def economics(self) -> Economics:
+    def economics(self) -> "Economics":
         """
         This gives access to the Economics module. This module contains a wide variety of economic data
         obtained from OECD. These include things such as the Consumer Price Index (CPI), the Producer
@@ -1291,7 +1339,7 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "ASML"])
+        toolkit = Toolkit(["AMZN", "ASML"], start_date="2021-01-01", end_date="2025-12-31")
 
         cpi = toolkit.economics.get_consumer_price_index(period='yearly')
 
@@ -1300,17 +1348,19 @@ class Toolkit:
 
         Which returns:
 
-        |      |   United States |   Netherlands |    Japan |
-        |:-----|----------------:|--------------:|---------:|
-        | 2015 |         100     |       100     | 100      |
-        | 2016 |         101.262 |       100.317 |  99.8727 |
-        | 2017 |         103.419 |       101.703 | 100.356  |
-        | 2018 |         105.945 |       103.435 | 101.349  |
-        | 2019 |         107.865 |       106.159 | 101.824  |
-        | 2020 |         109.195 |       107.51  | 101.799  |
-        | 2021 |         114.325 |       110.387 | 101.561  |
-        | 2022 |         123.474 |       121.427 | 104.098  |
+        |      |   United States |   Netherlands |   Japan |
+        |:-----|----------------:|--------------:|--------:|
+        | 2021 |         114.325 |       110.389 | 101.567 |
+        | 2022 |         123.474 |       121.426 | 104.112 |
+        | 2023 |         128.557 |       126.092 | 107.503 |
+        | 2024 |         132.349 |       130.311 | 110.457 |
+        | 2025 |         135.831 |       134.486 | 113.98  |
         """
+        # Imported when first used, so the Finance Toolkit loads only what is needed.
+        from financetoolkit.economics.economics_controller import (  # noqa: PLC0415
+            Economics,
+        )
+
         return Economics(
             start_date=self._start_date,
             end_date=self._end_date,
@@ -1319,6 +1369,7 @@ class Toolkit:
             fred_api_key=self._fred_api_key,
             allow_stale_oecd_cache=self._allow_stale_oecd_cache,
             cache=self._cache,
+            api_key=self._api_key,
         )
 
     def get_profile(self):
@@ -1336,44 +1387,25 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["MSFT", "AAPL"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["ASML.AS", "SAP.DE", "MC.PA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.get_profile()
+        toolkit.get_profile().loc[["Industry", "Exchange", "Currency", "ISIN", "Beta"]]
         ```
 
         Which returns:
 
-        |                       | MSFT                      | AAPL                  |
-        |:----------------------|:--------------------------|:----------------------|
-        | Symbol                | MSFT                      | AAPL                  |
-        | Price                 | 316.48                    | 174.49                |
-        | Beta                  | 0.903706                  | 1.286802              |
-        | Average Volume        | 28153120                  | 57348456              |
-        | Market Capitalization | 2353183809372             | 2744500935588         |
-        | Last Dividend         | 2.7199999999999998        | 0.96                  |
-        | Range                 | 213.43-366.78             | 124.17-198.23         |
-        | Changes               | -0.4                      | 0.49                  |
-        | Company Name          | Microsoft Corporation     | Apple Inc.            |
-        | Currency              | USD                       | USD                   |
-        | CIK                   | 789019                    | 320193                |
-        | ISIN                  | US5949181045              | US0378331005          |
-        | CUSIP                 | 594918104                 | 37833100              |
-        | Exchange              | NASDAQ Global Select      | NASDAQ Global Select  |
-        | Exchange Short Name   | NASDAQ                    | NASDAQ                |
-        | Industry              | Software—Infrastructure   | Consumer Electronics  |
-        | Website               | https://www.microsoft.com | https://www.apple.com |
-        | CEO                   | Mr. Satya  Nadella        | Mr. Timothy D. Cook   |
-        | Sector                | Technology                | Technology            |
-        | Country               | US                        | US                    |
-        | Full Time Employees   | 221000                    | 164000                |
-        | Phone                 | 425 882 8080              | 408 996 1010          |
-        | Address               | One Microsoft Way         | One Apple Park Way    |
-        | City                  | Redmond                   | Cupertino             |
-        | State                 | WA                        | CA                    |
-        | ZIP Code              | 98052-6399                | 95014                 |
-        | DCF Difference        | 4.56584                   | 4.15176               |
-        | DCF                   | 243.594                   | 150.082               |
-        | IPO Date              | 1986-03-13                | 1980-12-12            |
+        |          | ASML.AS        | SAP.DE                 | MC.PA        |
+        |:---------|:---------------|:-----------------------|:-------------|
+        | Industry | Semiconductors | Software - Application | Luxury Goods |
+        | Exchange | AMS            | XETRA                  | PAR          |
+        | Currency | EUR            | EUR                    | EUR          |
+        | ISIN     | NL0010273215   | DE0007164600           | FR0000121014 |
+        | Beta     | 1.302          | 0.775                  | 0.879        |
         """
         if not self._api_key:
             logger.error(
@@ -1409,12 +1441,10 @@ class Toolkit:
 
     def get_quote(self):
         """
-        Get the quote of the specified tickers. These include important metrics
-        such as the price, changes, day low, day high, year low, year high, market
-        capitalization, volume, average volume, open, previous close, earnings per
-        share (EPS), price to earnings ratio (PE), earnings announcement, shares
-        outstanding and timestamp that give an overall understanding about the
-        company.
+        Get the quote of the specified tickers: the price and its change, the day's
+        open, low and high, the previous close, the year low and high, the 50 and 200
+        day average prices, the volume, the market capitalization, the exchange and the
+        time of the quote.
 
         Also known as: real-time price, current stock price, live quote.
 
@@ -1425,32 +1455,23 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["TSLA", "AAPL"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["V", "MA", "AXP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.get_quote()
+        toolkit.get_quote().loc[["Price", "Year High", "Year Low"]]
         ```
 
         Which returns:
 
-        |                        | TSLA                | AAPL                 |
-        |:-----------------------|:--------------------|:---------------------|
-        | Symbol                 | TSLA                | AAPL                 |
-        | Name                   | Tesla, Inc.         | Apple Inc.           |
-        | Price                  | 443.21              | 254.43               |
-        | Change %               | 0.6380600000000001  | -0.40319000000000005 |
-        | Change                 | 2.81                | -1.03                |
-        | Volume                 | 78840639            | 39443231             |
-        | Day Low                | 439.5               | 253.01               |
-        | Day High               | 450.98              | 254.87               |
-        | Year High              | 488.54              | 260.1                |
-        | Year Low               | 212.11              | 169.21               |
-        | Market Capitalization  | 1429511519286       | 3775840427700        |
-        | Price Average 50 Days  | 354.2336            | 229.3156             |
-        | Price Average 200 Days | 334.7398            | 222.012              |
-        | Exchange               | NASDAQ              | NASDAQ               |
-        | Open                   | 444.355             | 254.64               |
-        | Previous Close         | 440.4               | 255.46               |
-        | Timestamp              | 2025-09-29 20:00:00 | 2025-09-29 20:00:01  |
+        |           |      V |     MA |    AXP |
+        |:----------|-------:|-------:|-------:|
+        | Price     | 407.92 | 623.6  | 313.03 |
+        | Year High | 414.6  | 633.29 | 387.49 |
+        | Year Low  | 293.89 | 464.52 | 290.97 |
         """
         if not self._api_key:
             logger.error(
@@ -1486,10 +1507,10 @@ class Toolkit:
 
     def get_rating(self):
         """
-        Get the rating of the specified tickers. These scores and recommendations are categorized
-        as follows:
+        Get the rating of the specified tickers: a letter rating and an overall score based on
+        six scores from 1 (weak) to 5 (strong). These scores are categorized as follows:
 
-        - An overall rating
+        - An overall rating (the letter rating and the Rating Score)
         - Discounted Cash Flow (DCF)
         - Return on Equity (ROE)
         - Return on Assets (ROA)
@@ -1497,12 +1518,9 @@ class Toolkit:
         - Price Earnings (PE)
         - Price to Book (PB)
 
-        Also known as: analyst consensus, buy sell hold recommendation.
+        Also known as: stock rating, fundamental score, quantitative rating.
 
         Args:
-
-        Raises:
-            ValueError: If an API key is not defined for FinancialModelingPrep.
 
         Returns:
             pd.DataFrame: The stock rating information for the specified tickers.
@@ -1512,22 +1530,23 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["V"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         rating = toolkit.get_rating()
 
-        rating.loc['AMZN'].tail()
+        rating[["DCF Score", "ROE Score", "ROA Score", "DE Score", "PE Score", "PB Score"]].tail(1)
         ```
 
         Which returns:
 
-        | date                | Rating   |   Rating Score |   DCF Score |   ROE Score |   ROA Score |   DE Score |   PE Score |   PB Score |
-        |:--------------------|:---------|---------------:|------------:|------------:|------------:|-----------:|-----------:|-----------:|
-        | 2025-09-23 00:00:00 | B+       |              3 |           2 |           5 |           5 |          3 |          2 |          1 |
-        | 2025-09-24 00:00:00 | B+       |              3 |           2 |           5 |           5 |          3 |          2 |          1 |
-        | 2025-09-25 00:00:00 | B+       |              3 |           2 |           5 |           5 |          3 |          2 |          1 |
-        | 2025-09-26 00:00:00 | B+       |              3 |           2 |           5 |           5 |          3 |          2 |          1 |
-        | 2025-09-29 00:00:00 | B+       |              3 |           2 |           5 |           5 |          3 |          2 |          1 |
+        | date                |   DCF Score |   ROE Score |   ROA Score |   DE Score |   PE Score |   PB Score |
+        |:--------------------|------------:|------------:|------------:|-----------:|-----------:|-----------:|
+        | 2025-12-31 00:00:00 |           4 |           5 |           5 |          2 |          1 |          1 |
         """
         if not self._api_key:
             logger.error(
@@ -1560,7 +1579,17 @@ class Toolkit:
                 if ticker not in self._invalid_tickers
             ]
 
-        return self._rating
+        # The full history is kept, and the ratings between the start and end date returned.
+        rating = self._rating
+        if isinstance(rating, pd.DataFrame) and not rating.empty:
+            dates = pd.Series(rating.index.get_level_values(-1).astype(str).str[:10])
+            keep = dates.ge(self._start_date or "") & dates.le(self._end_date or "9999")
+            rating = rating[keep.to_numpy()]
+
+            if len(self._tickers) == 1 and self._tickers[0] in rating.index:
+                rating = rating.loc[self._tickers[0]]
+
+        return rating
 
     def get_analyst_estimates(
         self,
@@ -1595,37 +1624,22 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "GOOGL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2024-05-01", quarterly=False
+            ["NVDA", "AMD", "AVGO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2026-01-01",
+            end_date="2028-12-31",
         )
 
-        analyst_estimates = toolkit.get_analyst_estimates()
-
-        analyst_estimates.loc['AAPL'].iloc[:, :5]
+        toolkit.get_analyst_estimates(show_columns=["Estimated Revenue Average"])
         ```
 
         Which returns:
 
-        |                               |         2024 |         2025 |         2026 |         2027 |         2028 |
-        |:------------------------------|-------------:|-------------:|-------------:|-------------:|-------------:|
-        | Estimated Revenue Low         |  3.89951e+11 |  4.06152e+11 |  4.29886e+11 |  4.61474e+11 |  4.55389e+11 |
-        | Estimated Revenue High        |  3.9221e+11  |  4.19587e+11 |  4.5212e+11  |  4.63255e+11 |  5.05369e+11 |
-        | Estimated Revenue Average     |  3.90481e+11 |  4.15035e+11 |  4.38728e+11 |  4.62364e+11 |  4.76309e+11 |
-        | Estimated EBITDA Low          |  1.28061e+11 |  1.33382e+11 |  1.41176e+11 |  1.51549e+11 |  1.49551e+11 |
-        | Estimated EBITDA High         |  1.28803e+11 |  1.37794e+11 |  1.48477e+11 |  1.52134e+11 |  1.65965e+11 |
-        | Estimated EBITDA Average      |  1.28235e+11 |  1.36299e+11 |  1.4408e+11  |  1.51842e+11 |  1.56421e+11 |
-        | Estimated EBIT Low            |  1.15692e+11 |  1.20498e+11 |  1.2754e+11  |  1.36911e+11 |  1.35106e+11 |
-        | Estimated EBIT High           |  1.16362e+11 |  1.24484e+11 |  1.34136e+11 |  1.3744e+11  |  1.49934e+11 |
-        | Estimated EBIT Average        |  1.15849e+11 |  1.23134e+11 |  1.30163e+11 |  1.37175e+11 |  1.41313e+11 |
-        | Estimated Net Income Low      |  9.45908e+10 |  1.11489e+11 |  1.18544e+11 |  1.22161e+11 |  1.38181e+11 |
-        | Estimated Net Income High     |  1.05866e+11 |  1.14578e+11 |  1.28409e+11 |  1.46962e+11 |  1.58172e+11 |
-        | Estimated Net Income Average  |  9.7294e+10  |  1.13033e+11 |  1.23476e+11 |  1.25929e+11 |  1.46549e+11 |
-        | Estimated SGA Expense Low     |  2.55838e+10 |  2.66468e+10 |  2.82039e+10 |  3.02763e+10 |  2.98771e+10 |
-        | Estimated SGA Expense High    |  2.5732e+10  |  2.75282e+10 |  2.96626e+10 |  3.03931e+10 |  3.31562e+10 |
-        | Estimated SGA Expense Average |  2.56186e+10 |  2.72295e+10 |  2.8784e+10  |  3.03347e+10 |  3.12496e+10 |
-        | Estimated EPS Average         |  6.7082      |  7.3761      |  8.0086      |  8.7606      |  9.5111      |
-        | Estimated EPS High            |  6.8708      |  7.4362      |  8.3339      |  9.538       | 10.2655      |
-        | Estimated EPS Low             |  6.139       |  7.2358      |  7.6936      |  7.9284      |  8.9681      |
-        | Number of Analysts            | 25           | 29           | 30           | 19           |  9           |
+        |      |        2026 |        2027 |        2028 |        2029 |        2030 |          2031 |
+        |:-----|------------:|------------:|------------:|------------:|------------:|--------------:|
+        | NVDA | 2.13656e+11 | 4.09929e+11 | 6.95178e+11 | 9.25214e+11 | 1.10649e+12 |   1.21149e+12 |
+        | AMD  | 5.13395e+10 | 9.04101e+10 | 1.25666e+11 | 1.6376e+11  | 2.32364e+11 | nan           |
+        | AVGO | 1.06009e+11 | 1.74279e+11 | 2.81861e+11 | 4.16476e+11 | 5.52387e+11 | nan           |
         """
         if not self._api_key:
             logger.error(
@@ -1697,6 +1711,11 @@ class Toolkit:
 
         Note that this information requires a Premium FMP subscription.
 
+        The surprise is the reported EPS against the estimate, usually as a percentage of the
+        estimate. Most companies report above the consensus, so a small beat is the norm, and
+        the share price tends to react to the size of the surprise, to revenue against its
+        estimate and to the guidance given on the call rather than to a beat as such.
+
         Also known as: earnings dates, earnings schedule, reporting date.
 
         Args:
@@ -1716,30 +1735,27 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "GOOGL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2022-08-01", quarterly=False
+            ["COST"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2024-01-01",
+            end_date="2025-12-31",
         )
 
-        earning_calendar = toolkit.get_earnings_calendar()
-
-        earning_calendar.loc['AMZN']
+        toolkit.get_earnings_calendar(show_columns=["EPS", "Estimated EPS"])
         ```
 
         Which returns:
 
-        | date                |   EPS |   Estimated EPS |     Revenue |   Estimated Revenue | Last Updated   |
-        |:--------------------|------:|----------------:|------------:|--------------------:|:---------------|
-        | 2022-10-27 00:00:00 |  0.2  |            0.22 | 1.27101e+11 |         1.27308e+11 | 2025-04-25     |
-        | 2023-02-02 00:00:00 |  0.21 |            0.15 | 1.49204e+11 |         1.45713e+11 | 2025-04-25     |
-        | 2023-04-27 00:00:00 |  0.31 |            0.21 | 1.27358e+11 |         1.24551e+11 | 2025-04-25     |
-        | 2023-08-03 00:00:00 |  0.65 |            0.35 | 1.34383e+11 |         1.19573e+11 | 2025-04-25     |
-        | 2023-10-26 00:00:00 |  0.94 |            0.58 | 1.43083e+11 |         1.33393e+11 | 2025-04-25     |
-        | 2024-02-01 00:00:00 |  1    |            0.8  | 1.69961e+11 |         1.66172e+11 | 2025-04-25     |
-        | 2024-04-30 00:00:00 |  0.98 |            0.83 | 1.43313e+11 |         1.42654e+11 | 2025-04-25     |
-        | 2024-08-01 00:00:00 |  1.26 |            1.03 | 1.47977e+11 |         1.48665e+11 | 2025-04-25     |
-        | 2024-10-31 00:00:00 |  1.43 |            1.14 | 1.58877e+11 |         1.57275e+11 | 2025-04-25     |
-        | 2025-02-06 00:00:00 |  1.86 |            1.49 | 1.87792e+11 |         1.87337e+11 | 2025-05-06     |
-        | 2025-05-01 00:00:00 |  1.59 |            1.37 | 1.55667e+11 |         1.55148e+11 | 2025-08-01     |
-        | 2025-07-31 00:00:00 |  1.68 |            1.31 | 1.67702e+11 |         1.61776e+11 | 2025-09-30     |
+        | date                |   EPS |   Estimated EPS |
+        |:--------------------|------:|----------------:|
+        | 2024-03-07 00:00:00 |  3.92 |            3.62 |
+        | 2024-05-30 00:00:00 |  3.78 |            3.7  |
+        | 2024-09-26 00:00:00 |  5.29 |            5.08 |
+        | 2024-12-12 00:00:00 |  4.04 |            3.79 |
+        | 2025-03-06 00:00:00 |  4.02 |            4.09 |
+        | 2025-05-29 00:00:00 |  4.28 |            4.24 |
+        | 2025-09-25 00:00:00 |  5.87 |            5.8  |
+        | 2025-12-11 00:00:00 |  4.5  |            4.27 |
         """
         if not self._api_key:
             logger.error(
@@ -1799,28 +1815,39 @@ class Toolkit:
         show_columns: list[str] | None = None,
     ) -> pd.DataFrame:
         """
-        Obtain the latest stock market news articles for the tickers of this Toolkit
-        instance. Qualitative companion to the toolkit's quantitative data. Automatically
-        filtered to this Toolkit instance's start_date and end_date.
+        Obtain the latest news articles for the tickers of this Toolkit instance, whether
+        they are stocks, cryptocurrencies or currency pairs. Qualitative companion to the
+        toolkit's quantitative data. Automatically filtered to this Toolkit instance's
+        start_date and end_date.
 
-        Also known as: ticker news, company news feed.
+        Each ticker is matched with the right news feed. A currency pair such as EURUSD or
+        EURUSD=X is searched in the forex news. Any other ticker is searched in both the
+        stock and the crypto news, since a ticker such as BTCUSD cannot be told apart from
+        a stock by its format; the feed it does not belong to simply returns nothing.
+
+        Also known as: ticker news, company news feed, crypto news, forex news.
 
         Args:
-            pages (int, optional): The number of pages to collect, each page is a
+            pages (int, optional): The number of pages to collect per news feed, each page is a
                 separate API call, e.g. pages=5 makes 5 calls. Defaults to 1.
             limit (int, optional): The number of articles to return per page. Defaults to 100.
             show_columns (list[str] | None): A list of column names to keep in the result. Invalid
             names are reported and ignored. Defaults to None, which keeps every column.
 
         Returns:
-            pd.DataFrame: The latest news articles for the specified tickers.
+            pd.DataFrame: The latest news articles for the specified tickers, newest first.
 
         As an example:
 
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         stock_news = toolkit.get_stock_news(limit=5)
 
@@ -1829,23 +1856,70 @@ class Toolkit:
 
         Which returns:
 
-        | Published Date      | Symbol   | Publisher     | Title                                                                                        |
-        |:---------------------|:---------|:--------------|:---------------------------------------------------------------------------------------------|
-        | 2026-07-07 10:46:52  | AAPL     | Benzinga      | Walmart, Apple And Nike May Be Agentic AI's First Winners. Grocery May Be The First Loser      |
-        | 2026-07-07 10:21:00  | MSFT     | GlobeNewsWire | MSFT Investors Have Opportunity to Lead Microsoft Corporation Securities Fraud Lawsuit...      |
-        | 2026-07-07 10:20:11  | AAPL     | Forbes        | Why Investors Fell Back In Love With Apple's Cheap AI Strategy                                 |
-        | 2026-07-07 09:59:19  | MSFT     | Benzinga      | Michael Burry's $700 Microsoft Bet: Should You Copy His LEAP Trade?                            |
-        | 2026-07-07 09:26:50  | AAPL     | Benzinga      | Forget the iPhone. Apple's AI Story May Belong to Macs                                         |
+        | Published Date      | Symbol   | Publisher       | Title                                                               |
+        |:--------------------|:---------|:----------------|:--------------------------------------------------------------------|
+        | 2025-12-31 17:34:00 | AAPL     | GuruFocus       | Market Today: Buffett era ends; Tesla warns; stocks cap strong 2025 |
+        | 2025-12-31 16:11:00 | AAPL     | The Motley Fool | Here Are My Top 2 Stocks to Buy for 2026 and Beyond                 |
+        | 2025-12-31 14:35:53 | AAPL     | Schwab Network  | Ca$htag$: Apple (AAPL) Strong Holiday Season                        |
+        | 2025-12-31 14:15:00 | MSFT     | The Motley Fool | The Best Tech Stocks to Buy in January for 2026 Gains               |
+        | 2025-12-31 14:14:48 | AAPL     | CNBC Television | Apple's AI challenges in 2026                                       |
         """
-        stock_news = _search_stock_news(
-            api_key=self._api_key,
-            symbols=self._tickers,
-            limit=limit,
-            pages=pages,
-            start_date=self._start_date,
-            end_date=self._end_date,
-            user_subscription=self._fmp_plan,
-        )
+        currency_pairs = [
+            ticker
+            for ticker in self._tickers
+            if currencies_model.is_currency_pair(ticker)
+        ]
+        other_tickers = [
+            ticker for ticker in self._tickers if ticker not in currency_pairs
+        ]
+        search = {
+            "api_key": self._api_key,
+            "limit": limit,
+            "pages": pages,
+            "start_date": self._start_date,
+            "end_date": self._end_date,
+            "user_subscription": self._fmp_plan,
+        }
+
+        news_frames = []
+
+        if other_tickers:
+            # The crypto feed is asked first because it only returns crypto tickers, which
+            # are then left out of the stock feed request. The stock feed carries crypto
+            # articles as well, so asking it for both would let them use up its limit.
+            crypto_news = _search_crypto_news(symbols=other_tickers, **search)
+            crypto_tickers = (
+                set(crypto_news["Symbol"]) if not crypto_news.empty else set()
+            )
+            stock_tickers = [
+                ticker for ticker in other_tickers if ticker not in crypto_tickers
+            ]
+
+            news_frames.append(crypto_news)
+
+            if stock_tickers:
+                news_frames.append(_search_stock_news(symbols=stock_tickers, **search))
+
+        if currency_pairs:
+            # The forex feed knows the pairs without the "=X" suffix Yahoo Finance uses.
+            news_frames.append(
+                _search_forex_news(
+                    symbols=[
+                        pair.upper().removesuffix("=X") for pair in currency_pairs
+                    ],
+                    **search,
+                )
+            )
+
+        news_frames = [frame for frame in news_frames if not frame.empty]
+
+        if not news_frames:
+            return pd.DataFrame()
+
+        # A crypto ticker without recent crypto news is still asked of the stock feed, so
+        # an article can come back from both feeds; it is kept once.
+        stock_news = pd.concat(news_frames).sort_index(ascending=False)
+        stock_news = stock_news[~stock_news.duplicated(subset=["Symbol", "URL"])]
 
         return filter_columns(stock_news, show_columns)
 
@@ -1877,7 +1951,12 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         press_releases = toolkit.get_press_releases(limit=5)
 
@@ -1886,13 +1965,13 @@ class Toolkit:
 
         Which returns:
 
-        | Published Date      | Symbol   | Publisher     | Title                                                                                      |
-        |:---------------------|:---------|:--------------|:-----------------------------------------------------------------------------------------------|
-        | 2026-07-07 10:21:00  | MSFT     | GlobeNewsWire | MSFT Investors Have Opportunity to Lead Microsoft Corporation Securities Fraud Lawsuit...        |
-        | 2026-07-07 06:36:00  | MSFT     | PRNewsWire    | MSFT Investment Deadline: Microsoft Securities Fraud Class Action Focuses on Copilot...          |
-        | 2026-07-06 15:34:00  | MSFT     | GlobeNewsWire | MICROSOFT CLASS ACTION ALERT: Bragar Eagel & Squire, P.C. Urges Microsoft Corporation...         |
-        | 2026-07-06 13:24:00  | MSFT     | GlobeNewsWire | Deadline Alert: Microsoft Corporation (MSFT) Shareholders Who Lost Money Urged To Contact...     |
-        | 2026-07-06 10:07:00  | MSFT     | GlobeNewsWire | Levi & Korsinsky Reminds Shareholders of a Lead Plaintiff Deadline of August 11, 2026...         |
+        | Published Date      | Symbol   | Publisher     | Title                                                                                                 |
+        |:--------------------|:---------|:--------------|:------------------------------------------------------------------------------------------------------|
+        | 2025-12-18 09:00:00 | MSFT     | PRNewsWire    | Cognizant and Microsoft Expand Partnership to Advance AI Transformation and Frontier Firm Experiences |
+        | 2025-12-18 04:00:00 | MSFT     | Business Wire | Reply Recognized as a Microsoft Azure Expert Managed Services Provider for the Sixth Consecutive Year |
+        | 2025-12-17 20:00:00 | AAPL     | Business Wire | Apple announces changes to iOS in Japan                                                               |
+        | 2025-12-17 16:30:00 | MSFT     | Accesswire    | ProsperOps Achieves Microsoft Azure IP Co-Sell Status                                                 |
+        | 2025-12-17 08:00:00 | MSFT     | Business Wire | EcoVadis Wins Microsoft Local Partner Award FY25 in AI Transformation - Scale Category                |
         """
         press_releases = _search_press_releases(
             api_key=self._api_key,
@@ -1932,24 +2011,24 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "GOOGL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2021-05-01", quarterly=False
+            ["AAPL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        geographic_segmentation = toolkit.get_revenue_geographic_segmentation()
-
-        geographic_segmentation.loc['AAPL']
+        toolkit.get_revenue_geographic_segmentation()
         ```
 
         Which returns:
 
-        |              |       2020 |       2021 |       2022 |       2023 |
-        |:-------------|-----------:|-----------:|-----------:|-----------:|
-        | Americas     | 4.631e+10  | 5.1496e+10 | 4.9278e+10 | 3.5383e+10 |
-        | Asia Pacific | 8.225e+09  | 9.81e+09   | 9.535e+09  | 5.63e+09   |
-        | China        | 2.1313e+10 | 2.5783e+10 | 2.3905e+10 | 1.5758e+10 |
-        | Europe       | 2.7306e+10 | 2.9749e+10 | 2.7681e+10 | 2.0205e+10 |
-        | Japan        | 8.285e+09  | 7.107e+09  | 6.755e+09  | 4.821e+09  |
-
+        |              |        2021 |        2022 |       2023 |        2024 |        2025 |
+        |:-------------|------------:|------------:|-----------:|------------:|------------:|
+        | Americas     | 1.53306e+11 | 1.69658e+11 | 1.6256e+11 | 1.67045e+11 | 1.78353e+11 |
+        | Asia Pacific | 2.6356e+10  | 2.9375e+10  | 2.9615e+10 | 3.0658e+10  | 3.3696e+10  |
+        | China        | 6.8366e+10  | 7.42e+10    | 7.2559e+10 | 6.6952e+10  | 6.4377e+10  |
+        | Europe       | 8.9307e+10  | 9.5118e+10  | 9.4294e+10 | 1.01328e+11 | 1.11032e+11 |
+        | Japan        | 2.8482e+10  | 2.5977e+10  | 2.4257e+10 | 2.5052e+10  | 2.8703e+10  |
         """
         if not self._api_key:
             logger.error(
@@ -2028,28 +2107,24 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "GOOGL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2021-05-01", quarterly=False
+            ["NVDA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        product_segmentation = toolkit.get_revenue_product_segmentation()
-
-        product_segmentation.loc['MSFT']
+        toolkit.get_revenue_product_segmentation()
         ```
 
         Which returns:
 
-        |                                    |     2022Q2 |     2022Q3 |     2022Q4 |     2023Q1 |      2023Q2 |
-        |:-----------------------------------|-----------:|-----------:|-----------:|-----------:|------------:|
-        | Devices                            | 1.581e+09  | 1.448e+09  | 1.43e+09   | 1.282e+09  |  1.361e+09  |
-        | Enterprise Services                | 1.902e+09  | 1.876e+09  | 1.862e+09  | 2.007e+09  |  1.977e+09  |
-        | Gaming                             | 3.455e+09  | 3.61e+09   | 4.758e+09  | 3.607e+09  |  3.491e+09  |
-        | Linked In Corporation              | 3.712e+09  | 3.663e+09  | 3.876e+09  | 3.697e+09  |  3.909e+09  |
-        | Office Products And Cloud Services | 1.1639e+10 | 1.1548e+10 | 1.1837e+10 | 1.2438e+10 |  1.2905e+10 |
-        | Other Products And Services        | 1.403e+09  | 1.348e+09  | 1.359e+09  | 1.428e+09  | -3.924e+09  |
-        | Search And News Advertising        | 2.926e+09  | 2.928e+09  | 3.223e+09  | 3.045e+09  |  3.012e+09  |
-        | Server Products And Cloud Services | 1.8839e+10 | 1.8388e+10 | 1.9594e+10 | 2.0025e+10 |  2.1963e+10 |
-        | Windows                            | 6.408e+09  | 5.313e+09  | 4.808e+09  | 5.328e+09  |  6.058e+09  |
-
+        |                            |      2021 |       2022 |       2023 |       2024 |        2025 |
+        |:---------------------------|----------:|-----------:|-----------:|-----------:|------------:|
+        | Automotive                 | 5.36e+08  | 5.66e+08   | 9.03e+08   | 1.091e+09  | 1.694e+09   |
+        | Data Center                | 6.696e+09 | 1.0613e+10 | 1.5005e+10 | 4.7525e+10 | 1.15186e+11 |
+        | Gaming                     | 7.759e+09 | 1.2462e+10 | 9.067e+09  | 1.0447e+10 | 1.135e+10   |
+        | Oem And Other              | 6.31e+08  | 1.162e+09  | 4.55e+08   | 3.06e+08   | 3.89e+08    |
+        | Professional Visualization | 1.053e+09 | 2.111e+09  | 1.544e+09  | 1.553e+09  | 1.878e+09   |
         """
         if not self._api_key:
             logger.error(
@@ -2174,26 +2249,25 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit("AAPL", api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["CAT", "DE", "URI"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.get_historical_data(period="yearly")
+        toolkit.get_historical_data(show_columns=["Close"]).tail()
         ```
 
         Which returns:
 
-        | Date   |     Open |     High |      Low |    Close |   Adj Close |      Volume |   Dividends |     Return |   Cumulative Return |
-        |:-------|---------:|---------:|---------:|---------:|------------:|------------:|------------:|-----------:|---------------------:|
-        | 2013   |  19.7918 |  20.0457 |  19.7857 |  20.0364 |     17.5889 | 2.23084e+08 |    0.108929 |  0         |             1       |
-        | 2014   |  28.205  |  28.2825 |  27.5525 |  27.595  |     24.734  | 1.65614e+08 |    0.461429 |  0.406225  |             1.40623 |
-        | 2015   |  26.7525 |  26.7575 |  26.205  |  26.315  |     23.9886 | 1.63649e+08 |    0.5075   | -0.0301373 |             1.36385 |
-        | 2016   |  29.1625 |  29.3    |  28.8575 |  28.955  |     26.9824 | 1.22345e+08 |    0.5575   |  0.124804  |             1.53406 |
-        | 2017   |  42.63   |  42.6475 |  42.305  |  42.3075 |     40.0593 | 1.04e+08    |    0.615    |  0.484644  |             2.27753 |
-        | 2018   |  39.6325 |  39.84   |  39.12   |  39.435  |     37.9    | 1.40014e+08 |    0.705    | -0.0539019 |             2.15477 |
-        | 2019   |  72.4825 |  73.42   |  72.38   |  73.4125 |     71.615  | 1.00806e+08 |    0.76     |  0.889578  |             4.0716  |
-        | 2020   | 134.08   | 134.74   | 131.72   | 132.69   |    130.559  | 9.91166e+07 |    0.8075   |  0.823067  |             7.4228  |
-        | 2021   | 178.09   | 179.23   | 177.26   | 177.57   |    175.795  | 6.40623e+07 |    0.865    |  0.346482  |             9.99467 |
-        | 2022   | 128.41   | 129.95   | 127.43   | 129.93   |    129.378  | 7.70342e+07 |    0.91     | -0.264042  |             7.35566 |
-        | 2023   | 187.84   | 188.51   | 187.68   | 188.108  |    188.108  | 4.72009e+06 |    0.71     |  0.453941  |            10.6947  |
+        | Date       |    CAT |     DE |    URI |   Benchmark |
+        |:-----------|-------:|-------:|-------:|------------:|
+        | 2025-12-24 | 583.76 | 467.44 | 824.77 |      690.38 |
+        | 2025-12-26 | 583    | 468.93 | 827.94 |      690.31 |
+        | 2025-12-29 | 578.71 | 470.24 | 819.51 |      687.85 |
+        | 2025-12-30 | 577.39 | 469.94 | 817.25 |      687.01 |
+        | 2025-12-31 | 572.87 | 465.57 | 809.32 |      681.92 |
         """
         if enforce_source is not None and enforce_source not in [
             "FinancialModelingPrep",
@@ -2267,88 +2341,61 @@ class Toolkit:
         if self._daily_historical_data.empty:
             return pd.DataFrame()
 
+        # Named as the other periods are, whichever is requested first.
+        if self._daily_historical_data.index.name != "Date":
+            self._daily_historical_data = self._daily_historical_data.rename_axis(
+                "Date"
+            )
+
         if period == "daily":
             historical_data = self._daily_historical_data.loc[
                 self._start_date : self._end_date, :
             ]
             # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
 
-        elif period == "weekly":
-            if self._weekly_risk_free_rate.empty or overwrite:
+        elif period in ("weekly", "monthly", "quarterly", "yearly"):
+            if getattr(self, f"_{period}_risk_free_rate").empty or overwrite:
                 self.get_treasury_data(
-                    period="weekly", risk_free_rate=self._risk_free_rate
+                    period=period, risk_free_rate=self._risk_free_rate
                 )
 
-            self._weekly_historical_data = _convert_daily_to_other_period(
-                period="weekly",
-                daily_historical_data=self._daily_historical_data,
-                start=self._start_date,
-                end=self._end_date,
-                rounding=rounding if rounding is not None else self._rounding,
-                return_column=return_column,
+            # Every module (risk, performance, models, ...) asks for a period again each
+            # time it is accessed, so the conversion is kept until the daily data it was made
+            # from or one of its settings changes. The daily data is compared by identity, as
+            # it is replaced rather than changed when it is retrieved again.
+            settings = (
+                self._start_date,
+                self._end_date,
+                rounding if rounding is not None else self._rounding,
+                return_column,
             )
+            converted_from = self._period_historical_data_sources.get(period)
 
-            historical_data = self._weekly_historical_data.loc[
-                self._start_date : self._end_date, :
-            ]
-            # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
-
-        elif period == "monthly":
-            if self._monthly_risk_free_rate.empty or overwrite:
-                self.get_treasury_data(
-                    period="monthly", risk_free_rate=self._risk_free_rate
+            if (
+                overwrite
+                or getattr(self, f"_{period}_historical_data").empty
+                or converted_from is None
+                or converted_from[0] is not self._daily_historical_data
+                or converted_from[1] != settings
+            ):
+                setattr(
+                    self,
+                    f"_{period}_historical_data",
+                    _convert_daily_to_other_period(
+                        period=period,
+                        daily_historical_data=self._daily_historical_data,
+                        start=self._start_date,
+                        end=self._end_date,
+                        rounding=settings[2],
+                        return_column=return_column,
+                    ),
+                )
+                self._period_historical_data_sources[period] = (
+                    self._daily_historical_data,
+                    settings,
                 )
 
-            self._monthly_historical_data = _convert_daily_to_other_period(
-                period="monthly",
-                daily_historical_data=self._daily_historical_data,
-                start=self._start_date,
-                end=self._end_date,
-                rounding=rounding if rounding is not None else self._rounding,
-                return_column=return_column,
-            )
-
-            historical_data = self._monthly_historical_data.loc[
-                self._start_date : self._end_date, :
-            ]
-            # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
-
-        elif period == "quarterly":
-            if self._quarterly_risk_free_rate.empty or overwrite:
-                self.get_treasury_data(
-                    period="quarterly", risk_free_rate=self._risk_free_rate
-                )
-
-            self._quarterly_historical_data = _convert_daily_to_other_period(
-                period="quarterly",
-                daily_historical_data=self._daily_historical_data,
-                start=self._start_date,
-                end=self._end_date,
-                rounding=rounding if rounding is not None else self._rounding,
-                return_column=return_column,
-            )
-
-            historical_data = self._quarterly_historical_data.loc[
-                self._start_date : self._end_date, :
-            ]
-            # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
-
-        elif period == "yearly":
-            if self._yearly_risk_free_rate.empty or overwrite:
-                self.get_treasury_data(
-                    period="yearly", risk_free_rate=self._risk_free_rate
-                )
-
-            self._yearly_historical_data = _convert_daily_to_other_period(
-                period="yearly",
-                daily_historical_data=self._daily_historical_data,
-                start=self._start_date,
-                end=self._end_date,
-                rounding=rounding if rounding is not None else self._rounding,
-                return_column=return_column,
-            )
-
-            historical_data = self._yearly_historical_data.loc[
+            historical_data = getattr(self, f"_{period}_historical_data").loc[
                 self._start_date : self._end_date, :
             ]
             # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
@@ -2436,30 +2483,25 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit("MSFT", api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["NVDA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-12-29",
+            end_date="2025-12-31",
+        )
 
-        toolkit.get_intraday_data(period="1min")
+        toolkit.get_intraday_data(period="1hour", show_columns=["Close"]).tail()
         ```
 
         Which returns:
 
-        | date             |   Open |   High |     Low |   Close |   Volume |   Return |   Cumulative Return |
-        |:-----------------|-------:|-------:|--------:|--------:|---------:|---------:|--------------------:|
-        | 2024-01-19 15:45 | 397.64 | 397.88 | 397.63  | 397.88  |    49202 |   0.0006 |              1.0266 |
-        | 2024-01-19 15:46 | 397.86 | 397.93 | 397.788 | 397.82  |    68913 |  -0.0002 |              1.0264 |
-        | 2024-01-19 15:47 | 397.81 | 397.97 | 397.76  | 397.78  |    62605 |  -0.0001 |              1.0263 |
-        | 2024-01-19 15:48 | 397.78 | 397.85 | 397.675 | 397.845 |    62146 |   0.0002 |              1.0265 |
-        | 2024-01-19 15:49 | 397.85 | 397.97 | 397.8   | 397.94  |    72700 |   0.0002 |              1.0267 |
-        | 2024-01-19 15:50 | 397.92 | 398.27 | 397.9   | 398.04  |   140754 |   0.0003 |              1.027  |
-        | 2024-01-19 15:51 | 398.04 | 398.15 | 397.96  | 398     |   122208 |  -0.0001 |              1.0269 |
-        | 2024-01-19 15:52 | 397.99 | 398.26 | 397.98  | 398.05  |    83546 |   0.0001 |              1.027  |
-        | 2024-01-19 15:53 | 398.04 | 398.12 | 397.98  | 398.09  |    85098 |   0.0001 |              1.0271 |
-        | 2024-01-19 15:54 | 398.1  | 398.52 | 398.03  | 398.45  |   187358 |   0.0009 |              1.028  |
-        | 2024-01-19 15:55 | 398.45 | 398.62 | 398.25  | 398.335 |   237902 |  -0.0003 |              1.0278 |
-        | 2024-01-19 15:56 | 398.33 | 398.44 | 398.3   | 398.415 |   149157 |   0.0002 |              1.028  |
-        | 2024-01-19 15:57 | 398.42 | 398.5  | 398.29  | 398.43  |   181074 |   0      |              1.028  |
-        | 2024-01-19 15:58 | 398.46 | 398.47 | 398.29  | 398.35  |   278802 |  -0.0002 |              1.0278 |
-        | 2024-01-19 15:59 | 398.35 | 398.66 | 398.22  | 398.66  |   586344 |   0.0008 |              1.0286 |
+        | date             |   ('Close', 'NVDA') |   ('Close', 'Benchmark') |
+        |:-----------------|--------------------:|-------------------------:|
+        | 2025-12-31 11:00 |              188.92 |                   685    |
+        | 2025-12-31 12:00 |              188.97 |                   685.35 |
+        | 2025-12-31 13:00 |              188.05 |                   685.04 |
+        | 2025-12-31 14:00 |              187.13 |                   682.69 |
+        | 2025-12-31 15:00 |              186.53 |                   681.87 |
         """
         if not self._api_key:
             logger.error(
@@ -2544,6 +2586,8 @@ class Toolkit:
             - Date: The date of the dividend.
             - Adj Dividend: The adjusted dividend amount.
             - Dividend: The dividend amount.
+            - Yield: The annualized dividend yield at the time of the dividend, as a decimal
+            (0.0054 is 0.54%).
             - Record Date: The record date of the dividend.
             - Payment Date: The payment date of the dividend.
             - Declaration Date: The declaration date of the dividend.
@@ -2560,7 +2604,7 @@ class Toolkit:
             names are reported and ignored. Defaults to None, which keeps every column.
 
         Returns:
-            pd.DataFrame: The earnings calendar for the specified tickers.
+            pd.DataFrame: The dividend calendar for the specified tickers.
 
         As an example:
 
@@ -2568,31 +2612,39 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "GOOGL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2022-08-01", quarterly=False
+            ["JNJ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        dividend_calendar = toolkit.get_dividend_calendar()
-
-        dividend_calendar.loc['AAPL']
+        toolkit.get_dividend_calendar(show_columns=["Dividend"])
         ```
 
         Which returns:
 
-        | date       |   Adj Dividend |   Dividend |   Yield | Record Date   | Payment Date   | Declaration Date   |
-        |:-----------|---------------:|-----------:|--------:|:--------------|:---------------|:-------------------|
-        | 2022-08-05 |           0.23 |       0.23 |  0.5443 | 2022-08-08    | 2022-08-11     | 2022-07-28         |
-        | 2022-11-04 |           0.23 |       0.23 |  0.6576 | 2022-11-07    | 2022-11-10     | 2022-10-27         |
-        | 2023-02-10 |           0.23 |       0.23 |  0.6092 | 2023-02-13    | 2023-02-16     | 2023-02-02         |
-        | 2023-05-12 |           0.24 |       0.24 |  0.5389 | 2023-05-15    | 2023-05-18     | 2023-05-04         |
-        | 2023-08-11 |           0.24 |       0.24 |  0.5287 | 2023-08-14    | 2023-08-17     | 2023-08-03         |
-        | 2023-11-10 |           0.24 |       0.24 |  0.5097 | 2023-11-13    | 2023-11-16     | 2023-11-02         |
-        | 2024-02-09 |           0.24 |       0.24 |  0.5083 | 2024-02-12    | 2024-02-15     | 2024-02-01         |
-        | 2024-05-10 |           0.25 |       0.25 |  0.5299 | 2024-05-13    | 2024-05-16     | 2024-05-02         |
-        | 2024-08-12 |           0.25 |       0.25 |  0.4505 | 2024-08-12    | 2024-08-15     | 2024-08-01         |
-        | 2024-11-08 |           0.25 |       0.25 |  0.4362 | 2024-11-11    | 2024-11-14     | 2024-10-31         |
-        | 2025-02-10 |           0.25 |       0.25 |  0.4393 | 2025-02-10    | 2025-02-13     | 2025-01-30         |
-        | 2025-05-12 |           0.26 |       0.26 |  0.4791 | 2025-05-12    | 2025-05-15     | 2025-05-01         |
-        | 2025-08-11 |           0.26 |       0.26 |  0.449  | 2025-08-11    | 2025-08-14     | 2025-07-31         |
+        | date       |   Dividend |
+        |:-----------|-----------:|
+        | 2021-02-22 |       1.01 |
+        | 2021-05-24 |       1.06 |
+        | 2021-08-23 |       1.06 |
+        | 2021-11-22 |       1.06 |
+        | 2022-02-18 |       1.06 |
+        | 2022-05-23 |       1.13 |
+        | 2022-08-22 |       1.13 |
+        | 2022-11-21 |       1.13 |
+        | 2023-02-17 |       1.13 |
+        | 2023-05-22 |       1.19 |
+        | 2023-08-25 |       1.19 |
+        | 2023-11-20 |       1.19 |
+        | 2024-02-16 |       1.19 |
+        | 2024-05-20 |       1.24 |
+        | 2024-08-27 |       1.24 |
+        | 2024-11-26 |       1.24 |
+        | 2025-02-18 |       1.24 |
+        | 2025-05-27 |       1.3  |
+        | 2025-08-26 |       1.3  |
+        | 2025-11-25 |       1.3  |
         """
         if not self._api_key:
             logger.error(
@@ -2704,22 +2756,24 @@ class Toolkit:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["MSFT", "TSLA", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2022-08-01", quarterly=False
+            ["XOM", "SHEL", "BP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        esg_scores = toolkit.get_esg_scores()
-
-        esg_scores.xs("MSFT", level=1, axis=1)
+        toolkit.get_esg_scores(show_columns=["ESG Score"])
         ```
 
         Which returns:
 
-        | date   |   Environmental Score |   Social Score |   Governance Score |   ESG Score |
-        |:-------|----------------------:|---------------:|-------------------:|------------:|
-        | 2022   |                 73.03 |          58.66 |              61.4  |       64.37 |
-        | 2023   |                 72.89 |          58.16 |              60.65 |       63.9  |
-        | 2024   |                 72.53 |          58.08 |              60.7  |       63.77 |
-        | 2025   |                 71.85 |          57.64 |              59.62 |       63.04 |
+        | date   |   ('ESG Score', 'XOM') |   ('ESG Score', 'SHEL') |   ('ESG Score', 'BP') |
+        |:-------|-----------------------:|------------------------:|----------------------:|
+        | 2021   |                  66.43 |                  nan    |                 66.14 |
+        | 2022   |                  68.75 |                   65.39 |                 67.54 |
+        | 2023   |                  69.98 |                   60.49 |                 70.49 |
+        | 2024   |                  68    |                   64.17 |                 62.26 |
+        | 2025   |                  68.75 |                   61.74 |                 64.47 |
         """
         if not self._api_key:
             logger.error(
@@ -2775,42 +2829,58 @@ class Toolkit:
 
     def get_market_risk_premium(self, overwrite: bool = False):
         """
-        Obtains the equity market risk premium by country -- the country default spread plus the
-        equity risk premium, following the approach popularized by Aswath Damodaran -- which is
-        widely used to calibrate country-specific costs of equity and discount rates in a
+        Obtains the equity risk premium by country -- the equity risk premium of a mature market
+        plus a country risk premium, the country's default spread scaled by the volatility of its
+        equities relative to its bonds, following the approach popularized by Aswath Damodaran --
+        which is widely used to calibrate country-specific costs of equity and discount rates in a
         multi-country setting.
+
+        In a cost of equity the premium is applied in one of two common ways: beta times the Total
+        Equity Risk Premium, or beta times the mature market premium with the Country Risk Premium
+        added on top. For a company that earns its revenue in several countries the premium is
+        often weighted by where the revenue comes from rather than by where the company is listed.
 
         Also known as: country risk premium, Damodaran equity risk premium.
 
         Args:
             overwrite (bool): Defines whether to overwrite the existing data.
 
-        Raises:
-            ValueError: If an API key is not defined for FinancialModelingPrep.
-
         Returns:
             pd.DataFrame: The market risk premium by country, including the continent, Country
-            Risk Premium and Total Equity Risk Premium (both in percentage points).
+            Risk Premium and Total Equity Risk Premium (both as decimals, 0.0446 for 4.46%).
+
+        The premiums are decimal fractions (0.0446 for 4.46%).
 
         As an example:
 
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AMZN", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         market_risk_premium = toolkit.get_market_risk_premium()
 
-        market_risk_premium.loc[['United States', 'Germany', 'Brazil']]
+        market_risk_premium.loc[
+            ["United States", "Germany", "Japan", "Brazil", "India", "South Africa"],
+            ["Country Risk Premium", "Total Equity Risk Premium"],
+        ]
         ```
 
         Which returns:
 
-        | Country       | Continent     |   Country Risk Premium |   Total Equity Risk Premium |
-        |:--------------|:--------------|------------------------:|-----------------------------:|
-        | United States | North America |                    0.23 |                          4.46 |
-        | Germany       | Europe        |                    0    |                          4.23 |
-        | Brazil        | South America |                    3.24 |                          7.47 |
+        | Country       |   Country Risk Premium |   Total Equity Risk Premium |
+        |:--------------|-----------------------:|----------------------------:|
+        | United States |                 0.0023 |                      0.0446 |
+        | Germany       |                 0      |                      0.0423 |
+        | Japan         |                 0.0091 |                      0.0514 |
+        | Brazil        |                 0.0324 |                      0.0747 |
+        | India         |                 0.0285 |                      0.0708 |
+        | South Africa  |                 0.039  |                      0.0813 |
         """
         if not self._api_key:
             logger.error(
@@ -2827,7 +2897,7 @@ class Toolkit:
                 else self._cache.get(
                     source=policy_model.FINANCIAL_MODELING_PREP,
                     dataset="market_risk_premium",
-                    entity="global",
+                    entity=policy_model.MARKET_RISK_PREMIUM_ENTITY,
                 )
             )
 
@@ -2843,7 +2913,7 @@ class Toolkit:
                     self._cache.set(
                         source=policy_model.FINANCIAL_MODELING_PREP,
                         dataset="market_risk_premium",
-                        entity="global",
+                        entity=policy_model.MARKET_RISK_PREMIUM_ENTITY,
                         data=self._market_risk_premium,
                     )
 
@@ -2861,13 +2931,16 @@ class Toolkit:
         Note that this data is only available for CFTC-tracked futures markets. Tickers without a
         corresponding futures contract (e.g. most individual equities) return no data.
 
+        Positioning is usually read from the net position of the non-commercial traders (long
+        minus short), often as a share of open interest and against its own history: an extreme
+        reading means a crowded trade. Commercial traders are mostly hedgers whose positions mirror
+        their physical business, so a large commercial net short in a commodity is normal rather
+        than a bearish view. The report shows the positions of Tuesday and is published on Friday.
+
         Also known as: COT report, CFTC positioning data, speculator/hedger positioning.
 
         Args:
             overwrite (bool): Defines whether to overwrite the existing data.
-
-        Raises:
-            ValueError: If an API key is not defined for FinancialModelingPrep.
 
         Returns:
             pd.DataFrame: The Commitment of Traders report for the specified tickers.
@@ -2877,24 +2950,25 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["NG", "GC"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        commitment_of_traders = toolkit.get_commitment_of_traders()
-
-        commitment_of_traders.xs("NG", level=1, axis=1)[
-            ["Open Interest", "Non-Commercial Long", "Non-Commercial Short", "Commercial Long", "Commercial Short"]
-        ].tail()
+        toolkit.get_commitment_of_traders()[["Non-Commercial Long", "Non-Commercial Short"]].tail()
         ```
 
         Which returns:
 
-        | date                |   Open Interest |   Non-Commercial Long |   Non-Commercial Short |   Commercial Long |   Commercial Short |
-        |:--------------------|-----------------:|----------------------:|------------------------:|-------------------:|--------------------:|
-        | 2024-01-30 00:00:00 |          1471807 |                 279539 |                  382722 |              526952 |               450698 |
-        | 2024-02-06 00:00:00 |          1533041 |                 301020 |                  415251 |              539246 |               456560 |
-        | 2024-02-13 00:00:00 |          1554063 |                 334504 |                  471061 |              552780 |               453300 |
-        | 2024-02-20 00:00:00 |          1592460 |                 356334 |                  510206 |              567791 |               452247 |
-        | 2024-02-27 00:00:00 |          1500882 |                 326328 |                  467881 |              545380 |               433185 |
+        | date                |   Non-Commercial Long |   Non-Commercial Short |
+        |:--------------------|----------------------:|-----------------------:|
+        | 2025-12-02 00:00:00 |                261331 |                  43771 |
+        | 2025-12-09 00:00:00 |                268485 |                  44599 |
+        | 2025-12-16 00:00:00 |                280920 |                  46942 |
+        | 2025-12-23 00:00:00 |                290161 |                  49461 |
+        | 2025-12-30 00:00:00 |                275592 |                  44419 |
         """
         if not self._api_key:
             logger.error(
@@ -2936,6 +3010,885 @@ class Toolkit:
 
         return self._commitment_of_traders
 
+    def _missing_api_key_message(self) -> None:
+        """Logs the standard message for the datasets that require a FinancialModelingPrep key."""
+        logger.error(
+            "The requested data requires the api_key parameter to be set, consider obtaining a key with the "
+            "following link: https://www.jeroenbouma.com/fmp"
+            "\nThis functionality also requires a Premium subscription. You can get 15% off by using "
+            "the above affiliate link which also supports the project."
+        )
+
+    def _remove_invalid(self) -> None:
+        """Drops the tickers without data when remove_invalid_tickers is set, as the other getters do."""
+        if self._remove_invalid_tickers:
+            self._tickers = [
+                ticker
+                for ticker in self._tickers
+                if ticker not in self._invalid_tickers
+            ]
+
+    def get_executives(
+        self, overwrite: bool = False, show_columns: list[str] | None = None
+    ):
+        """
+        Obtain the key executives of each company: their title, pay, gender, year of birth
+        and whether they are still active. This shows who leads the company and how the
+        leadership team is composed, which is useful when assessing management quality or
+        when following a change at the top.
+
+        Also known as: management team, company officers, leadership.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The executives per ticker, indexed by their name. Pay is only
+            disclosed for the executives named in the proxy statement, so the best paid
+            come first and the executives without disclosed pay follow.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["JPM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_executives(show_columns=["Title", "Year Born"])
+        ```
+
+        Which returns:
+
+        | Name                 | Title                                                                             |   Year Born |
+        |:---------------------|:----------------------------------------------------------------------------------|------------:|
+        | Mary Callahan Erdoes | Chief Executive Officer of Asset & Wealth Management and Executive Vice President |        1967 |
+        | Douglas Petno        | CEO of the Commercial & Investment Bank and Co-President                          |        1966 |
+        | Troy Larry Rohrbaugh | CEO of Consumer & Community Banking and Co-President                              |        1970 |
+        | Jeremy Barnum        | Executive Vice President & Chief Financial Officer                                |        1973 |
+        | James Dimon          | Chairman & Chief Executive Officer                                                |        1956 |
+        | Jennifer A. Piepszak | Chief Operating Officer                                                           |        1971 |
+        | Daniel Eduardo Pinto | Vice Chairman                                                                     |        1963 |
+        | Todd Anthony Combs   | Head Strategic Investment Group of Security & Resiliency Initiative               |        1971 |
+        | Lori Ann Beer        | Global Chief Information Officer                                                  |        1968 |
+        | Elena A. Korablina   | MD, Firmwide Controller & Principal Accounting Officer                            |        1974 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._executives.empty or overwrite:
+            self._executives, self._invalid_tickers = self._collect_per_ticker(
+                dataset="executives",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_INDEX,
+                collector=lambda tickers: _get_executives(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._executives.empty:
+            return filter_columns(self._executives.loc[self._tickers[0]], show_columns)
+
+        return filter_columns(self._executives, show_columns)
+
+    def get_executive_compensation(
+        self,
+        overwrite: bool = False,
+        show_columns: list[str] | None = None,
+    ):
+        """
+        Obtain the compensation of each company's executives per year as reported in the
+        proxy statement (DEF 14A): salary, bonus, stock and option awards, incentive plan
+        compensation, other compensation and the total. Comparing pay with the company's
+        performance shows how well management incentives are aligned with shareholders.
+
+        Automatically filtered to the years of this Toolkit instance's start_date and end_date.
+
+        Also known as: executive pay, management compensation, proxy statement compensation.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The compensation per ticker, indexed by year and executive.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["JPM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_executive_compensation(show_columns=["Salary", "Incentive Plan Compensation"])
+        ```
+
+        Which returns:
+
+        |                                                               |   Salary |   Incentive Plan Compensation |
+        |:--------------------------------------------------------------|---------:|------------------------------:|
+        | (2025, 'Douglas Petno Co-CEO, Commercial & Investment Bank')  |  1000000 |                      26500000 |
+        | (2025, 'James Dimon Chairman and CEO')                        |  1500000 |                      41500000 |
+        | (2025, 'Jeremy Barnum CFO')                                   |  1000000 |                      18500000 |
+        | (2025, 'Mary Callahan Erdoes CEO, Asset & Wealth Management') |  1000000 |                      30000000 |
+        | (2025, 'Troy Rohrbaugh Co-CEO, Commercial & Investment Bank') |  1000000 |                      26500000 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._executive_compensation.empty or overwrite:
+            self._executive_compensation, self._invalid_tickers = (
+                self._collect_per_ticker(
+                    dataset="executive_compensation",
+                    tickers=self._tickers,
+                    ticker_axis=ticker_model.TICKER_ON_INDEX,
+                    parameters={
+                        "start_date": self._start_date,
+                        "end_date": self._end_date,
+                    },
+                    collector=lambda tickers: _get_executive_compensation(
+                        tickers=tickers,
+                        api_key=self._api_key,
+                        start_date=self._start_date,
+                        end_date=self._end_date,
+                        user_subscription=self._fmp_plan,
+                    ),
+                )
+            )
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._executive_compensation.empty:
+            return filter_columns(
+                self._executive_compensation.loc[self._tickers[0]], show_columns
+            )
+
+        return filter_columns(self._executive_compensation, show_columns)
+
+    def get_company_notes(
+        self, overwrite: bool = False, show_columns: list[str] | None = None
+    ):
+        """
+        Obtain the securities other than common stock that each company has registered
+        for listing, mostly notes with their coupon and maturity in the title (e.g.
+        "1.625% Notes due 2026") and the exchange they are listed on. The list can
+        include notes that have since matured or been redeemed and other securities such
+        as depositary shares of preferred stock, so it shows which debt a company has
+        listed rather than what is outstanding today.
+
+        Also known as: listed debt, bonds issued, debt securities.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The notes per ticker, indexed by their title.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["KO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_company_notes(show_columns=["Exchange"])
+        ```
+
+        Which returns:
+
+        | Title                        | Exchange   |
+        |:-----------------------------|:-----------|
+        | Floating Rate Notes Due 2019 | NYSE       |
+        | 0.000% Notes Due 2021        | NYSE       |
+        | 1.125% Notes Due 2022        | NYSE       |
+        | 0.75% Notes Due 2023         | NYSE       |
+        | 0.500% Notes Due 2024        | NYSE       |
+        | 1.875% Notes Due 2026        | NYSE       |
+        | 1.125% Notes Due 2027        | NYSE       |
+        | 1.625% Notes Due 2035        | NYSE       |
+        | 1.100% Notes Due 2036        | NYSE       |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._company_notes.empty or overwrite:
+            self._company_notes, self._invalid_tickers = self._collect_per_ticker(
+                dataset="company_notes",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_INDEX,
+                collector=lambda tickers: _get_company_notes(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._company_notes.empty:
+            return filter_columns(
+                self._company_notes.loc[self._tickers[0]], show_columns
+            )
+
+        return filter_columns(self._company_notes, show_columns)
+
+    def get_employee_count(self, overwrite: bool = False):
+        """
+        Obtain the number of employees each company reported in its annual filings over
+        time. The most recent row is the current employee count and the rows before it
+        show how the workforce developed, which can be set against revenue or profit to
+        see how productive the workforce is.
+
+        Automatically filtered to this Toolkit instance's start_date and end_date.
+
+        Also known as: headcount, number of employees, workforce size.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+
+        Returns:
+            pd.DataFrame: The employee count per reporting year (rows) and ticker (columns).
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["WMT", "AMZN"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_employee_count()
+        ```
+
+        Which returns:
+
+        | Period   |     WMT |    AMZN |
+        |:---------|--------:|--------:|
+        | 2021     | 2300000 | 1608000 |
+        | 2022     | 2300000 | 1541000 |
+        | 2023     | 2100000 | 1525000 |
+        | 2024     | 2100000 | 1556000 |
+        | 2025     | 2100000 | 1576000 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._employee_count.empty or overwrite:
+            self._employee_count, self._invalid_tickers = self._collect_per_ticker(
+                dataset="employee_count",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_COLUMNS,
+                parameters={
+                    "start_date": self._start_date,
+                    "end_date": self._end_date,
+                    "user_subscription": self._fmp_plan,
+                },
+                collector=lambda tickers: _get_employee_count(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    start_date=self._start_date,
+                    end_date=self._end_date,
+                    sleep_timer=self._sleep_timer,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        self._remove_invalid()
+
+        return self._employee_count
+
+    def get_shares_float(self, overwrite: bool = False):
+        """
+        Obtain the free float of each company: the number of shares available for public
+        trading, the number of shares outstanding and the free float as the share of the
+        outstanding shares that can be traded (as a decimal). A low free float means few
+        shares change hands, which tends to make a stock less liquid and more volatile.
+
+        Also known as: free float, float shares, public float, share liquidity.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+
+        Returns:
+            pd.DataFrame: The share float figures (rows) per ticker (columns).
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["META", "GOOGL", "BRK-B"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_shares_float().loc[["Free Float"]]
+        ```
+
+        Which returns:
+
+        |            |     META |    GOOGL |    BRK-B |
+        |:-----------|---------:|---------:|---------:|
+        | Free Float | 0.863739 | 0.893911 | 0.656007 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._shares_float.empty or overwrite:
+            self._shares_float, self._invalid_tickers = self._collect_per_ticker(
+                dataset="shares_float",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_COLUMNS,
+                collector=lambda tickers: _get_shares_float(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        self._remove_invalid()
+
+        return self._shares_float
+
+    def get_mergers_acquisitions(
+        self, overwrite: bool = False, show_columns: list[str] | None = None
+    ):
+        """
+        Obtain the mergers and acquisitions each company took part in, as the acquirer or
+        as the target, based on the merger filings (S-4) with the SEC. Every deal comes
+        with the other party, the filing date and a link to the filing.
+
+        The search uses the company name from the profile, so the profile is retrieved
+        first when it is not available yet. Deals of companies with a similar name are
+        left out: only the deals in which the ticker itself is involved are kept.
+
+        Automatically filtered to this Toolkit instance's start_date and end_date.
+
+        Also known as: M&A, acquisitions, mergers, takeovers.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The deals per ticker, indexed by their transaction date.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["CVX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_mergers_acquisitions(show_columns=["Role", "Acquirer Name", "Target Name"])
+        ```
+
+        Which returns:
+
+        | Transaction Date    | Role     | Acquirer Name   | Target Name      |
+        |:--------------------|:---------|:----------------|:-----------------|
+        | 2021-03-22 00:00:00 | Acquirer | CHEVRON CORP    | NBLX             |
+        | 2023-06-20 00:00:00 | Acquirer | CHEVRON CORP    | PDC Energy, Inc. |
+        | 2023-08-03 00:00:00 | Acquirer | CHEVRON CORP    | PDC              |
+        | 2024-02-26 00:00:00 | Acquirer | CHEVRON CORP    | Hess             |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._mergers_acquisitions.empty or overwrite:
+            profile = self.get_profile()
+            company_names = (
+                profile.loc["Company Name"].to_dict()
+                if profile is not None and "Company Name" in profile.index
+                else {}
+            )
+
+            self._mergers_acquisitions, self._invalid_tickers = (
+                self._collect_per_ticker(
+                    dataset="mergers_acquisitions",
+                    tickers=self._tickers,
+                    ticker_axis=ticker_model.TICKER_ON_INDEX,
+                    parameters={
+                        "start_date": self._start_date,
+                        "end_date": self._end_date,
+                    },
+                    collector=lambda tickers: _get_mergers_acquisitions(
+                        tickers=tickers,
+                        company_names=company_names,
+                        api_key=self._api_key,
+                        start_date=self._start_date,
+                        end_date=self._end_date,
+                        user_subscription=self._fmp_plan,
+                    ),
+                )
+            )
+
+        # A company without deals is not an invalid ticker, so nothing is removed here.
+
+        if len(self._tickers) == 1 and not self._mergers_acquisitions.empty:
+            return filter_columns(
+                self._mergers_acquisitions.loc[self._tickers[0]], show_columns
+            )
+
+        return filter_columns(self._mergers_acquisitions, show_columns)
+
+    def get_stock_splits(self, overwrite: bool = False):
+        """
+        Obtain the stock splits of each company, with the split ratio as a numerator and
+        denominator: a 4-for-1 split has numerator 4 and denominator 1, while a reverse
+        split has a numerator smaller than its denominator. Splits change the number of
+        shares but not the value of the company, which is why historical prices are
+        adjusted for them.
+
+        Automatically filtered to this Toolkit instance's start_date and end_date.
+
+        Also known as: share splits, reverse splits, split history.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+
+        Returns:
+            pd.DataFrame: The splits per ticker, indexed by their date.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["NVDA", "AAPL", "TSLA", "GOOGL", "AMZN"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_stock_splits()[["Numerator", "Denominator"]]
+        ```
+
+        Which returns:
+
+        |                         |   Numerator |   Denominator |
+        |:------------------------|------------:|--------------:|
+        | ('NVDA', '2021-07-20')  |           4 |             1 |
+        | ('NVDA', '2024-06-10')  |          10 |             1 |
+        | ('AAPL', '2020-08-31')  |           4 |             1 |
+        | ('TSLA', '2020-08-31')  |           5 |             1 |
+        | ('TSLA', '2022-08-25')  |           3 |             1 |
+        | ('GOOGL', '2022-07-18') |          20 |             1 |
+        | ('AMZN', '2022-06-06')  |          20 |             1 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._stock_splits.empty or overwrite:
+            self._stock_splits, self._invalid_tickers = self._collect_per_ticker(
+                dataset="stock_splits",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_INDEX,
+                parameters={
+                    "start_date": self._start_date,
+                    "end_date": self._end_date,
+                    "user_subscription": self._fmp_plan,
+                },
+                collector=lambda tickers: _get_stock_splits(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    start_date=self._start_date,
+                    end_date=self._end_date,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        # A company that never split is not an invalid ticker, so nothing is removed here.
+
+        if len(self._tickers) == 1 and not self._stock_splits.empty:
+            return self._stock_splits.loc[self._tickers[0]]
+
+        return self._stock_splits
+
+    def get_insider_trade_statistics(
+        self,
+        overwrite: bool = False,
+        rounding: int | None = None,
+        show_columns: list[str] | None = None,
+    ):
+        """
+        Obtain quarterly statistics on the trades of each company's insiders (officers,
+        directors and large shareholders), based on their Form 4 filings: the number of
+        acquisitions and disposals, their ratio, the number of shares acquired and
+        disposed of, and the number of open market purchases and sales.
+
+        Insiders know their company best, so heavy buying can signal confidence while
+        persistent selling can be worth a closer look. Note that many disposals are
+        routine, such as sales to cover taxes on vested stock awards.
+
+        Automatically filtered to this Toolkit instance's start_date and end_date.
+
+        Also known as: insider trading, insider transactions, Form 4 statistics.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            rounding (int): Defines the number of decimal places to round the data to.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The statistics per ticker, indexed by quarter.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["META"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2024-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_insider_trade_statistics(show_columns=["Acquired Transactions", "Disposed Transactions"])
+        ```
+
+        Which returns:
+
+        | Period   |   Acquired Transactions |   Disposed Transactions |
+        |:---------|------------------------:|------------------------:|
+        | 2024Q1   |                     206 |                    1965 |
+        | 2024Q2   |                      59 |                     322 |
+        | 2024Q3   |                      38 |                     664 |
+        | 2024Q4   |                      56 |                     487 |
+        | 2025Q1   |                      77 |                     992 |
+        | 2025Q2   |                      67 |                     194 |
+        | 2025Q3   |                      50 |                     271 |
+        | 2025Q4   |                      41 |                      82 |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._insider_trade_statistics.empty or overwrite:
+            self._insider_trade_statistics, self._invalid_tickers = (
+                self._collect_per_ticker(
+                    dataset="insider_trade_statistics",
+                    tickers=self._tickers,
+                    ticker_axis=ticker_model.TICKER_ON_INDEX,
+                    parameters={
+                        "start_date": self._start_date,
+                        "end_date": self._end_date,
+                    },
+                    collector=lambda tickers: _get_insider_trade_statistics(
+                        tickers=tickers,
+                        api_key=self._api_key,
+                        start_date=self._start_date,
+                        end_date=self._end_date,
+                        user_subscription=self._fmp_plan,
+                    ),
+                )
+            )
+
+        insider_trade_statistics = apply_rounding(
+            self._insider_trade_statistics,
+            rounding if rounding is not None else self._rounding,
+        )
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._insider_trade_statistics.empty:
+            return filter_columns(
+                insider_trade_statistics.loc[self._tickers[0]], show_columns
+            )
+
+        return filter_columns(insider_trade_statistics, show_columns)
+
+    def get_stock_grades(
+        self, overwrite: bool = False, show_columns: list[str] | None = None
+    ):
+        """
+        Obtain the grades analysts gave each company: per date and grading company the
+        previous and the new grade, and whether the grade was upgraded, downgraded or
+        maintained. Following how the grades change over time shows how sentiment among
+        analysts develops, with upgrades and downgrades by well-followed firms often
+        moving the share price.
+
+        Automatically filtered to this Toolkit instance's start_date and end_date.
+
+        Also known as: analyst ratings, upgrades and downgrades, analyst grades.
+
+        Args:
+            overwrite (bool): Defines whether to overwrite the existing data.
+            show_columns (list[str] | None): A list of column names to keep in the result. Invalid
+            names are reported and ignored. Defaults to None, which keeps every column.
+
+        Returns:
+            pd.DataFrame: The grades per ticker, indexed by date and grading company.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["NKE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-10-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.get_stock_grades()
+        ```
+
+        Which returns:
+
+        |                                         | Previous Grade   | New Grade      | Action   |
+        |:----------------------------------------|:-----------------|:---------------|:---------|
+        | ('2025-10-01', 'Barclays')              | Equal Weight     | Equal Weight   | Maintain |
+        | ('2025-10-01', 'JP Morgan')             | Overweight       | Overweight     | Maintain |
+        | ('2025-10-01', 'Morgan Stanley')        | Equal Weight     | Equal Weight   | Maintain |
+        | ('2025-10-01', 'Needham')               | Buy              | Buy            | Maintain |
+        | ('2025-10-01', 'Piper Sandler')         | Overweight       | Overweight     | Maintain |
+        | ('2025-10-01', 'Stifel')                | Hold             | Hold           | Maintain |
+        | ('2025-10-01', 'Telsey Advisory Group') | Market Perform   | Market Perform | Maintain |
+        | ('2025-10-01', 'Truist Securities')     | Buy              | Buy            | Maintain |
+        | ('2025-10-02', 'Keybanc')               | Sector Weight    | Overweight     | Upgrade  |
+        | ('2025-11-13', 'Wells Fargo')           | Equal Weight     | Overweight     | Upgrade  |
+        | ('2025-12-09', 'Citigroup')             | Neutral          | Neutral        | Maintain |
+        | ('2025-12-10', 'Telsey Advisory Group') | Market Perform   | Market Perform | Maintain |
+        | ('2025-12-12', 'BTIG')                  | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'B of A Securities')     | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'Barclays')              | Equal Weight     | Equal Weight   | Maintain |
+        | ('2025-12-19', 'Bernstein')             | Outperform       | Outperform     | Maintain |
+        | ('2025-12-19', 'Citigroup')             | Neutral          | Neutral        | Maintain |
+        | ('2025-12-19', 'Goldman Sachs')         | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'Guggenheim')            | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'Needham')               | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'Piper Sandler')         | Overweight       | Overweight     | Maintain |
+        | ('2025-12-19', 'Stifel')                | Hold             | Hold           | Maintain |
+        | ('2025-12-19', 'Telsey Advisory Group') | Market Perform   | Market Perform | Maintain |
+        | ('2025-12-19', 'Truist Securities')     | Buy              | Buy            | Maintain |
+        | ('2025-12-19', 'UBS')                   | Neutral          | Neutral        | Maintain |
+        | ('2025-12-19', 'Wells Fargo')           | Overweight       | Overweight     | Maintain |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if self._stock_grades.empty or overwrite:
+            self._stock_grades, self._invalid_tickers = self._collect_per_ticker(
+                dataset="stock_grades",
+                tickers=self._tickers,
+                ticker_axis=ticker_model.TICKER_ON_INDEX,
+                parameters={"start_date": self._start_date, "end_date": self._end_date},
+                collector=lambda tickers: _get_stock_grades(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    start_date=self._start_date,
+                    end_date=self._end_date,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._stock_grades.empty:
+            return filter_columns(
+                self._stock_grades.loc[self._tickers[0]], show_columns
+            )
+
+        return filter_columns(self._stock_grades, show_columns)
+
+    def _collect_fund_data(
+        self, dataset: str, overwrite: bool = False
+    ) -> pd.DataFrame | None:
+        """
+        Collect a fund dataset of the tickers from Financial Modeling Prep, once per instance.
+        `toolkit.etf` presents them (get_holdings, get_information, get_country_weightings and
+        get_sector_weightings) and builds its analyses on them.
+
+        Args:
+            dataset (str): The dataset: holdings, information, country_weightings or
+                sector_weightings.
+            overwrite (bool, optional): Whether to collect the dataset again. Defaults to False.
+
+        Returns:
+            pd.DataFrame | None: The holdings per fund and asset, or the other datasets with a
+            column per fund. None without an API key.
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        # The holdings have a row per asset of every fund, the other datasets a column per fund.
+        collector, ticker_axis = {
+            "holdings": (_get_etf_holdings, ticker_model.TICKER_ON_INDEX),
+            "information": (_get_etf_information, ticker_model.TICKER_ON_COLUMNS),
+            "country_weightings": (
+                _get_etf_country_weightings,
+                ticker_model.TICKER_ON_COLUMNS,
+            ),
+            "sector_weightings": (
+                _get_etf_sector_weightings,
+                ticker_model.TICKER_ON_COLUMNS,
+            ),
+        }[dataset]
+        attribute = f"_etf_{dataset}"
+
+        if getattr(self, attribute).empty or overwrite:
+            # Not every ticker is a fund, so a ticker without fund data is not invalid.
+            data, _ = self._collect_per_ticker(
+                dataset=f"etf_{dataset}",
+                tickers=self._tickers,
+                ticker_axis=ticker_axis,
+                collector=lambda tickers: collector(
+                    tickers=tickers,
+                    api_key=self._api_key,
+                    user_subscription=self._fmp_plan,
+                ),
+            )
+            setattr(self, attribute, data)
+
+        return getattr(self, attribute)
+
+    def get_earnings_call_transcripts(
+        self,
+        latest: bool = True,
+        fiscal_period: str | None = None,
+        overwrite: bool = False,
+    ):
+        """
+        Obtain the earnings call transcripts of each company: the full text of the call,
+        with management's prepared remarks followed by the questions of analysts and the
+        answers. Transcripts explain the numbers in the financial statements in
+        management's own words, and with that are a strong input for text analysis and AI
+        models, e.g. to track sentiment, guidance or recurring themes over time.
+
+        A transcript is long (often 40,000 to 60,000 characters) and every quarter is a
+        separate request. By default only the most recent transcript is retrieved. With
+        fiscal_period (e.g. "2025Q4") the call of that fiscal quarter is retrieved, and with
+        latest=False every transcript between this Toolkit instance's start_date and
+        end_date. A fiscal period without a transcript is logged together with the most
+        recent periods that do have one. Each transcript is cached on its own, since a
+        published transcript does not change, so a quarter is only retrieved once.
+
+        Also known as: earnings call, conference call transcript, earnings transcript.
+
+        Args:
+            latest (bool): Whether to only retrieve the most recent transcript. When False,
+                every transcript between the start_date and end_date is retrieved. Defaults to True.
+            fiscal_period (str | None): The fiscal quarter of the call to retrieve, written as
+                "2025Q4" (or "2025-Q4", "Q4 2025"). It is the company's own fiscal year, which
+                differs from the calendar year for e.g. Apple and Microsoft. Takes precedence
+                over latest. Defaults to None.
+            overwrite (bool): Defines whether to overwrite the existing data.
+
+        Returns:
+            pd.DataFrame: The date and transcript per ticker, indexed by fiscal period.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["NVDA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
+
+        transcripts = toolkit.get_earnings_call_transcripts(fiscal_period="2025Q4")
+
+        transcripts["Transcript"].str[:80]
+        ```
+
+        Which returns:
+
+        | Fiscal Period   | Transcript                                                                       |
+        |:----------------|:---------------------------------------------------------------------------------|
+        | 2025Q4          | Christa: Good afternoon. My name is Christa, and I will be your conference opera |
+        """
+        if not self._api_key:
+            self._missing_api_key_message()
+            return None
+
+        if (
+            self._earnings_call_transcripts.empty
+            or overwrite
+            or self._earnings_call_transcripts_selection != (latest, fiscal_period)
+        ):
+            self._earnings_call_transcripts, self._invalid_tickers = (
+                self._collect_per_ticker(
+                    dataset="earnings_call_transcripts_selection",
+                    tickers=self._tickers,
+                    ticker_axis=ticker_model.TICKER_ON_INDEX,
+                    parameters={
+                        "latest": latest,
+                        "fiscal_period": fiscal_period,
+                        "start_date": self._start_date,
+                        "end_date": self._end_date,
+                    },
+                    collector=lambda tickers: _get_earnings_call_transcripts(
+                        tickers=tickers,
+                        api_key=self._api_key,
+                        start_date=self._start_date,
+                        end_date=self._end_date,
+                        latest=latest,
+                        user_subscription=self._fmp_plan,
+                        fiscal_period=fiscal_period,
+                    ),
+                )
+            )
+            self._earnings_call_transcripts_selection = (latest, fiscal_period)
+
+        self._remove_invalid()
+
+        if len(self._tickers) == 1 and not self._earnings_call_transcripts.empty:
+            return self._earnings_call_transcripts.loc[self._tickers[0]]
+
+        return self._earnings_call_transcripts
+
     def get_historical_statistics(self):
         """
         Retrieve statistics about each ticker's historical data. This is especially useful to understand why certain
@@ -2952,7 +3905,7 @@ class Toolkit:
             - Timezone: The timezone the instrument is traded in.
             - Exchange Timezone Name: The name of the timezone the instrument is traded in.
 
-        Also known as: key statistics over time, historical key metrics.
+        Also known as: listing details, instrument information, exchange and currency.
 
         Returns:
             pd.DataFrame: A DataFrame containing the statistics for each ticker.
@@ -2962,24 +3915,26 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        companies = Toolkit(["AMZN", "^HSI", "IWDA.AS", "0P0000Z8RO.T"])
+        toolkit = Toolkit(
+            ["ASML.AS", "ASML"],
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        companies.get_historical_statistics()
+        toolkit.get_historical_statistics().loc[
+            ["Currency", "Exchange Name", "Instrument Type", "First Trade Date", "Exchange Timezone Name"]
+        ]
         ```
 
         Which returns:
 
-        |                        | AMZN             | ^HSI           | IWDA.AS          | 0P0000Z8RO.T   |
-        |:-----------------------|:-----------------|:---------------|:-----------------|:---------------|
-        | Currency               | USD              | HKD            | EUR              | JPY            |
-        | Symbol                 | AMZN             | ^HSI           | IWDA.AS          | 0P0000Z8RO.T   |
-        | Exchange Name          | NMS              | HKG            | AMS              | JPX            |
-        | Instrument Type        | EQUITY           | INDEX          | ETF              | MUTUALFUND     |
-        | First Trade Date       | 1997-05-15       | 1986-12-31     | 2009-09-25       | 2018-01-04     |
-        | Regular Market Time    | 2023-09-22       | 2023-09-22     | 2023-09-22       | 2023-09-21     |
-        | GMT Offset             | -14400           | 28800          | 7200             | 32400          |
-        | Timezone               | EDT              | HKT            | CEST             | JST            |
-        | Exchange Timezone Name | America/New_York | Asia/Hong_Kong | Europe/Amsterdam | Asia/Tokyo     |
+        |                        | ASML.AS          | ASML             |
+        |:-----------------------|:-----------------|:-----------------|
+        | Currency               | EUR              | USD              |
+        | Exchange Name          | AMS              | NMS              |
+        | Instrument Type        | EQUITY           | EQUITY           |
+        | First Trade Date       | 1998-07-20       | 1995-03-15       |
+        | Exchange Timezone Name | Europe/Amsterdam | America/New_York |
         """
 
         if self._historical_statistics.empty:
@@ -3004,9 +3959,14 @@ class Toolkit:
         show_errors: bool = False,
     ):
         """
-        Retrieve daily, weekly, monthly, quarterly or yearly treasury data. This can be from FinancialModelingPrep
-        or from YahooFinance. FinancialModelingPrep is by far a more extensive dataset containing daily data from
-        1 month to 30 years. YahooFinance only contains daily data for 5, 10 and 30 years but is a free alternative.
+        Retrieve daily, weekly, monthly, quarterly or yearly US Treasury yields for four maturities, 13 weeks,
+        5 years, 10 years and 30 years, from FinancialModelingPrep or, as a free alternative, YahooFinance. With
+        the default divide_ohlc_by of 100 the yields are returned as decimals (0.042 is 4.2%).
+
+        A week, month, quarter or year holds the first (Open), highest, lowest and last (Close) yield of
+        the period. The risk free rate the Performance, Risk and Models modules use for such a period is
+        instead the average of the daily yields within it, which approximates what a holder earned over
+        the period rather than where the yield happened to close at its end.
 
         Also known as: US Treasury yields, yield curve, treasury rates.
 
@@ -3015,9 +3975,9 @@ class Toolkit:
             fill_nan (bool): Defines whether to forward fill NaN values. This defaults
             to True to prevent holes in the dataset. This is especially relevant for
             technical indicators.
-            risk_free_rate (str | None, optional): The maturity to return as the risk free rate
-                ('13w', '5y', '10y' or '30y'). Defaults to None, which uses the maturity set on
-                the Toolkit.
+            risk_free_rate (str | None, optional): One maturity to return ('13w', '5y', '10y' or
+                '30y'). Defaults to None, which returns all four. The Toolkit's own risk free rate
+                stays the maturity set on the Toolkit either way.
             divide_ohlc_by (int | float | None, optional): A value to divide the yields by. Treasury
                 yields are published in percent, so this defaults to 100 to return decimals.
             rounding (int | None, optional): The number of decimals to round the results to.
@@ -3036,21 +3996,32 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        companies = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2023-08-10")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        companies.get_treasury_data()
+        toolkit.get_treasury_data(period="monthly")["Close"]
         ```
 
         Which returns:
 
-        | date       |   13 Week |   5 Year |   10 Year |   30 Year |
-        |:-----------|----------:|---------:|----------:|----------:|
-        | 2023-10-16 |    0.0533 |   0.0472 |    0.0471 |    0.0487 |
-        | 2023-10-17 |    0.0534 |   0.0487 |    0.0485 |    0.0495 |
-        | 2023-10-18 |    0.0533 |   0.0492 |    0.049  |    0.05   |
-        | 2023-10-19 |    0.0531 |   0.0496 |    0.0499 |    0.051  |
-        | 2023-10-20 |    0.053  |   0.0491 |    0.0496 |    0.0512 |
-
+        | Date    |   13 Week |   5 Year |   10 Year |   30 Year |
+        |:--------|----------:|---------:|----------:|----------:|
+        | 2025-01 |    0.0419 |   0.0436 |    0.0457 |    0.0481 |
+        | 2025-02 |    0.0419 |   0.0403 |    0.0423 |    0.0452 |
+        | 2025-03 |    0.0419 |   0.0398 |    0.0425 |    0.0461 |
+        | 2025-04 |    0.0419 |   0.0375 |    0.0418 |    0.0468 |
+        | 2025-05 |    0.0423 |   0.0398 |    0.0442 |    0.0493 |
+        | 2025-06 |    0.0419 |   0.038  |    0.0423 |    0.0478 |
+        | 2025-07 |    0.0424 |   0.0396 |    0.0436 |    0.0489 |
+        | 2025-08 |    0.0404 |   0.037  |    0.0423 |    0.0492 |
+        | 2025-09 |    0.0385 |   0.0373 |    0.0415 |    0.0473 |
+        | 2025-10 |    0.0372 |   0.0372 |    0.041  |    0.0467 |
+        | 2025-11 |    0.037  |   0.036  |    0.0402 |    0.0466 |
+        | 2025-12 |    0.0355 |   0.0372 |    0.0416 |    0.0484 |
         """
         risk_free_names = {
             "13w": "13 Week",
@@ -3065,27 +4036,25 @@ class Toolkit:
             "^TYX": "30 Year",
         }
 
-        if risk_free_rate:
-            if risk_free_rate not in ["13w", "5y", "10y", "30y"]:
-                raise ValueError(
-                    "Please choose from 13w, 5y, 10y or 30y as risk_free_rate."
-                )
-
-            risk_free_rate = (
-                "^IRX"
-                if risk_free_rate == "13w"
-                else (
-                    "^FVX"
-                    if risk_free_rate == "5y"
-                    else ("^TNX" if risk_free_rate == "10y" else "^TYX")
-                )
+        if risk_free_rate and risk_free_rate not in risk_free_names:
+            raise ValueError(
+                "Please choose from 13w, 5y, 10y or 30y as risk_free_rate."
             )
 
-        risk_free_rate_tickers = (
-            ["^IRX", "^FVX", "^TNX", "^TYX"] if not risk_free_rate else [risk_free_rate]
-        )
-
+        # Every maturity is retrieved and kept, so the Toolkit's own risk free rate stays
+        # available; risk_free_rate only narrows what is returned.
+        requested_maturity = risk_free_names[risk_free_rate] if risk_free_rate else None
+        risk_free_rate_tickers = list(treasury_names)
         risk_free_rate = risk_free_names[self._risk_free_rate]
+
+        def select(treasury_data: pd.DataFrame) -> pd.DataFrame:
+            treasury_data = treasury_data.loc[self._start_date : self._end_date, :]
+            if requested_maturity is None:
+                return treasury_data
+            return treasury_data.loc[
+                :,
+                treasury_data.columns.get_level_values(1) == requested_maturity,
+            ]
 
         specific_rates = (
             [
@@ -3151,7 +4120,7 @@ class Toolkit:
                 return pd.DataFrame()
 
         if period == "daily":
-            return self._daily_treasury_data.loc[self._start_date : self._end_date, :]
+            return select(self._daily_treasury_data)
         if period == "weekly":
             self._weekly_treasury_data = _convert_daily_to_other_period(
                 period=period,
@@ -3161,11 +4130,14 @@ class Toolkit:
                 rounding=rounding if rounding is not None else self._rounding,
             )
 
-            self._weekly_risk_free_rate = self._weekly_treasury_data.xs(
-                risk_free_rate, level=1, axis=1
+            self._weekly_risk_free_rate = self._average_risk_free_rate(
+                period=period,
+                treasury_data=self._weekly_treasury_data,
+                risk_free_rate=risk_free_rate,
+                rounding=rounding,
             )
 
-            return self._weekly_treasury_data.loc[self._start_date : self._end_date, :]
+            return select(self._weekly_treasury_data)
         if period == "monthly":
             self._monthly_treasury_data = _convert_daily_to_other_period(
                 period=period,
@@ -3175,11 +4147,14 @@ class Toolkit:
                 rounding=rounding if rounding is not None else self._rounding,
             )
 
-            self._monthly_risk_free_rate = self._monthly_treasury_data.xs(
-                risk_free_rate, level=1, axis=1
+            self._monthly_risk_free_rate = self._average_risk_free_rate(
+                period=period,
+                treasury_data=self._monthly_treasury_data,
+                risk_free_rate=risk_free_rate,
+                rounding=rounding,
             )
 
-            return self._monthly_treasury_data.loc[self._start_date : self._end_date, :]
+            return select(self._monthly_treasury_data)
         if period == "quarterly":
             self._quarterly_treasury_data = _convert_daily_to_other_period(
                 period=period,
@@ -3189,13 +4164,14 @@ class Toolkit:
                 rounding=rounding if rounding is not None else self._rounding,
             )
 
-            self._quarterly_risk_free_rate = self._quarterly_treasury_data.xs(
-                risk_free_rate, level=1, axis=1
+            self._quarterly_risk_free_rate = self._average_risk_free_rate(
+                period=period,
+                treasury_data=self._quarterly_treasury_data,
+                risk_free_rate=risk_free_rate,
+                rounding=rounding,
             )
 
-            return self._quarterly_treasury_data.loc[
-                self._start_date : self._end_date, :
-            ]
+            return select(self._quarterly_treasury_data)
         if period == "yearly":
             self._yearly_treasury_data = _convert_daily_to_other_period(
                 period=period,
@@ -3205,11 +4181,14 @@ class Toolkit:
                 rounding=rounding if rounding is not None else self._rounding,
             )
 
-            self._yearly_risk_free_rate = self._yearly_treasury_data.xs(
-                risk_free_rate, level=1, axis=1
+            self._yearly_risk_free_rate = self._average_risk_free_rate(
+                period=period,
+                treasury_data=self._yearly_treasury_data,
+                risk_free_rate=risk_free_rate,
+                rounding=rounding,
             )
 
-            return self._yearly_treasury_data.loc[self._start_date : self._end_date, :]
+            return select(self._yearly_treasury_data)
 
         raise ValueError(
             "Please choose from daily, weekly, monthly, quarterly or yearly as period."
@@ -3253,7 +4232,9 @@ class Toolkit:
             to True to prevent holes in the dataset. This is especially relevant for
             technical indicators.
             overwrite (bool): Defines whether to overwrite the existing data.
-            rounding (int): Defines the number of decimal places to round the data to.
+            rounding (int): Defines the number of decimal places to round the returned data to. Defaults
+            to None, which uses the rounding of the Toolkit. The rates the financial statements are
+            translated with are never rounded.
             show_ticker_seperation (bool, optional): A boolean representing whether to show which tickers
             acquired data from FinancialModelingPrep and which tickers acquired data from YahooFinance.
 
@@ -3268,25 +4249,30 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit("ASML", api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            "ASML",
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.get_exchange_rates(period="monthly")
         ```
 
         Which returns:
 
-        | Date    |   Open |   High |    Low |   Close |   Adj Close |   Volume |   Return |   Cumulative Return |
-        |:--------|-------:|-------:|-------:|--------:|------------:|---------:|---------:|--------------------:|
-        | 2023-03 | 1.0905 | 1.0926 | 1.0861 |  1.0905 |      1.0905 |        0 |   0.0277 |              0.7896 |
-        | 2023-04 | 1.1011 | 1.1037 | 1.0963 |  1.0969 |      1.0969 |   131812 |   0.0059 |              0.7943 |
-        | 2023-05 | 1.0693 | 1.0771 | 1.066  |  1.076  |      1.0733 |   162069 |  -0.0215 |              0.7772 |
-        | 2023-06 | 1.09   | 1.09   | 1.08   |  1.09   |      1.0868 |        0 |   0.0126 |              0.787  |
-        | 2023-07 | 1.0996 | 1.102  | 1.0952 |  1.1007 |      1.1024 |   183278 |   0.0144 |              0.7983 |
-        | 2023-08 | 1.0842 | 1.0882 | 1.077  |  1.0796 |      1.09   |   171695 |  -0.0112 |              0.7893 |
-        | 2023-09 | 1.06   | 1.06   | 1.06   |  1.06   |      1.06   |        0 |  -0.0275 |              0.7676 |
-        | 2023-10 | 1.0614 | 1.0674 | 1.0556 |  1.0578 |      1.0615 |   184667 |   0.0014 |              0.7686 |
-        | 2023-11 | 1.0973 | 1.0984 | 1.0878 |  1.0892 |      1.0974 |   173646 |   0.0338 |              0.7946 |
-        | 2023-12 | 1.088  | 1.0898 | 1.0848 |  1.0871 |      1.0871 |    90494 |  -0.0094 |              0.7872 |
+        | Date    |   Open |   High |    Low |   Close |   Adj Close |      Volume |   Return |   Cumulative Return |
+        |:--------|-------:|-------:|-------:|--------:|------------:|------------:|---------:|--------------------:|
+        | 2025-03 | 1.0402 | 1.0954 | 1.0388 |  1.0815 |        1.08 | 1.1265e+07  |   0.0385 |              0.8926 |
+        | 2025-04 | 1.0815 | 1.1573 | 1.0778 |  1.1328 |        1.13 | 1.3243e+07  |   0.0463 |              0.9339 |
+        | 2025-05 | 1.1328 | 1.1422 | 1.1065 |  1.1346 |        1.13 | 9.02118e+06 |   0      |              0.9339 |
+        | 2025-06 | 1.1346 | 1.1788 | 1.1345 |  1.1787 |        1.18 | 8.07454e+06 |   0.0442 |              0.9752 |
+        | 2025-07 | 1.1787 | 1.183  | 1.1401 |  1.1415 |        1.14 | 7.03696e+06 |  -0.0339 |              0.9421 |
+        | 2025-08 | 1.1417 | 1.1743 | 1.1392 |  1.1707 |        1.17 | 3.44184e+06 |   0.0263 |              0.9669 |
+        | 2025-09 | 1.1696 | 1.1919 | 1.1608 |  1.1734 |        1.17 | 3.49176e+06 |   0      |              0.9669 |
+        | 2025-10 | 1.1736 | 1.1779 | 1.1522 |  1.1536 |        1.15 | 4.08101e+06 |  -0.0171 |              0.9504 |
+        | 2025-11 | 1.153  | 1.1656 | 1.1469 |  1.1601 |        1.16 | 3.2838e+06  |   0.0087 |              0.9587 |
+        | 2025-12 | 1.1594 | 1.1808 | 1.1589 |  1.1746 |        1.17 | 2.67505e+06 |   0.0086 |              0.9669 |
         """
         if not self._currencies or overwrite:
             if self._historical_statistics.empty:
@@ -3339,7 +4325,10 @@ class Toolkit:
                     return_column=return_column,
                     include_dividends=False,
                     fill_nan=fill_nan,
-                    rounding=rounding if rounding is not None else self._rounding,
+                    # Kept unrounded: the statements are translated from these rates and a rate
+                    # such as KRWUSD or VNDUSD loses most (or all) of its value at four decimals.
+                    # Only what this method returns is rounded.
+                    rounding=None,
                     sleep_timer=self._sleep_timer,
                     show_ticker_seperation=show_ticker_seperation,
                     log_message="Obtaining currency exchange data",
@@ -3420,9 +4409,12 @@ class Toolkit:
                 )
 
         if period == "daily":
-            historical_data = self._daily_exchange_rate_data.loc[
-                self._start_date : self._end_date, :
-            ]
+            historical_data = apply_rounding(
+                self._daily_exchange_rate_data.loc[
+                    self._start_date : self._end_date, :
+                ],
+                rounding if rounding is not None else self._rounding,
+            )
             # The first row of the window has no preceding observation, so its Return stays NaN; Cumulative Return is already anchored at 1 there by its own calculation, so nothing depends on fabricating a zero.
 
             if len(self._currencies) == 1:
@@ -3533,6 +4525,9 @@ class Toolkit:
         company's financial position at a specific point in time. Therefore, trailing results are not
         available for this statement.
 
+        With convert_currency, the statement is converted to the currency of the historical data at the
+        closing rate, the exchange rate at the end of each period (IAS 21.39).
+
         Also known as: assets, liabilities, shareholders equity, financial position.
 
         Args:
@@ -3545,8 +4540,8 @@ class Toolkit:
             overwrite (bool): Defines whether to overwrite the existing data.
             rounding (int): Defines the number of decimal places to round the data to.
             growth (bool): Defines whether to return the growth of the data.
-            lag (int | str): Defines the number of periods to lag the growth data by.
-            E.g. when selecting 4 with quarterly data, the TTM is calculated.
+            lag (int | list[int]): Defines the number of periods to lag the growth data by.
+            E.g. 4 with quarterly data gives the growth against the same quarter a year earlier.
             show_columns (list[str] | None): A list of column names to keep in the result. Invalid
             names are reported and ignored. Defaults to None, which keeps every column.
 
@@ -3558,60 +4553,23 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["MSFT", "MU"], api_key="FINANCIAL_MODELING_PREP_KEY", quarterly=True, start_date='2022-05-01')
+        toolkit = Toolkit(
+            ["NEE", "DUK", "SO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        balance_sheet_statements = toolkit.get_balance_sheet_statement()
-
-        balance_sheet_statements.loc['MU']
+        toolkit.get_balance_sheet_statement(show_columns=["Total Debt"])
         ```
 
         Which returns:
 
-        |                                          |      2022Q2 |      2022Q3 |      2022Q4 |      2023Q1 |      2023Q2 |
-        |:-----------------------------------------|------------:|------------:|------------:|------------:|------------:|
-        | Cash and Cash Equivalents                |  9.157e+09  |  8.262e+09  |  9.574e+09  |  9.798e+09  |  9.298e+09  |
-        | Short Term Investments                   |  1.07e+09   |  1.069e+09  |  1.007e+09  |  1.02e+09   |  1.054e+09  |
-        | Cash and Short Term Investments          |  1.0227e+10 |  9.331e+09  |  1.0581e+10 |  1.0818e+10 |  1.0352e+10 |
-        | Accounts Receivable                      |  6.229e+09  |  5.13e+09   |  3.318e+09  |  2.278e+09  |  2.429e+09  |
-        | Inventory                                |  5.629e+09  |  6.663e+09  |  8.359e+09  |  8.129e+09  |  8.238e+09  |
-        | Other Current Assets                     |  6.08e+08   |  6.44e+08   |  6.63e+08   |  6.73e+08   |  7.15e+08   |
-        | Total Current Assets                     |  2.2708e+10 |  2.1781e+10 |  2.2921e+10 |  2.1898e+10 |  2.1734e+10 |
-        | Property, Plant and Equipment            |  3.7355e+10 |  3.9227e+10 |  4.0028e+10 |  3.9758e+10 |  3.9382e+10 |
-        | Goodwill                                 |  1.228e+09  |  1.228e+09  |  1.228e+09  |  1.228e+09  |  1.252e+09  |
-        | Intangible Assets                        |  4.15e+08   |  4.21e+08   |  4.28e+08   |  4.1e+08    |  4.1e+08    |
-        | Long Term Investments                    |  1.646e+09  |  1.647e+09  |  1.426e+09  |  1.212e+09  |  9.73e+08   |
-        | Tax Assets                               |  6.82e+08   |  7.02e+08   |  6.72e+08   |  6.97e+08   |  7.08e+08   |
-        | Other Fixed Assets                       |  1.262e+09  |  1.277e+09  |  1.171e+09  |  1.317e+09  |  1.221e+09  |
-        | Fixed Assets                             |  4.2588e+10 |  4.4502e+10 |  4.4953e+10 |  4.4622e+10 |  4.3946e+10 |
-        | Other Assets                             |  0          |  0          |  0          |  0          |  0          |
-        | Total Assets                             |  6.5296e+10 |  6.6283e+10 |  6.7874e+10 |  6.652e+10  |  6.568e+10  |
-        | Accounts Payable                         |  2.019e+09  |  2.142e+09  |  1.789e+09  |  1.689e+09  |  1.64e+09   |
-        | Short Term Debt                          |  1.07e+08   |  1.03e+08   |  1.71e+08   |  2.37e+08   |  2.59e+08   |
-        | Tax Payables                             |  3.82e+08   |  4.2e+08    |  4.19e+08   |  2.41e+08   |  1.48e+08   |
-        | Deferred Revenue                         |  0          |  0          |  0          |  0          | -1.64e+09   |
-        | Other Current Liabilities                |  4.883e+09  |  5.294e+09  |  4.565e+09  |  3.329e+09  |  4.845e+09  |
-        | Total Current Liabilities                |  7.009e+09  |  7.539e+09  |  6.525e+09  |  5.255e+09  |  5.104e+09  |
-        | Long Term Debt                           |  7.485e+09  |  7.413e+09  |  1.0719e+10 |  1.2647e+10 |  1.3589e+10 |
-        | Deferred Revenue Non Current             |  6.63e+08   |  5.89e+08   |  5.16e+08   |  5.29e+08   |  6.32e+08   |
-        | Deferred Tax Liabilities                 |  0          |  0          |  0          |  0          |  0          |
-        | Other Non Current Liabilities            |  8.58e+08   |  8.35e+08   |  8.08e+08   |  8.32e+08   |  9.5e+08    |
-        | Total Non Current Liabilities            |  9.006e+09  |  8.837e+09  |  1.2043e+10 |  1.4008e+10 |  1.5171e+10 |
-        | Other Liabilities                        |  0          |  0          |  0          |  0          |  0          |
-        | Capital Lease Obligations                |  6.29e+08   |  6.1e+08    |  6.25e+08   |  6.1e+08    |  6.03e+08   |
-        | Total Liabilities                        |  1.6015e+10 |  1.6376e+10 |  1.8568e+10 |  1.9263e+10 |  2.0275e+10 |
-        | Preferred Stock                          |  0          |  0          |  0          |  0          |  0          |
-        | Common Stock                             |  1.22e+08   |  1.23e+08   |  1.23e+08   |  1.23e+08   |  1.24e+08   |
-        | Retained Earnings                        |  4.5916e+10 |  4.7274e+10 |  4.6873e+10 |  4.4426e+10 |  4.2391e+10 |
-        | Accumulated Other Comprehensive Income   | -3.64e+08   | -5.6e+08    | -4.73e+08   | -3.73e+08   | -3.4e+08    |
-        | Other Total Shareholder Equity           |  3.607e+09  |  3.07e+09   |  2.783e+09  |  3.081e+09  |  3.23e+09   |
-        | Total Shareholder Equity                 |  4.9281e+10 |  4.9907e+10 |  4.9306e+10 |  4.7257e+10 |  4.5405e+10 |
-        | Total Equity                             |  4.9281e+10 |  4.9907e+10 |  4.9306e+10 |  4.7257e+10 |  4.5405e+10 |
-        | Total Liabilities and Shareholder Equity |  6.5296e+10 |  6.6283e+10 |  6.7874e+10 |  6.652e+10  |  6.568e+10  |
-        | Minority Interest                        |  0          |  0          |  0          |  0          |  0          |
-        | Total Liabilities and Equity             |  6.5296e+10 |  6.6283e+10 |  6.7874e+10 |  6.652e+10  |  6.568e+10  |
-        | Total Investments                        |  2.716e+09  |  2.716e+09  |  2.433e+09  |  2.232e+09  |  2.027e+09  |
-        | Total Debt                               |  7.592e+09  |  7.516e+09  |  1.089e+10  |  1.2884e+10 |  1.3848e+10 |
-        | Net Debt                                 | -1.565e+09  | -7.46e+08   |  1.316e+09  |  3.086e+09  |  4.55e+09   |
+        |     |       2021 |       2022 |       2023 |       2024 |       2025 |
+        |:----|-----------:|-----------:|-----------:|-----------:|-----------:|
+        | DUK | 6.8263e+10 | 7.4911e+10 | 8.0457e+10 | 8.523e+10  | 9.0869e+10 |
+        | NEE | 5.4827e+10 | 6.4966e+10 | 7.3211e+10 | 8.2333e+10 | 9.5619e+10 |
+        | SO  | 5.547e+10  | 5.9135e+10 | 6.349e+10  | 6.6277e+10 | 7.4075e+10 |
         """
         convert_currency = bool(
             self._convert_currency
@@ -3678,13 +4636,13 @@ class Toolkit:
                 )
 
                 if not self._statement_currencies.empty:
+                    # A balance sheet is a position at the end of the period, so it is converted at
+                    # the closing rate (IAS 21.39): the rate on the last day of the fiscal period.
                     self._balance_sheet_statement = currencies_model.convert_currencies(
                         financial_statement_data=self._balance_sheet_statement,
                         financial_statement_currencies=self._statement_currencies,
-                        exchange_rate_data=(
-                            self._quarterly_exchange_rate_data["Adj Close"]
-                            if self._quarterly
-                            else self._yearly_exchange_rate_data["Adj Close"]
+                        exchange_rate_data=self._get_statement_exchange_rates(
+                            self._balance_sheet_statement, rate="closing"
                         ),
                         financial_statement_name="balance sheet statement",
                     )
@@ -3744,7 +4702,13 @@ class Toolkit:
         a company's net income.
 
         The income statement is a financial statement that shows a company's revenues and expenses over a specific
-        period. Therefore, trailing results are available for this statement.
+        period. Therefore, trailing results are available for this statement. A trailing result sums each
+        item over the window, except the Weighted Average Shares, Weighted Average Shares Diluted and Tax
+        Rate for Calcs rows, which keep the value of the latest period.
+
+        With convert_currency, the statement is converted to the currency of the historical data at the
+        average exchange rate of each period, as IAS 21.39-40 does for income and expenses. EPS and EPS
+        Diluted are converted as well; share counts and ratios are not.
 
         Also known as: profit and loss, revenue, net income, earnings, P&L statement.
 
@@ -3758,7 +4722,7 @@ class Toolkit:
             overwrite (bool): Defines whether to overwrite the existing data.
             rounding (int): Defines the number of decimal places to round the data to.
             growth (bool): Defines whether to return the growth of the data.
-            lag (int | str): Defines the number of periods to lag the growth data by.
+            lag (int | list[int]): Defines the number of periods to lag the growth data by.
             trailing (int): Defines whether to select a trailing period.
             E.g. when selecting 4 with quarterly data, the TTM is calculated.
             show_columns (list[str] | None): A list of column names to keep in the result. Invalid
@@ -3772,45 +4736,22 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["TSLA", "MU"], api_key="FINANCIAL_MODELING_PREP_KEY", quarterly=True, start_date='2022-05-01')
+        toolkit = Toolkit(
+            ["NKE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        income_sheet_statements = toolkit.get_income_statement()
-
-        income_sheet_statements.loc['TSLA']
+        toolkit.get_income_statement(show_columns=["Revenue", "Net Income"])
         ```
 
         Which returns:
 
-        |                                              |     2022Q2 |      2022Q3 |      2022Q4 |      2023Q1 |     2023Q2 |
-        |:---------------------------------------------|-----------:|------------:|------------:|------------:|-----------:|
-        | Revenue                                      | 1.6934e+10 |  2.1454e+10 |  2.4318e+10 |  2.3329e+10 | 2.4927e+10 |
-        | Cost of Goods Sold                           | 1.27e+10   |  1.6072e+10 |  1.8541e+10 |  1.8818e+10 | 2.0394e+10 |
-        | Gross Profit                                 | 4.234e+09  |  5.382e+09  |  5.777e+09  |  4.511e+09  | 4.533e+09  |
-        | Gross Profit Ratio                           | 0.25003    |  0.250862   |  0.237561   |  0.193364   | 0.181851   |
-        | Research and Development Expenses            | 6.67e+08   |  7.33e+08   |  8.1e+08    |  7.71e+08   | 9.43e+08   |
-        | General and Administrative Expenses          | 0          |  0          |  0          |  0          | 0          |
-        | Selling and Marketing Expenses               | 0          |  0          |  0          |  0          | 0          |
-        | Selling, General and Administrative Expenses | 9.61e+08   |  9.61e+08   |  1.032e+09  |  1.076e+09  | 1.191e+09  |
-        | Other Expenses                               | 2.8e+07    | -8.5e+07    | -4.2e+07    | -4.8e+07    | 3.28e+08   |
-        | Operating Expenses                           | 1.628e+09  |  1.694e+09  |  1.842e+09  |  1.847e+09  | 2.134e+09  |
-        | Cost and Expenses                            | 1.4328e+10 |  1.7766e+10 |  2.0383e+10 |  2.0665e+10 | 2.2528e+10 |
-        | Interest Income                              | 2.6e+07    |  8.6e+07    |  1.57e+08   |  2.13e+08   | 2.38e+08   |
-        | Interest Expense                             | 4.4e+07    |  5.3e+07    |  3.3e+07    |  2.9e+07    | 2.8e+07    |
-        | Depreciation and Amortization                | 1.118e+09  |  9.57e+08   |  1.138e+09  |  1.211e+09  | 1.72e+09   |
-        | EBITDA                                       | 3.582e+09  |  4.645e+09  |  5.039e+09  |  3.875e+09  | 4.119e+09  |
-        | EBITDA Ratio                                 | 0.211527   |  0.21651    |  0.207213   |  0.166102   | 0.165243   |
-        | Operating Income                             | 2.464e+09  |  3.688e+09  |  3.901e+09  |  2.664e+09  | 2.399e+09  |
-        | Operating Income Ratio                       | 0.145506   |  0.171903   |  0.160416   |  0.114193   | 0.096241   |
-        | Total Other Income                           | 1e+07      | -5.2e+07    |  8.2e+07    |  1.36e+08   | 5.38e+08   |
-        | Income Before Tax                            | 2.474e+09  |  3.636e+09  |  3.983e+09  |  2.8e+09    | 2.937e+09  |
-        | Income Before Tax Ratio                      | 0.146097   |  0.169479   |  0.163788   |  0.120022   | 0.117824   |
-        | Income Tax Expense                           | 2.05e+08   |  3.05e+08   |  2.76e+08   |  2.61e+08   | 3.23e+08   |
-        | Net Income                                   | 2.259e+09  |  3.292e+09  |  3.687e+09  |  2.513e+09  | 2.703e+09  |
-        | Net Income Ratio                             | 0.1334     |  0.153445   |  0.151616   |  0.10772    | 0.108437   |
-        | EPS                                          | 0.73       |  1.05       |  1.18       |  0.8        | 0.85       |
-        | EPS Diluted                                  | 0.65       |  0.95       |  1.07       |  0.73       | 0.78       |
-        | Weighted Average Shares                      | 3.111e+09  |  3.146e+09  |  3.16e+09   |  3.166e+09  | 3.171e+09  |
-        | Weighted Average Shares Diluted              | 3.465e+09  |  3.468e+09  |  3.471e+09  |  3.468e+09  | 3.478e+09  |
+        |            |      2021 |       2022 |       2023 |       2024 |       2025 |
+        |:-----------|----------:|-----------:|-----------:|-----------:|-----------:|
+        | Revenue    | 4.671e+10 | 5.1217e+10 | 5.1362e+10 | 4.6309e+10 | 4.6398e+10 |
+        | Net Income | 6.046e+09 | 5.07e+09   | 5.7e+09    | 3.219e+09  | 3.108e+09  |
         """
         convert_currency = bool(
             self._convert_currency and (self._income_statement.empty or overwrite)
@@ -3878,10 +4819,9 @@ class Toolkit:
                     self._income_statement = currencies_model.convert_currencies(
                         financial_statement_data=self._income_statement,
                         financial_statement_currencies=self._statement_currencies,
-                        exchange_rate_data=(
-                            self._quarterly_exchange_rate_data["Adj Close"]
-                            if self._quarterly
-                            else self._yearly_exchange_rate_data["Adj Close"]
+                        # Income and expenses at the average rate of the fiscal period (IAS 21.39-40), EPS included.  # noqa: E501
+                        exchange_rate_data=self._get_statement_exchange_rates(
+                            self._income_statement, rate="average"
                         ),
                         items_not_to_adjust=[
                             "Gross Profit Ratio",
@@ -3889,8 +4829,7 @@ class Toolkit:
                             "Operating Income Ratio",
                             "Income Before Tax Ratio",
                             "Net Income Ratio",
-                            "EPS",
-                            "EPS Diluted",
+                            "Tax Rate for Calcs",
                             "Weighted Average Shares",
                             "Weighted Average Shares Diluted",
                         ],
@@ -3907,18 +4846,22 @@ class Toolkit:
         income_statement = self._income_statement
 
         if trailing:
-            # The trailing period does not apply to the Weighted Average Shares rows.
-            weighted_average_shares = income_statement.loc[
-                :, ["Weighted Average Shares", "Weighted Average Shares Diluted"], :
+            # Share counts and the tax rate are no amounts earned over the period, so a sum over
+            # the window means nothing for them: they are kept at the value of the latest period.
+            not_summed = income_statement.loc[
+                income_statement.index.get_level_values(1).isin(
+                    [
+                        "Weighted Average Shares",
+                        "Weighted Average Shares Diluted",
+                        "Tax Rate for Calcs",
+                    ]
+                )
             ]
 
             # The rolling window is calculated for the rest of the income statement.
             income_statement = self._income_statement.T.rolling(trailing).sum().T
 
-            # Weighted Average Shares are kept at the current value rather than summed.
-            income_statement.loc[weighted_average_shares.index] = (
-                weighted_average_shares
-            )
+            income_statement.loc[not_summed.index] = not_summed
 
         if growth:
             self._income_statement_growth = calculate_growth(
@@ -3961,7 +4904,16 @@ class Toolkit:
         It breaks the analysis down to operating, investing and financing activities.
 
         The cash flow statement is a financial statement that shows how changes in balance sheet accounts and income
-        affect cash and cash equivalents. Therefore, trailing results are available for this statement.
+        affect cash and cash equivalents. Therefore, trailing results are available for this statement. A
+        trailing result sums each cash flow over the window, while Cash Beginning of Period is the cash at
+        the beginning of the first period of the window and Cash End of Period the cash at the end of the
+        last one.
+
+        With convert_currency, the cash flows are converted to the currency of the historical data at the
+        average exchange rate of each period (IAS 7.25), Cash End of Period at the closing rate of the
+        period and Cash Beginning of Period at the closing rate of the period before, so it equals the
+        Cash End of Period before it. Net Change in Cash is the change in the converted cash and Forex
+        Changes on Cash holds the effect of the exchange rate changes on the cash held (IAS 7.28).
 
         Also known as: operating cash flow, investing activities, financing activities.
 
@@ -3975,7 +4927,7 @@ class Toolkit:
             overwrite (bool): Defines whether to overwrite the existing data.
             rounding (int): Defines the number of decimal places to round the data to.
             growth (bool): Defines whether to return the growth of the data.
-            lag (int | str): Defines the number of periods to lag the growth data by.
+            lag (int | list[int]): Defines the number of periods to lag the growth data by.
             trailing (int): Defines whether to select a trailing period.
             E.g. when selecting 4 with quarterly data, the TTM is calculated.
             show_columns (list[str] | None): A list of column names to keep in the result. Invalid
@@ -3989,47 +4941,26 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["MU", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY", quarterly=True, start_date='2022-09-01')
+        toolkit = Toolkit(
+            ["CVX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        cash_flow_statements = toolkit.get_cash_flow_statement()
-
-        cash_flow_statements.loc['AMZN']
+        toolkit.get_cash_flow_statement(
+            show_columns=["Operating Cash Flow", "Capital Expenditure", "Free Cash Flow", "Dividends Paid"]
+        )
         ```
 
         Which returns:
 
-        |                               |      2022Q3 |      2022Q4 |      2023Q1 |      2023Q2 |
-        |:------------------------------|------------:|------------:|------------:|------------:|
-        | Net Income                    |  2.872e+09  |  2.78e+08   |  3.172e+09  |  6.75e+09   |
-        | Depreciation and Amortization |  1.0204e+10 |  1.2685e+10 |  1.1123e+10 |  1.1589e+10 |
-        | Deferred Income Tax           | -8.25e+08   | -3.367e+09  | -4.72e+08   | -2.744e+09  |
-        | Stock Based Compensation      |  5.556e+09  |  5.606e+09  |  4.748e+09  |  7.127e+09  |
-        | Change in Working Capital     | -5.254e+09  |  1.0526e+10 | -1.4317e+10 | -6.293e+09  |
-        | Accounts Receivables          | -4.794e+09  | -8.788e+09  |  1.521e+09  | -5.167e+09  |
-        | Inventory                     |  7.32e+08   |  3.18e+09   |  3.71e+08   | -2.373e+09  |
-        | Accounts Payables             | -1.226e+09  |  9.852e+09  | -1.1264e+10 |  3.029e+09  |
-        | Other Working Capital         |  3.4e+07    |  6.282e+09  | -4.945e+09  | -1.782e+09  |
-        | Other Non Cash Items          | -1.149e+09  |  3.445e+09  |  5.34e+08   |  4.7e+07    |
-        | Cash Flow from Operations     |  1.1404e+10 |  2.9173e+10 |  4.788e+09  |  1.6476e+10 |
-        | Property, Plant and Equipment | -1.6378e+10 | -1.6592e+10 | -1.4207e+10 | -1.1455e+10 |
-        | Acquisitions                  | -8.85e+08   | -8.31e+08   | -3.513e+09  | -3.16e+08   |
-        | Purchases of Investments      | -2.39e+08   | -2.33e+08   | -3.38e+08   | -4.96e+08   |
-        | Sales of Investments          |  5.57e+08   |  5.683e+09  |  1.115e+09  |  1.551e+09  |
-        | Other Investing Activities    |  1.337e+09  |  1.152e+09  |  1.137e+09  |  1.043e+09  |
-        | Cash Flow from Investing      | -1.5608e+10 | -1.0821e+10 | -1.5806e+10 | -9.673e+09  |
-        | Debt Repayment                | -9.429e+09  | -1.8756e+10 | -6.369e+09  | -1.0861e+10 |
-        | Common Stock Issued           |  0          |  0          |  0          |  0          |
-        | Common Stock Purchased        |  0          |  6e+09      |  0          |  0          |
-        | Dividends Paid                |  0          |  0          |  0          |  0          |
-        | Other Financing Activities    |  1.2445e+10 |  1.2842e+10 |  1.2723e+10 |  4.322e+09  |
-        | Cash Flow from Financing      |  3.016e+09  |  8.6e+07    |  6.354e+09  | -6.539e+09  |
-        | Forex Changes on Cash         | -1.334e+09  |  6.37e+08   |  1.45e+08   |  6.9e+07    |
-        | Net Change in Cash            | -2.522e+09  |  1.9075e+10 | -4.519e+09  |  3.33e+08   |
-        | Cash End of Period            |  3.5178e+10 |  5.4253e+10 |  4.9734e+10 |  5.0067e+10 |
-        | Cash Beginning of Period      |  3.77e+10   |  3.5178e+10 |  5.4253e+10 |  4.9734e+10 |
-        | Operating Cash Flow           |  1.1404e+10 |  2.9173e+10 |  4.788e+09  |  1.6476e+10 |
-        | Capital Expenditure           | -1.6378e+10 | -1.6592e+10 | -1.4207e+10 | -1.1455e+10 |
-        | Free Cash Flow                | -4.974e+09  |  1.2581e+10 | -9.419e+09  |  5.021e+09  |
+        |                     |        2021 |        2022 |        2023 |        2024 |        2025 |
+        |:--------------------|------------:|------------:|------------:|------------:|------------:|
+        | Operating Cash Flow |  2.9187e+10 |  4.9602e+10 |  3.5609e+10 |  3.1492e+10 |  3.3939e+10 |
+        | Capital Expenditure | -8.1e+09    | -1.1974e+10 | -1.5829e+10 | -1.6448e+10 | -1.7347e+10 |
+        | Free Cash Flow      |  2.1087e+10 |  3.7628e+10 |  1.978e+10  |  1.5044e+10 |  1.6592e+10 |
+        | Dividends Paid      | -1.0179e+10 | -1.0968e+10 | -1.1336e+10 | -1.18e+10   | -1.2751e+10 |
         """
         convert_currency = bool(
             self._convert_currency and (self._cash_flow_statement.empty or overwrite)
@@ -4095,15 +5026,28 @@ class Toolkit:
                 )
 
                 if not self._statement_currencies.empty:
+                    # Cash flows at the average rate of the fiscal period (IAS 7.25), the cash held
+                    # at the closing rates: the cash at the end at the rate on the period end, the
+                    # cash at the beginning at the rate on the previous period end, so Cash
+                    # Beginning of Period equals the Cash End of Period of the period before it.
+                    # The difference is reported in Forex Changes on Cash (IAS 7.28). The first
+                    # period's opening rate lies before the exchange rate data when the data starts
+                    # at that period, which leaves its Cash Beginning of Period NaN.
                     self._cash_flow_statement = currencies_model.convert_currencies(
                         financial_statement_data=self._cash_flow_statement,
                         financial_statement_currencies=self._statement_currencies,
-                        exchange_rate_data=(
-                            self._quarterly_exchange_rate_data["Adj Close"]
-                            if self._quarterly
-                            else self._yearly_exchange_rate_data["Adj Close"]
+                        exchange_rate_data=self._get_statement_exchange_rates(
+                            self._cash_flow_statement, rate="average"
                         ),
                         financial_statement_name="cash flow statement",
+                        item_exchange_rate_data={
+                            "Cash End of Period": self._get_statement_exchange_rates(
+                                self._cash_flow_statement, rate="closing"
+                            ),
+                            "Cash Beginning of Period": self._get_statement_exchange_rates(
+                                self._cash_flow_statement, rate="opening"
+                            ),
+                        },
                     )
 
         if self._remove_invalid_tickers:
@@ -4117,6 +5061,20 @@ class Toolkit:
 
         if trailing:
             cash_flow_statement = self._cash_flow_statement.T.rolling(trailing).sum().T
+
+            # Cash held is a balance, not a flow: the window starts with the cash at the
+            # beginning of its first period and ends with the cash at the end of its last one.
+            items = cash_flow_statement.index.get_level_values(1)
+            cash_end = items == "Cash End of Period"
+            cash_beginning = items == "Cash Beginning of Period"
+            cash_flow_statement.loc[cash_end] = self._cash_flow_statement.loc[
+                cash_end
+            ].where(cash_flow_statement.loc[cash_end].notna())
+            cash_flow_statement.loc[cash_beginning] = (
+                self._cash_flow_statement.loc[cash_beginning]
+                .shift(trailing - 1, axis=1)
+                .where(cash_flow_statement.loc[cash_beginning].notna())
+            )
 
         if growth:
             self._cash_flow_statement_growth = calculate_growth(
@@ -4153,12 +5111,15 @@ class Toolkit:
         show_columns: list[str] | None = None,
     ):
         """
-        Retrieves the balance, cash and income statistics for the company(s) from the specified source.
+        Retrieves the filing details of each financial statement period: the reported currency, the CIK,
+        the filing and acceptance dates, the fiscal period and the links to the filing. With convert_currency,
+        the Toolkit uses the reported currency to convert the financial statements to the currency of the
+        historical data.
 
         Note that this also obtains the balance sheet statement at the same time given that it's the same
         API call. This is done to reduce the number of API calls to FinancialModelingPrep.
 
-        Also known as: key stats, shares outstanding, float data.
+        Also known as: filing details, reporting metadata, reported currency.
 
         Args:
             enforce_source (str | None, optional): Forces this specific call to use a given
@@ -4180,24 +5141,26 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit("TSLA", api_key="FINANCIAL_MODELING_PREP_KEY", quarterly=True, start_date='2023-05-01')
+        toolkit = Toolkit(
+            ["KO", "PEP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.get_statistics_statement()
+        toolkit.get_statistics_statement(show_columns=["Accepted Date"]).T
         ```
 
         Which returns:
 
-        |                   | 2023Q2                                                                                            |
-        |:------------------|:--------------------------------------------------------------------------------------------------|
-        | Reported Currency | USD                                                                                               |
-        | CIK ID            | 1318605                                                                                           |
-        | Filling Date      | 2023-07-24                                                                                        |
-        | Accepted Date     | 2023-07-21 18:08:29                                                                               |
-        | Calendar Year     | 2023                                                                                              |
-        | Period            | Q2                                                                                                |
-        | SEC Link          | https://www.sec.gov/Archives/edgar/data/1318605/000095017023033872/0000950170-23-033872-index.htm |
-        | Document Link     | https://www.sec.gov/Archives/edgar/data/1318605/000095017023033872/tsla-20230630.htm              |
-
+        | date   | KO                  | PEP                 |
+        |:-------|:--------------------|:--------------------|
+        | 2020   | 2021-02-25 13:47:17 | 2021-02-10 17:41:49 |
+        | 2021   | 2022-02-22 15:45:48 | 2022-02-09 18:03:39 |
+        | 2022   | 2023-02-21 16:03:20 | 2023-02-08 18:06:37 |
+        | 2023   | 2024-02-20 13:21:24 | 2024-02-08 17:58:51 |
+        | 2024   | 2025-02-20 15:17:12 | 2025-02-03 18:22:47 |
+        | 2025   | 2026-02-20 09:46:32 | 2026-02-02 18:07:04 |
         """
         if not self._api_key and self._statistics_statement.empty:
             logger.error(
@@ -4268,20 +5231,290 @@ class Toolkit:
         Copies the normalization files to a folder based on path. By default, this is the path
         of the 'Downloads' folder.
 
-        This function is relevant if you want to supply your own datasets. See for a proper
-        guide the following
-        notebook: https://www.jeroenbouma.com/projects/financetoolkit/external-datasets
+        This function is relevant if you want to supply your own datasets. See the external
+        datasets guide for how: https://www.jeroenbouma.com/projects/financetoolkit/docs/external-datasets
+
+        The same function is available without a Toolkit instance as
+        `from financetoolkit import get_normalization_files`.
 
         Args:
-            path (str, optional): The path where to save the files to.
+            path (str, optional): The folder to save the files to. Defaults to "", which
+                saves them to the 'Downloads' folder of your home directory.
 
         Returns:
-            Three csv files saved to the desired location.
+            None: The four csv files (balance, income, cash and statistics) are saved to
+            the chosen folder.
         """
-        if path:
-            _copy_normalization_files(path)
-        else:
-            _copy_normalization_files()
+        _get_normalization_files(path)
+
+    def _get_module_statement(self, statement: str, module: str) -> pd.DataFrame:
+        """
+        Returns a financial statement for the Ratios or Models module, retrieving it when a
+        calculation first needs it. When the statement cannot be retrieved, the other
+        statements are retrieved as well to tell whether any data is available at all.
+
+        Args:
+            statement (str): "balance_sheet_statement", "income_statement" or
+                "cash_flow_statement".
+            module (str): "Ratios" or "Models", the module the statement is for.
+
+        Returns:
+            pd.DataFrame: The statement, which is empty when only it could not be retrieved.
+
+        Raises:
+            ValueError: When an API key is required but missing, or when none of the
+                statements can be retrieved.
+        """
+        if getattr(self, f"_{statement}").empty:
+            if not self._api_key and module == "Models":
+                raise ValueError(
+                    "The models class requires an API key from FinancialModelPrep. "
+                    "Get an API key here: https://www.jeroenbouma.com/fmp"
+                )
+            if not self._api_key and self._enforce_source == "FinancialModelingPrep":
+                raise ValueError(
+                    "The ratios class requires an API key from FinancialModelPrep if you wish to enforce the usage. "
+                    "of Financial Modeling Prep. Get an API key here: https://www.jeroenbouma.com/fmp"
+                )
+
+            logger.info("Obtaining financial statements")
+            getattr(self, f"get_{statement}")()
+
+        if getattr(self, f"_{statement}").empty:
+            statements = [
+                "balance_sheet_statement",
+                "income_statement",
+                "cash_flow_statement",
+            ]
+            for other in statements:
+                if other != statement and getattr(self, f"_{other}").empty:
+                    getattr(self, f"get_{other}")()
+
+            if all(getattr(self, f"_{other}").empty for other in statements):
+                raise ValueError(
+                    f"The datasets could not be populated and therefore the {module} class cannot "
+                    "calculate this. This is usually because no tickers are equities, you have "
+                    "reached the API limit or entered an invalid API key."
+                )
+
+        return getattr(self, f"_{statement}")
+
+    def _get_statement_tickers(self, module: str) -> list[str]:
+        """
+        Returns the tickers with financial statements, which leaves out those without (such as
+        ETFs). The statements hold the same tickers, so the first one already retrieved names
+        them; otherwise the balance sheet statement is retrieved.
+
+        Args:
+            module (str): "Ratios" or "Models", the module the tickers are for.
+
+        Returns:
+            list[str]: The tickers of the financial statements.
+        """
+        retrieved = [
+            statement
+            for statement in (
+                self._balance_sheet_statement,
+                self._income_statement,
+                self._cash_flow_statement,
+            )
+            if not statement.empty
+        ]
+        statement = (
+            retrieved[0]
+            if retrieved
+            else self._get_module_statement("balance_sheet_statement", module)
+        )
+
+        return statement.index.get_level_values(0).unique().tolist()
+
+    def _get_module_historical_data(self, period: str) -> pd.DataFrame:
+        """
+        Returns the historical data of a period for the modules, retrieved when a calculation
+        first asks for that period. The daily data is downloaded once and the weekly, monthly,
+        quarterly and yearly data is converted from it; the intraday data is only downloaded
+        when the Toolkit has an intraday_period.
+
+        Args:
+            period (str): "intraday", "daily", "weekly", "monthly", "quarterly" or "yearly".
+
+        Returns:
+            pd.DataFrame: The historical data of the period, empty for intraday data without an
+            intraday_period.
+
+        Raises:
+            KeyError: For any other period, as a dictionary of the periods would.
+        """
+        if period == "intraday":
+            if self._intraday_period:
+                self.get_intraday_data(period=self._intraday_period)
+            return self._intraday_historical_data
+
+        if period not in ("daily", "weekly", "monthly", "quarterly", "yearly"):
+            raise KeyError(period)
+
+        self.get_historical_data(period=period)
+
+        return getattr(self, f"_{period}_historical_data")
+
+    def _get_module_risk_free_rate(self, period: str) -> pd.DataFrame:
+        """
+        Returns the risk free rate of a period for the modules, retrieved with the historical
+        data of that period when a calculation first asks for it.
+
+        Args:
+            period (str): "daily", "weekly", "monthly", "quarterly" or "yearly".
+
+        Returns:
+            pd.DataFrame: The risk free rate of the period.
+
+        Raises:
+            KeyError: For any other period, as a dictionary of the periods would.
+        """
+        if period not in ("daily", "weekly", "monthly", "quarterly", "yearly"):
+            raise KeyError(period)
+
+        self.get_historical_data(period=period)
+
+        return getattr(self, f"_{period}_risk_free_rate")
+
+    def _get_historical_tickers(self, include_benchmark: bool) -> list[str]:
+        """
+        Returns the tickers of the daily historical data, retrieving it when needed, followed
+        by the Portfolio when the Toolkit holds one.
+
+        Args:
+            include_benchmark (bool): Whether to keep the Benchmark.
+
+        Returns:
+            list[str]: The tickers of the historical data.
+        """
+        tickers = (
+            self._get_module_historical_data("daily")
+            .columns.get_level_values(1)
+            .unique()
+            .tolist()
+        )
+
+        if not include_benchmark and "Benchmark" in tickers:
+            tickers.remove("Benchmark")
+
+        return tickers + ["Portfolio"] if "Portfolio" in self._tickers else tickers
+
+    def _get_period_end_dates(
+        self, statement: pd.DataFrame | None = None
+    ) -> pd.DataFrame:
+        """
+        Returns the last day of the fiscal period behind every statement column per ticker.
+
+        Statement columns are calendar periods (see "Fiscal periods and calendar periods" on
+        the Toolkit), while the fiscal period they hold ends on its own date, e.g. 30 June for
+        Microsoft's yearly statements and the end of January for NVIDIA's. These dates are
+        what the daily ratios apply the figures from and what the closing and average exchange
+        rates of the statements are taken over. They come from the Period End Date statistic
+        (FinancialModelingPrep) and otherwise from the latest date the period can end on given
+        its label and _fiscal_year_adjustments (see helpers.determine_period_end_dates).
+
+        Args:
+            statement (pd.DataFrame | None, optional): The statement whose periods and tickers
+                to use. Defaults to None, which uses the balance sheet statement.
+
+        Returns:
+            pd.DataFrame: The period end dates with the tickers as index and the periods as
+            columns.
+        """
+        statement = self._balance_sheet_statement if statement is None else statement
+
+        if statement.empty:
+            return pd.DataFrame()
+
+        return determine_period_end_dates(
+            periods=pd.PeriodIndex(statement.columns),
+            tickers=statement.index.get_level_values(0).unique().tolist(),
+            quarter=self._quarterly,
+            statistics_statement=self._statistics_statement,
+            fiscal_year_adjustments=self._fiscal_year_adjustments,
+        )
+
+    def _get_statement_exchange_rates(
+        self, statement: pd.DataFrame, rate: str
+    ) -> pd.DataFrame:
+        """
+        Returns the exchange rate of each statement period per ticker, taken from the
+        unrounded daily exchange rates over the ticker's fiscal periods.
+
+        IAS 21.39-40 translates the balance sheet at the closing rate, the rate on the last
+        day of the fiscal period, and income and expenses at the rates on the dates of the
+        transactions, for which the average rate of the fiscal period is the usual
+        approximation; IAS 7.25 does the same for cash flows. The opening rate, the closing
+        rate of the previous period, translates the cash at the beginning of the period.
+
+        Args:
+            statement (pd.DataFrame): The statement to translate, which sets the periods and
+                tickers.
+            rate (str): "closing", "average" or "opening".
+
+        Returns:
+            pd.DataFrame: The rate per period (index) and ticker (columns).
+        """
+        # Not rounded: a rate such as JPYUSD needs more decimals than the Toolkit's rounding.
+        return currencies_model.get_statement_exchange_rates(
+            daily_exchange_rates=self._daily_exchange_rate_data["Adj Close"],
+            period_end_dates=self._get_period_end_dates(statement),
+            statement_currencies=self._statement_currencies,
+            quarter=self._quarterly,
+            rate=rate,
+        )
+
+    def _average_risk_free_rate(
+        self,
+        period: str,
+        treasury_data: pd.DataFrame,
+        risk_free_rate: str,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Builds the risk free rate of each week, month, quarter or year from the average of
+        the daily Treasury yields within it.
+
+        The yield is kept annualized (the Performance, Risk and Models modules convert it to
+        the period frequency), but the yield of a period is the average of its daily yields
+        rather than the yield on its last day. The converted rate then approximates the
+        return a holder of the Treasury earned over the period, and does not depend on where
+        the yield happened to close at the end of the period, which a return measured over
+        that period could not have known at its start either. The Return, Cumulative Return
+        and Volume columns are kept from the period treasury data.
+
+        Args:
+            period (str): The period (weekly, monthly, quarterly or yearly).
+            treasury_data (pd.DataFrame): The treasury data converted to the period, with the
+                metric as the first column level and the maturity as the second.
+            risk_free_rate (str): The maturity used as the risk free rate, e.g. "10 Year".
+            rounding (int | None, optional): The number of decimals to round to, or None to
+                use the Toolkit's rounding. Defaults to None.
+
+        Returns:
+            pd.DataFrame: The risk free rate per period, with the metric as the columns.
+        """
+        period_rate = treasury_data.xs(risk_free_rate, level=1, axis=1).copy()
+        yield_columns = [
+            column
+            for column in ["Open", "High", "Low", "Close", "Adj Close"]
+            if column in period_rate.columns
+        ]
+
+        average_yield = _calculate_period_average(
+            period=period,
+            daily_data=self._daily_treasury_data.xs(risk_free_rate, level=1, axis=1),
+            columns=yield_columns,
+            rounding=rounding if rounding is not None else self._rounding,
+        )
+
+        period_rate[yield_columns] = average_yield.reindex(period_rate.index)[
+            yield_columns
+        ]
+
+        return period_rate
 
     def _align_treasury_data_to_trading_days(
         self, treasury_data: pd.DataFrame
@@ -4378,8 +5611,8 @@ class Toolkit:
         rather than all of it. This method is the counterpart to clear_cache: it
         shows what is there so that removing something is an informed decision.
 
-        The cache is inspected regardless of whether this Toolkit was created with
-        use_cached_data enabled, so a cache filled by an earlier session can always
+        The cache is inspected even when this Toolkit was created with
+        use_cached_data=False, so a cache filled by an earlier session can always
         be reviewed.
 
         Returns:
@@ -4392,7 +5625,12 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY", use_cached_data=True)
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.get_historical_data()
 
@@ -4401,9 +5639,13 @@ class Toolkit:
 
         Which returns:
 
-        | source   | dataset    |   entities |   entries | oldest_write        | newest_write        |
-        |:---------|:-----------|-----------:|----------:|:--------------------|:--------------------|
-        | market   | historical |          3 |         3 | 2026-08-06 14:02:11 | 2026-08-06 14:02:12 |
+        |    | source                | dataset                             |   entities |   entries | oldest_write        | newest_write        |
+        |---:|:----------------------|:------------------------------------|-----------:|----------:|:--------------------|:--------------------|
+        | 25 | FinancialModelingPrep | earnings_calendar                   |          4 |         4 | 2026-10-24 18:40:06 | 2026-10-24 18:40:06 |
+        | 26 | FinancialModelingPrep | earnings_call_transcripts           |          2 |         2 | 2026-10-24 18:41:46 | 2026-10-24 18:41:46 |
+        | 27 | FinancialModelingPrep | earnings_call_transcripts_selection |          2 |         2 | 2026-10-24 18:41:46 | 2026-10-24 18:41:46 |
+        | 28 | FinancialModelingPrep | employee_count                      |          2 |         2 | 2026-10-24 18:41:06 | 2026-10-24 18:41:06 |
+        | 29 | FinancialModelingPrep | esg_scores                          |          3 |         3 | 2026-10-24 18:40:40 | 2026-10-24 18:40:40 |
         """
         contents = cache_controller.get_cache(
             location=self._cache_location, enabled=True
@@ -4475,13 +5717,13 @@ class Toolkit:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY", use_cached_data=True)
+        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
 
         # Remove only the price history of a single ticker
         toolkit.clear_cache(source="YahooFinance", ticker="AAPL")
 
         # Remove everything retrieved from the OECD
-        toolkit.clear_cache(source=policy_model.OECD)
+        toolkit.clear_cache(source="OECD")
 
         # Remove the entire cache
         toolkit.clear_cache(confirm=True)

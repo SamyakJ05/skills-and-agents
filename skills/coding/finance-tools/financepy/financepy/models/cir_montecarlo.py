@@ -4,7 +4,7 @@ import numpy as np
 from numba import njit, float64, int64
 
 from ..utils.helpers import label_to_string
-from ..utils.global_types import CIRNumericalSchemeTypes
+from ..models.process_simulator import CIRNumericalSchemeTypes
 
 
 class CIRMonteCarlo:
@@ -102,21 +102,20 @@ def zero_price(r0: float, a: float, b: float, sigma: float, t: float) -> float:
     if t == 0.0:
         return 1.0
 
-    if sigma == 0.0:
-        integral_mean = b * t + (r0 - b) * (1.0 - np.exp(-a * t)) / a
-        return np.exp(-integral_mean)
+    # Factor the affine coefficients before evaluation. This avoids both the
+    # large 1/sigma**2 power and exp(h*t), and remains continuous at sigma=0.
+    h = np.hypot(a, np.sqrt(2.0) * sigma)
+    u = -np.expm1(-h * t)
+    x = (sigma / h) * (sigma / (h + a)) * u
 
-    sigma2 = sigma * sigma
-    h = np.sqrt(a * a + 2.0 * sigma2)
-    exp_ht = np.exp(h * t)
+    if x == 0.0:
+        log_ratio = 1.0
+    else:
+        log_ratio = -np.log1p(-x) / x
 
-    denom = 2.0 * h + (a + h) * (exp_ht - 1.0)
-
-    aa = (2.0 * h * np.exp((a + h) * t / 2.0) / denom) ** (2.0 * a * b / sigma2)
-
-    bb = 2.0 * (exp_ht - 1.0) / denom
-
-    return aa * np.exp(-r0 * bb)
+    bb = (u / h) / (1.0 - x)
+    log_aa = (2.0 * a * b / (h + a)) * ((u / h) * log_ratio - t)
+    return np.exp(log_aa - r0 * bb)
 
 
 @njit(
@@ -182,6 +181,16 @@ def rate_path_mc(
     rate_path = np.empty(num_steps + 1)
     rate_path[0] = r0
 
+    if sigma == 0.0:
+        decay = np.exp(-a * dt_eff)
+        r = r0
+
+        for i_step in range(1, num_steps + 1):
+            r = b + (r - b) * decay
+            rate_path[i_step] = r
+
+        return rate_path
+
     if num_steps == 0:
         return rate_path
 
@@ -192,7 +201,9 @@ def rate_path_mc(
 
         for i_step in range(1, num_steps + 1):
             z = np.random.normal()
-            r = r + a * (b - r) * dt_eff + z * sigmasqrt_dt * np.sqrt(max(r, 0.0))
+            r_pos = max(r, 0.0)
+            r = r + a * (b - r_pos) * dt_eff + sigma * np.sqrt(r_pos * dt_eff) * z
+            r = max(r, 0.0)
             rate_path[i_step] = r
 
     elif scheme == CIRNumericalSchemeTypes.LOGNORMAL.value:
@@ -206,7 +217,7 @@ def rate_path_mc(
             var = sigma * sigma * y * (x * r + 0.5 * b * y) / a
 
             if sigma == 0.0 or var <= 0.0:
-                r = mean
+                r = max(mean, 0.0)
             else:
                 sig = np.sqrt(np.log(1.0 + var / (mean * mean)))
                 z = np.random.normal()
@@ -259,6 +270,8 @@ def rate_path_mc(
         raise ValueError("Unknown CIR numerical scheme.")
 
     return rate_path
+
+#####################################################################################
 
 
 @njit(

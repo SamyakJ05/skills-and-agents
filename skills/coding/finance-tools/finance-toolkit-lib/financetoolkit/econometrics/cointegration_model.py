@@ -9,6 +9,8 @@ import pandas as pd
 from statsmodels.tsa.stattools import coint
 from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
+from financetoolkit.econometrics.unitroot_model import default_max_lag
+
 JOHANSEN_MINIMUM_NUMBER_OF_SERIES = 2
 
 # The conventional 5% significance level used for the "Cointegrated (5%)" flag.
@@ -52,7 +54,8 @@ def get_engle_granger_cointegration(
         series_a (pd.Series): The dependent series.
         series_b (pd.Series): The independent series.
         max_lag (int, optional): The maximum number of lagged differences to consider in the
-        underlying ADF test on the residuals. Defaults to `statsmodels`' automatic selection.
+        underlying ADF test on the residuals. Defaults to the Schwert (1989) rule of thumb,
+        capped at (n - 5) // 3 for short samples.
 
     Returns:
         pd.Series: The Engle-Granger statistic, its p-value, the 1%/5%/10% critical values,
@@ -64,7 +67,11 @@ def get_engle_granger_cointegration(
 
     try:
         eg_statistic, p_value, critical_values = coint(
-            dependent, independent, trend="c", maxlag=max_lag, autolag="aic"
+            dependent,
+            independent,
+            trend="c",
+            maxlag=max_lag if max_lag is not None else default_max_lag(len(dependent)),
+            autolag="aic",
         )
     except (ValueError, np.linalg.LinAlgError):
         return pd.Series(
@@ -127,18 +134,21 @@ def get_johansen_cointegration(
     Economic Dynamics and Control, 12(2-3), 231-254.
     - Johansen, S. (1991). "Estimation and Hypothesis Testing of Cointegration Vectors
     in Gaussian Vector Autoregressive Models." Econometrica, 59(6), 1551-1580.
+    - MacKinnon, J.G., Haug, A.A., & Michelis, L. (1999). "Numerical Distribution
+    Functions of Likelihood Ratio Tests for Cointegration." Journal of Applied
+    Econometrics, 14(5), 563-577.
 
     Also known as: Johansen test, Johansen procedure, VECM rank test.
 
     Args:
         data (pd.DataFrame): A DataFrame with one column per series (e.g. price levels of
         several assets), at least 2 columns.
-        det_order (int, optional): Which deterministic term to include: -1 (none), 0 (a
-        constant, restricted to lie in the cointegrating relation -- no separate linear
-        trend) or 1 (a linear trend restricted to the cointegrating relation, alongside
-        an unrestricted constant in the short-run dynamics). These are Johansen's cases
-        1, 2 and 4 respectively, matching the critical-value tables `statsmodels`
-        returns. Defaults to 0.
+        det_order (int, optional): Which deterministic term to include: -1 (none,
+        Johansen's case 1), 0 (an unrestricted constant, case 3: the levels may drift
+        and the cointegrating relations have a nonzero mean) or 1 (a linear trend: the
+        levels are linearly detrended before the test, evaluated against the case 5
+        critical values of an unrestricted trend). The critical values are those of
+        MacKinnon, Haug & Michelis (1999) that `statsmodels` returns. Defaults to 0.
         k_ar_diff (int, optional): The number of lagged first differences to include as
         short-run dynamics (equivalent to fitting a levels-VAR of order `k_ar_diff + 1`).
         Defaults to 1.

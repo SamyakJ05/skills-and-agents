@@ -25,19 +25,30 @@ from ...utils.error import FinError
 from ...utils.helpers import check_argument_types
 from ...utils.date import Date
 
-from ...utils.global_types import LMMModelTypes
 from ...models.lmm_mc import lmm_simulate_fwds_1f
 from ...models.lmm_mc import lmm_simulate_fwds_mf
 from ...models.lmm_mc import lmm_simulate_fwds_nf
 from ...models.lmm_mc import lmm_cap_flr_pricer
 
 from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 
 from ...utils.global_types import SwapTypes
 from ...utils.global_types import CapFloorTypes
 
+from ...market.curves.discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
+
 from financepy.market.volatility.ibor_cap_vol_curve import IborCapVolCurve
+
+from enum import Enum
+
+
+class LMMModelTypes(Enum):
+
+    ONE_FACTOR = 1
+    HW_M_FACTOR = 2
+    FULL_N_FACTOR = 3
 
 ########################################################################################
 
@@ -54,7 +65,7 @@ class IborLMMProducts:
         cal_type: CalendarTypes = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
         """Create a European-style swaption by defining the exercise date of
         the swaption, and all of the details of the underlying interest rate
         swap including the fixed cpn and the details of the fixed and the
@@ -70,9 +81,7 @@ class IborLMMProducts:
         be priced. """
 
         self.start_dt = settle_dt
-        self.grid_dts = Schedule(
-            settle_dt, maturity_dt, float_freq_type, cal_type, bd_type, dg_type
-        ).generate()
+        self.grid_dts = Schedule(settle_dt, maturity_dt, float_freq_type, cal_type, bd_type, dg_type).generate()
 
         self.accrual_factors = []
         self.float_dc_type = float_dc_type
@@ -107,7 +116,7 @@ class IborLMMProducts:
 
     def simulate_1f(
         self,
-        discount_curve,
+        discount_curve: DiscountCurve,
         vol_curve: IborCapVolCurve,
         num_paths: int = 1000,
         numeraire_index: int = 0,
@@ -120,7 +129,7 @@ class IborLMMProducts:
         if num_paths < 2 or num_paths > 1000000:
             raise FinError("NumPaths must be between 2 and 1 million")
 
-        if discount_curve.value_dt != self.start_dt:
+        if discount_curve.anchor_dt != self.start_dt:
             raise FinError("Curve anchor date not the same as LMM start date.")
 
         self.num_paths = num_paths
@@ -135,9 +144,7 @@ class IborLMMProducts:
         for i in range(1, num_grid_points):
             start_dt = self.grid_dts[i - 1]
             end_dt = self.grid_dts[i]
-            fwd_rate = discount_curve.fwd_rate(
-                start_dt, end_dt, self.float_dc_type
-            )
+            fwd_rate = discount_curve.fwd_rate(start_dt, end_dt, self.float_dc_type)
             self.fwd_curve.append(fwd_rate)
 
         self.fwd_curve = np.array(self.fwd_curve)
@@ -162,7 +169,7 @@ class IborLMMProducts:
 
     def simulate_mf(
         self,
-        discount_curve,
+        discount_curve: DiscountCurve,
         num_factors: int,
         lambdas: np.ndarray,
         num_paths: int = 10000,
@@ -181,8 +188,7 @@ class IborLMMProducts:
         if num_paths < 2 or num_paths > 1000000:
             raise FinError("NumPaths must be between 2 and 1 million")
 
-        if discount_curve.curve_dt != self.start_dt:
-            raise FinError("Curve anchor date not the same as LMM start date.")
+        check_curve_dt(self.start_dt, discount_curve)
 
         print("LEN LAMBDAS", len(lambdas))
         print("LEN", len(lambdas[0]))
@@ -204,9 +210,7 @@ class IborLMMProducts:
         for i in range(1, self.num_fwds):
             start_dt = self.grid_dts[i - 1]
             end_dt = self.grid_dts[i]
-            fwd_rate = discount_curve.fwd_rate(
-                start_dt, end_dt, self.float_dc_type
-            )
+            fwd_rate = discount_curve.fwd_rate(start_dt, end_dt, self.float_dc_type)
             self.fwd_curve.append(fwd_rate)
 
         self.fwd_curve = np.array(self.fwd_curve)
@@ -227,7 +231,7 @@ class IborLMMProducts:
 
     def simulate_nf(
         self,
-        discount_curve,
+        discount_curve: DiscountCurve,
         vol_curve: IborCapVolCurve,
         corr_matrix: np.ndarray,
         model_type: LMMModelTypes,
@@ -248,8 +252,8 @@ class IborLMMProducts:
         if isinstance(model_type, LMMModelTypes) is False:
             raise FinError("Model type must be type FinRateModelLMMModelTypes")
 
-        if discount_curve.curve_dt != self.start_dt:
-            raise FinError("Curve anchor date not the same as LMM start date.")
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, index_curve)
 
         self.num_paths = num_paths
         self.vol_curves = vol_curve
@@ -266,9 +270,7 @@ class IborLMMProducts:
         for i in range(1, num_grid_points):
             start_dt = self.grid_dts[i - 1]
             end_dt = self.grid_dts[i]
-            fwd_rate = discount_curve.forward_rate(
-                start_dt, end_dt, self.float_dc_type
-            )
+            fwd_rate = discount_curve.forward_rate(start_dt, end_dt, self.float_dc_type)
             self.fwd_curve.append(fwd_rate)
 
         self.fwd_curve = np.array(self.fwd_curve)
@@ -320,9 +322,7 @@ class IborLMMProducts:
         # generated, the speed of pricing is not affected so this is not
         # strictly an urgent issue.
 
-        swaption_float_dts = Schedule(
-            settle_dt, maturity_dt, float_freq_type, cal_type, bd_type, dg_type
-        ).generate()
+        swaption_float_dts = Schedule(settle_dt, maturity_dt, float_freq_type, cal_type, bd_type, dg_type).generate()
 
         for swaption_dt in swaption_float_dts:
             found_dt = False
@@ -333,9 +333,7 @@ class IborLMMProducts:
             if found_dt is False:
                 raise FinError("Swaption float leg not on grid.")
 
-        swaption_fixed_dts = Schedule(
-            settle_dt, maturity_dt, fixed_freq_type, cal_type, bd_type, dg_type
-        ).generate()
+        swaption_fixed_dts = Schedule(settle_dt, maturity_dt, fixed_freq_type, cal_type, bd_type, dg_type).generate()
 
         for swaption_dt in swaption_fixed_dts:
             found_dt = False
@@ -387,9 +385,7 @@ class IborLMMProducts:
     ):
         """Value a cap or floor in the LMM."""
 
-        cap_floor_dts = Schedule(
-            settle_dt, maturity_dt, freq_type, cal_type, bd_type, dg_type
-        ).generate()
+        cap_floor_dts = Schedule(settle_dt, maturity_dt, freq_type, cal_type, bd_type, dg_type).generate()
 
         for cap_floorlet_dt in cap_floor_dts:
             found_dt = False
@@ -411,9 +407,7 @@ class IborLMMProducts:
         fwds = self.fwds
         taus = self.accrual_factors
 
-        v = lmm_cap_flr_pricer(
-            num_fwds, num_paths, cap_floor_rate, fwd0, fwds, taus, is_cap
-        )
+        v = lmm_cap_flr_pricer(num_fwds, num_paths, cap_floor_rate, fwd0, fwds, taus, is_cap)
 
         # Sum the cap/floorlets to get cap/floor value
         v_cap_floor = 0.0

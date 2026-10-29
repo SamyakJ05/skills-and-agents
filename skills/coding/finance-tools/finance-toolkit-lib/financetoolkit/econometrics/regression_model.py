@@ -3,6 +3,7 @@
 __docformat__ = "google"
 
 import warnings
+from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,9 @@ from statsmodels.tools.sm_exceptions import IterationLimitWarning
 
 TWO_DIMENSIONAL = 2
 COV_TYPES = ("nonrobust", "HC0", "HC1", "HC2", "HC3", "cluster", "HAC")
+# The subset of statsmodels' cov_type literals this module exposes; typed so the
+# validated string can be handed to `.fit(cov_type=...)` as the literal it expects.
+StatsmodelsCovType = Literal["nonrobust", "HC0", "HC1", "HC2", "HC3", "cluster", "HAC"]
 
 # Cluster-robust standard errors require at least 2 distinct clusters.
 MINIMUM_CLUSTERS = 2
@@ -36,10 +40,10 @@ def _to_design_matrix(
     handing it to `statsmodels`.
     """
     if isinstance(x, pd.DataFrame):
-        feature_names = list(x.columns)
+        feature_names = [str(column) for column in x.columns]
         values = x.to_numpy(dtype=float)
     elif isinstance(x, pd.Series):
-        feature_names = [x.name if x.name is not None else "X1"]
+        feature_names = [str(x.name) if x.name is not None else "X1"]
         values = x.to_numpy(dtype=float).reshape(-1, 1)
     elif isinstance(x, np.ndarray):
         values = x if x.ndim == TWO_DIMENSIONAL else x.reshape(-1, 1)
@@ -85,21 +89,41 @@ def _validate_design(x: np.ndarray, y: np.ndarray) -> None:
         )
 
 
+def default_hac_maxlags(observations: int) -> int:
+    """
+    The Newey & West (1994) rule of thumb for the HAC truncation lag with Bartlett weights:
+    floor(4 * (n / 100)^(2/9)), e.g. 4 lags for 100 observations and 5 for 250.
+
+    Args:
+        observations (int): The number of observations in the regression.
+
+    Returns:
+        int: The maximum lag.
+    """
+    return int(np.floor(4 * (observations / 100) ** (2 / 9)))
+
+
 def _cov_type_and_kwds(
-    cov_type: str, clusters: np.ndarray | None, maxlags: int | None = None
-) -> tuple[str, dict]:
+    cov_type: str,
+    clusters: np.ndarray | None,
+    maxlags: int | None = None,
+    observations: int | None = None,
+) -> tuple[StatsmodelsCovType, dict]:
     if cov_type not in COV_TYPES:
         raise ValueError(f"cov_type must be one of {COV_TYPES}, received {cov_type!r}.")
 
     if cov_type == "HAC":
         if maxlags is None:
-            raise ValueError("maxlags must be provided when cov_type='HAC'.")
+            if observations is None:
+                raise ValueError("maxlags must be provided when cov_type='HAC'.")
+            maxlags = default_hac_maxlags(observations)
         if maxlags < 0:
             raise ValueError(f"maxlags must be non-negative, received {maxlags}.")
         return "HAC", {"maxlags": maxlags}
 
     if cov_type != "cluster":
-        return cov_type, {}
+        # Validated against COV_TYPES above, which is exactly the literal set.
+        return cast(StatsmodelsCovType, cov_type), {}
 
     if clusters is None:
         raise ValueError("clusters must be provided when cov_type='cluster'.")
@@ -310,15 +334,15 @@ def get_ols(
           standard errors -- valid under both heteroskedastic AND
           serially-correlated errors, the standard choice for time-series
           regressions in finance (HC-robust alone corrects for heteroskedasticity
-          but assumes no autocorrelation). Requires `maxlags`.
+          but assumes no autocorrelation). Uses `maxlags`.
 
         clusters (pd.Series | np.ndarray | None, optional): The cluster label for each
         observation, required (and only used) when `cov_type="cluster"`. Defaults to
         None.
         maxlags (int | None, optional): The maximum lag to include when estimating the
-        HAC (Newey-West) covariance matrix, required (and only used) when
-        `cov_type="HAC"`. A common rule of thumb is `floor(4 * (n / 100)^(2/9))`
-        (Newey & West, 1994). Defaults to None.
+        HAC (Newey-West) covariance matrix, only used when `cov_type="HAC"`. Defaults
+        to None, meaning the Newey & West (1994) rule of thumb
+        `floor(4 * (n / 100)^(2/9))` with `n` the number of observations.
 
     Returns:
         dict: The fitted coefficients, their standard errors/t-statistics/
@@ -331,13 +355,14 @@ def get_ols(
         ValueError: If there are not more observations than parameters, `x` is
         rank-deficient (perfectly collinear regressors), `cov_type` is not a
         recognized value, `cov_type="cluster"` without `clusters` (or with fewer
-        than 2 distinct clusters), or `cov_type="HAC"` without a non-negative
-        `maxlags`.
+        than 2 distinct clusters), or `cov_type="HAC"` with a negative `maxlags`.
 
     Notes:
         Reference: Newey, W.K. & West, K.D. (1987). "A Simple, Positive
         Semi-Definite, Heteroskedasticity and Autocorrelation Consistent Covariance
         Matrix." Econometrica, 55(3), 703-708.
+        Reference: Newey, W.K. & West, K.D. (1994). "Automatic Lag Selection in
+        Covariance Matrix Estimation." Review of Economic Studies, 61(4), 631-653.
 
     As an example:
 
@@ -351,15 +376,15 @@ def get_ols(
     y = 0.02 + 1.2 * x + rng.standard_normal(100) * 0.05
 
     result = regression_model.get_ols(y, x)
-    print(regression_model.regression_summary_table(result).round(4))
+    regression_model.regression_summary_table(result).round(4)
     ```
 
     Which returns:
 
     |               |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
-    |:--------------|---------------:|--------------:|---------------:|-----------:|
-    | Intercept     |         0.0198 |        0.0049 |         4.0254 |     0.0001 |
-    | Market Return |         1.2060 |        0.0063 |       190.1749 |     0.0000 |
+    |:--------------|--------------:|-------------:|--------------:|----------:|
+    | Intercept     |        0.0198 |       0.0049 |        4.0254 |    0.0001 |
+    | Market Return |        1.206  |       0.0063 |      190.175  |    0      |
     """
     y_values = _to_target_vector(y)
     x_values, feature_names = _to_design_matrix(x, add_constant)
@@ -368,7 +393,9 @@ def get_ols(
     )
 
     _validate_design(x_values, y_values)
-    sm_cov_type, cov_kwds = _cov_type_and_kwds(cov_type, cluster_values, maxlags)
+    sm_cov_type, cov_kwds = _cov_type_and_kwds(
+        cov_type, cluster_values, maxlags, observations=len(y_values)
+    )
 
     sm_result = sm.OLS(y_values, x_values).fit(cov_type=sm_cov_type, cov_kwds=cov_kwds)
 
@@ -410,8 +437,8 @@ def get_wls(
         clusters (pd.Series | np.ndarray | None, optional): The cluster label for each
         observation, required when `cov_type="cluster"`. Defaults to None.
         maxlags (int | None, optional): The maximum lag to include when estimating the
-        HAC (Newey-West) covariance matrix, required when `cov_type="HAC"`. See
-        `get_ols`'s `maxlags` for the rule-of-thumb formula. Defaults to None.
+        HAC (Newey-West) covariance matrix, only used when `cov_type="HAC"`. Defaults
+        to None, meaning the Newey & West (1994) rule of thumb (see `get_ols`).
 
     Returns:
         dict: The fitted coefficients, their standard errors/t-statistics/
@@ -439,13 +466,111 @@ def get_wls(
         raise ValueError("All weights must be strictly positive.")
 
     _validate_design(x_values, y_values)
-    sm_cov_type, cov_kwds = _cov_type_and_kwds(cov_type, cluster_values, maxlags)
+    sm_cov_type, cov_kwds = _cov_type_and_kwds(
+        cov_type, cluster_values, maxlags, observations=len(y_values)
+    )
 
     sm_result = sm.WLS(y_values, x_values, weights=weight_values).fit(
         cov_type=sm_cov_type, cov_kwds=cov_kwds
     )
 
     return _from_statsmodels_ols(sm_result, feature_names, x_values, cov_type)
+
+
+def get_feasible_weights(
+    y: pd.Series | np.ndarray,
+    x: pd.DataFrame | pd.Series | np.ndarray,
+    add_constant: bool = True,
+) -> np.ndarray:
+    """
+    Estimate the Weighted Least Squares weights of a regression of `y` on `x` from its own
+    residuals, with the feasible GLS procedure for heteroskedasticity of Wooldridge (2016):
+
+    - ûₜ = the OLS residuals of `y` on `x`
+    - ĝₜ = the fitted values of the OLS regression of log(ûₜ²) on `x` and a constant
+    - wₜ = 1 / exp(ĝₜ), the inverse of the estimated error variance
+
+    The exponential keeps every estimated variance, and so every weight, positive.
+
+    Args:
+        y (pd.Series | np.ndarray): The dependent variable, shape `(n,)`.
+        x (pd.DataFrame | pd.Series | np.ndarray): The independent variable(s)/regressor(s).
+        add_constant (bool, optional): Whether the regression of `y` on `x` has an intercept.
+            The variance regression always has one. Defaults to True.
+
+    Returns:
+        np.ndarray: The (positive) weight of each observation, shape `(n,)`.
+
+    Notes:
+        Reference: Wooldridge, J.M. (2016). "Introductory Econometrics: A Modern Approach",
+        6th edition, Section 8.4, "A Feasible GLS Procedure to Correct for
+        Heteroskedasticity."
+    """
+    y_values = _to_target_vector(y)
+    x_values, _ = _to_design_matrix(x, add_constant)
+    _validate_design(x_values, y_values)
+
+    squared_residuals = sm.OLS(y_values, x_values).fit().resid ** 2
+    # An exact zero residual has no logarithm; the smallest positive one stands in for it.
+    squared_residuals = np.maximum(
+        squared_residuals, squared_residuals[squared_residuals > 0].min()
+    )
+    variance_design, _ = _to_design_matrix(x, add_constant=True)
+    fitted = sm.OLS(np.log(squared_residuals), variance_design).fit().fittedvalues
+
+    return 1 / np.exp(fitted)
+
+
+def get_ar1_covariance(
+    y: pd.Series | np.ndarray,
+    x: pd.DataFrame | pd.Series | np.ndarray,
+    add_constant: bool = True,
+) -> np.ndarray:
+    """
+    Estimate the error covariance structure of a regression of `y` on `x` with first-order
+    autocorrelated (AR(1)) errors, eₜ = ρ·eₜ₋₁ + uₜ, from its own residuals:
+
+    - ρ̂ = Σ ûₜ·ûₜ₋₁ / Σ ûₜ₋₁², the slope of the OLS residuals on their own lag
+    - Ωᵢⱼ = ρ̂^|i - j|, the correlation of the errors of observations i and j
+
+    GLS with this Ω is the Prais-Winsten estimator, which unlike Cochrane-Orcutt keeps the
+    first observation. The scale σᵤ² / (1 - ρ̂²) of the covariance is left to GLS.
+
+    Args:
+        y (pd.Series | np.ndarray): The dependent variable, shape `(n,)`.
+        x (pd.DataFrame | pd.Series | np.ndarray): The independent variable(s)/regressor(s).
+        add_constant (bool, optional): Whether to prepend an intercept column of ones
+            to `x`. Defaults to True.
+
+    Returns:
+        np.ndarray: The error correlation matrix Ω, shape `(n, n)`.
+
+    Raises:
+        ValueError: If the estimated ρ is not between -1 and 1, so the errors are not a
+            stationary AR(1) process and Ω is not positive definite.
+
+    Notes:
+        References: Cochrane, D. and Orcutt, G.H. (1949). "Application of Least Squares
+        Regression to Relationships Containing Auto-Correlated Error Terms." Journal of the
+        American Statistical Association, 44(245), 32-61. Prais, S.J. and Winsten, C.B.
+        (1954). "Trend Estimators and Serial Correlation." Cowles Commission Discussion
+        Paper No. 383.
+    """
+    y_values = _to_target_vector(y)
+    x_values, _ = _to_design_matrix(x, add_constant)
+    _validate_design(x_values, y_values)
+
+    residuals = sm.OLS(y_values, x_values).fit().resid
+    rho = float(residuals[1:] @ residuals[:-1] / (residuals[:-1] @ residuals[:-1]))
+
+    if not -1 < rho < 1:
+        raise ValueError(
+            f"The residuals' first-order autocorrelation is {rho:.4f}, outside (-1, 1), "
+            "so the errors are not a stationary AR(1) process."
+        )
+
+    positions = np.arange(len(residuals))
+    return rho ** np.abs(positions[:, None] - positions[None, :])
 
 
 def get_gls(
@@ -466,10 +591,10 @@ def get_gls(
 
     - beta_hat = (X' Omega^-1 X)^-1 X' Omega^-1 y
 
-    Note that `Omega` must be supplied (e.g. from a fitted AR(1) error structure or
-    a known covariance model) -- this implements the GLS estimation step itself, not
-    the (separate, model-specific) problem of estimating `Omega` in the first place
-    (Feasible GLS).
+    Note that `Omega` must be supplied (e.g. an AR(1) error structure from
+    `get_ar1_covariance` or a known covariance model) -- this implements the GLS
+    estimation step itself, not the (separate, model-specific) problem of estimating
+    `Omega` in the first place (Feasible GLS).
 
     Args:
         y (pd.Series | np.ndarray): The dependent variable, shape `(n,)`.

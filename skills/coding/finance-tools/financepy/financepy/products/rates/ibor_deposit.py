@@ -13,6 +13,7 @@ from ...utils.day_count import DayCount
 from ...utils.day_count import DayCountTypes
 from ...market.curves.discount_curve import DiscountCurve
 from ...utils.helpers import label_to_string, check_argument_types
+from ...utils.check_values import check_curve_dt
 
 ########################################################################################
 
@@ -42,11 +43,11 @@ class IborDeposit:
         start_dt: Date,  # When the interest starts to accrue
         maturity_dt_or_tenor: Union[Date, str],  # Repayment of interest
         deposit_rate: float,  # MM rate using simple interest
-        accrual_dc_type: DayCountTypes,  # How year fraction is calculated
+        accrual_dc_type: DayCountTypes,  # How accrual year fraction is calculated
         notional: float = 100.0,  # Amount borrowed
         cal_type: CalendarTypes = CalendarTypes.WEEKEND,  # Maturity date
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.MODIFIED_FOLLOWING,
-    ):
+    ) -> None:
         """Create a Libor deposit object which takes the start date when
         the amount of notional is borrowed, a maturity date or a tenor and the
         deposit rate. If a tenor is used then this is added to the start
@@ -69,8 +70,8 @@ class IborDeposit:
 
         maturity_dt = calendar.adjust(maturity_dt, self.bd_type)
 
-        if start_dt > maturity_dt:
-            raise FinError("Start date cannot be after maturity date")
+        if start_dt >= maturity_dt:
+            raise FinError("Start date must be before maturity date")
 
         self.start_dt = start_dt
         self.maturity_dt = maturity_dt
@@ -92,7 +93,7 @@ class IborDeposit:
 
     ####################################################################################
 
-    def value(self, value_dt: Date, libor_curve):
+    def value(self, value_dt: Date, libor_curve: DiscountCurve):
         """Determine the value of an existing Libor Deposit contract given a
         valuation date and a Libor curve. This is simply the PV of the future
         repayment plus interest discounted on the current Libor curve."""
@@ -116,7 +117,7 @@ class IborDeposit:
 
     def valuation_details(
         self,
-        valuation_date: Date,
+        value_dt: Date,
         discount_curve: DiscountCurve,
         index_curve: DiscountCurve = None,
     ):
@@ -131,8 +132,13 @@ class IborDeposit:
 
         TODO: make a test of this
         """
-        if valuation_date > self.maturity_dt:
+        if value_dt > self.maturity_dt:
             raise FinError("Start date after maturity date")
+
+        check_curve_dt(value_dt, discount_curve)
+
+        if index_curve is not None:
+            check_curve_dt(value_dt, index_curve)
 
         dc = DayCount(self.accrual_dc_type)
         acc_factor = dc.year_frac(self.start_dt, self.maturity_dt)[0]
@@ -183,7 +189,7 @@ class IborDeposit:
         s += label_to_string("MATURITY_DATE", self.maturity_dt)
         s += label_to_string("NOTIONAL", self.notional)
         s += label_to_string("DEPOSIT RATE", self.deposit_rate)
-        s += label_to_string("DC_TYPE", self.accrual_dc_type)
+        s += label_to_string("ACCRUAL_DC_TYPE", self.accrual_dc_type)
         s += label_to_string("CALENDAR", self.cal_type)
         s += label_to_string("BUS_DAY_ADJUST", self.bd_type)
         return s

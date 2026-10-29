@@ -4,18 +4,20 @@
 
 import numpy as np
 
-from financepy.models import equity_compound_option_bs
-
 from ...utils.date import Date
 from ...utils.error import FinError
 from ...utils.global_types import OptionTypes
-from ...utils.global_vars import G_DAYS_IN_YEAR, G_SMALL
+from ...utils.global_vars import G_SMALL
 
 from ...products.equity.equity_option import EquityOption
 from ...market.curves.flat_discount_curve import DiscountCurve
 from ...utils.helpers import label_to_string, check_argument_types
-from ...models.equity_compound_option_bs import equity_compound_option_bs
-from ...models.equity_compound_option_bs import equity_compound_option_value_tree
+from ...models.bs_equity_compound_option import equity_compound_option_value_tree
+from ...models.bs_equity_compound_option import equity_compound_option_bs
+from ...utils.check_values import check_curve_dt
+from ...utils.check_values import check_volatility
+from ...utils.helpers import option_years
+from ...models.model import Model
 
 ########################################################################################
 # TODO: Vectorise pricer
@@ -37,33 +39,33 @@ class EquityCompoundOption(EquityOption):
         u_expiry_dt: Date,  # Underlying option expiry date
         u_opt_type: OptionTypes,  # Underlying OPTION_TYPE
         u_strike_price: float,
-    ):  # Underlying option strike price
+    ) -> None:  # Underlying option strike price
         """Create the EquityCompoundOption by passing in the first and
         second expiry dates as well as the corresponding strike prices and
         OPTION_TYPEs."""
 
         check_argument_types(self.__init__, locals())
 
-        if c_expiry_dt > u_expiry_dt:
+        if c_expiry_dt >= u_expiry_dt:
             raise FinError("Compound expiry date must precede underlying expiry date")
 
         if c_opt_type not in (
             OptionTypes.EUROPEAN_CALL,
-            OptionTypes.AMERICAN_CALL,
             OptionTypes.EUROPEAN_PUT,
-            OptionTypes.AMERICAN_PUT,
         ):
-            raise FinError("Compound option must be European or American call or put.")
+            raise FinError("Compound option must be European call or put.")
 
         if u_opt_type not in (
             OptionTypes.EUROPEAN_CALL,
-            OptionTypes.AMERICAN_CALL,
             OptionTypes.EUROPEAN_PUT,
-            OptionTypes.AMERICAN_PUT,
         ):
-            raise FinError(
-                "Underlying option must be European or American call or put."
-            )
+            raise FinError("Underlying option must be European call or put.")
+
+        if not np.isfinite(c_strike_price) or c_strike_price < 0.0:
+            raise FinError("Invalid compound strike price")
+
+        if not np.isfinite(u_strike_price) or u_strike_price <= 0.0:
+            raise FinError("Invalid underlying strike price")
 
         self.c_expiry_dt = c_expiry_dt
         self.c_strike_price = float(c_strike_price)
@@ -75,62 +77,13 @@ class EquityCompoundOption(EquityOption):
 
     ####################################################################################
 
-    def _preprocess_inputs(
-        self,
-        value_dt: Date,
-        stock_price: float,
-        discount_curve: DiscountCurve,
-        dividend_curve: DiscountCurve,
-        model,
-    ):
-        """Validate inputs and compute (tc, tu, kc, ku, ru, qu, vol)."""
-
-        if stock_price < 0:
-            raise FinError("Stock price must be positive.")
-
-        if not isinstance(value_dt, Date):
-            raise FinError("Valuation date is not a Date")
-
-        if value_dt > self.c_expiry_dt:
-            raise FinError("Valuation date after compound expiry date.")
-
-        if value_dt > self.u_expiry_dt:
-            raise FinError("Valuation date after underlying expiry date.")
-
-        if discount_curve.value_dt != value_dt:
-            raise FinError(
-                "Discount Curve valuation date not same as option value date"
-            )
-
-        if dividend_curve.value_dt != value_dt:
-            raise FinError(
-                "Dividend Curve valuation date not same as option value date"
-            )
-
-        tc = (self.c_expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        tu = (self.u_expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        kc = self.c_strike_price
-        ku = self.u_strike_price
-
-        df_u = discount_curve.df(self.u_expiry_dt)
-        ru = -np.log(df_u) / tu
-
-        dq_u = dividend_curve.df(self.u_expiry_dt)
-        qu = -np.log(dq_u) / tu
-
-        vol = np.maximum(model.volatility, G_SMALL)
-
-        return tc, tu, kc, ku, ru, qu, vol
-
-    ####################################################################################
-
     def value(
         self,
         value_dt: Date,
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
         num_steps: int = 200,
     ):
         """Value the compound option using an analytical approach if it is
@@ -138,9 +91,31 @@ class EquityCompoundOption(EquityOption):
         early exercise. Solution by Geske (1977), Hodges and Selby (1987) and
         Rubinstein (1991). See also Haug page 132."""
 
-        tc, tu, kc, ku, ru, qu, vol = self._preprocess_inputs(
-            value_dt, stock_price, discount_curve, dividend_curve, model
-        )
+        if value_dt >= self.c_expiry_dt:
+            raise FinError(
+                "Valuation date must precede compound option expiry"
+            )
+
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
+        check_volatility(model.volatility)
+
+        if not np.isfinite(stock_price) or stock_price <= 0.0:
+            raise FinError("Stock price must be positive")
+
+        rc = discount_curve.zero_rate_cc(self.c_expiry_dt)
+        qc = dividend_curve.zero_rate_cc(self.c_expiry_dt)
+
+        ru = discount_curve.zero_rate_cc(self.u_expiry_dt)
+        qu = dividend_curve.zero_rate_cc(self.u_expiry_dt)
+
+        tc = option_years(value_dt, self.c_expiry_dt)
+        tu = option_years(value_dt, self.u_expiry_dt)
+
+        kc = self.c_strike_price
+        ku = self.u_strike_price
+
+        vol = np.maximum(model.volatility, G_SMALL)
 
         v = equity_compound_option_bs(
             self.c_opt_type.value,
@@ -150,10 +125,11 @@ class EquityCompoundOption(EquityOption):
             kc,
             ku,
             stock_price,
+            rc,
             ru,
+            qc,
             qu,
-            vol,
-            num_steps,
+            vol
         )
 
         return v
@@ -166,16 +142,40 @@ class EquityCompoundOption(EquityOption):
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
         num_steps: int = 200,
     ):
         """Value the compound option using a Tree approach to handle the
         early exercise. Solution by Geske (1977), Hodges and Selby (1987) and
         Rubinstein (1991). See also Haug page 132."""
 
-        tc, tu, kc, ku, ru, qu, vol = self._preprocess_inputs(
-            value_dt, stock_price, discount_curve, dividend_curve, model
-        )
+        if value_dt >= self.c_expiry_dt:
+            raise FinError(
+                "Valuation date must precede compound option expiry"
+            )
+
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
+        check_volatility(model.volatility)
+
+        if not np.isfinite(stock_price) or stock_price <= 0.0:
+            raise FinError("Stock price must be positive")
+
+        if isinstance(num_steps, (bool, np.bool_)) or not isinstance(
+            num_steps, (int, np.integer)
+        ) or num_steps < 2:
+            raise FinError("num_steps must be an integer >= 2")
+
+        ru = discount_curve.zero_rate_cc(self.u_expiry_dt)
+        qu = dividend_curve.zero_rate_cc(self.u_expiry_dt)
+
+        tc = option_years(value_dt, self.c_expiry_dt)
+        tu = option_years(value_dt, self.u_expiry_dt)
+
+        kc = self.c_strike_price
+        ku = self.u_strike_price
+
+        vol = np.maximum(model.volatility, G_SMALL)
 
         v = equity_compound_option_value_tree(
             self.c_opt_type.value,

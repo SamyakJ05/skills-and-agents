@@ -4,6 +4,8 @@ __docformat__ = "google"
 
 import itertools
 import warnings
+from collections.abc import Callable
+from functools import cached_property
 
 import numpy as np
 import pandas as pd
@@ -12,21 +14,26 @@ from financetoolkit.econometrics import (
     causal_inference_model,
     causality_model,
     cointegration_model,
+    data_model,
     diagnostics_model,
     event_study_model,
     fama_macbeth_model,
     forecast_evaluation_model,
     hypothesis_testing_model,
+    pairs_trading_model,
     panel_data_model,
+    regime_model,
     regression_model,
     specification_tests_model,
+    state_space_model,
     time_series_model,
     unitroot_model,
 )
-from financetoolkit.helpers import handle_portfolio
+from financetoolkit.helpers import LazyDict, handle_portfolio
 from financetoolkit.risk.helpers import determine_within_historical_data
 from financetoolkit.utilities.error_model import handle_errors
 from financetoolkit.utilities.logger_model import get_logger
+from financetoolkit.utilities.statistics_model import apply_rounding
 
 logger = get_logger()
 
@@ -35,6 +42,8 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # pylint: disable=too-many-instance-attributes,too-few-public-methods,too-many-lines,too-many-locals
 # pylint: disable=too-many-boolean-expressions
+# The examples' output tables are wider than the line length.
+# ruff: noqa: E501
 
 # The synthetic benchmark series, excluded unless `include_benchmark=True`.
 BENCHMARK_TICKER = "Benchmark"
@@ -49,75 +58,149 @@ class Econometrics:
     normality, autocorrelation, structural stability). These are the standard
     foundational tests behind approaches such as pairs trading, spread modeling,
     and choosing an appropriate volatility or return model in the first place.
+
+    Through the Toolkit (`toolkit.econometrics`) it analyzes the prices and returns of the
+    Toolkit's tickers. Standalone, `Econometrics(data=...)` analyzes any metric: ratios,
+    economic indicators, yield curves or a dataset of your own.
     """
 
     def __init__(
         self,
-        tickers: str | list[str],
-        historical_data: pd.DataFrame = pd.DataFrame(),
+        tickers: str | list[str] | Callable[[], list[str]] | None = None,
+        historical_data: dict[str, pd.DataFrame] | None = None,
         intraday_period: str | None = None,
         quarterly: bool = False,
         rounding: int | None = 4,
         start_date: str | None = None,
         end_date: str | None = None,
+        data: pd.DataFrame | pd.Series | dict | None = None,
+        changes: str | None = "percentage",
     ):
         """
-        Initializes the Econometrics Controller Class.
+        Initializes the Econometrics Controller Class, either with the historical data of a
+        Toolkit (which `toolkit.econometrics` passes) or standalone with any data.
+
+        Standalone, the data can be a DataFrame with a column per series, a Series, or a
+        dictionary of them; the dates can be in the rows or, as in the ratios of the Toolkit
+        (tickers by year), in the columns. Every series becomes an asset: the series as
+        given is the "Adj Close" column (also "Level") that the unit root, cointegration and
+        forecasting methods use by default, and its change from one observation to the next
+        is the "Return" column (also "Change") that the regressions and diagnostics use. The
+        "daily" period, the default, holds the series at the dates they are observed (so a
+        monthly series is analyzed monthly); the other periods take the last observation of
+        each week, month, quarter or year.
+
+        The Toolkit passes the tickers as a function without arguments and the historical data
+        as a LazyDict (financetoolkit.helpers), so a method retrieves the data of the period it
+        is calculated over when it is first needed, and nothing else.
 
         Args:
-            tickers (str | list[str]): The tickers to use for the Toolkit instance.
-            historical_data (pd.DataFrame, optional): The historical data containing all periods.
-                Defaults to pd.DataFrame().
+            tickers (str | list[str] | Callable[[], list[str]] | None, optional): The tickers of the
+                Toolkit, or a function without arguments that returns them. Defaults to None, which
+                takes the names of the series when data is given.
+            historical_data (dict[str, pd.DataFrame] | None, optional): The historical data per period,
+                as the Toolkit passes it. Defaults to None, which is treated as an empty dictionary.
             intraday_period (str | None, optional): The intraday period used for within-period calculations.
                 Defaults to None.
             quarterly (bool, optional): Whether to use quarterly data. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to 4.
             start_date (str | None, optional): The start date to use for the calculations. Defaults to None.
             end_date (str | None, optional): The end date to use for the calculations. Defaults to None.
+            data (pd.DataFrame | pd.Series | dict | None, optional): Any data to analyze instead
+                of the Toolkit's prices, with a series per column. Defaults to None.
+            changes (str | None, optional): How the changes ("Return") of the data are calculated:
+                "percentage" (relative changes, as returns), "log", "difference" (first
+                differences, for rates and ratios that can be zero or negative) or None
+                (the data are changes already). The percentage change divides by the
+                absolute previous value, so a negative series that rises has a positive
+                change. Defaults to "percentage".
 
         As an example:
 
         ```python
-        from financetoolkit import Toolkit
+        from financetoolkit import Economics, Econometrics
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        economics = Economics(start_date='2000-01-01', end_date='2025-12-31')
 
-        toolkit.econometrics.get_augmented_dickey_fuller(period='yearly')
+        unemployment = economics.get_unemployment_rate(
+            countries=['United States', 'Germany'], period='monthly'
+        )
+
+        econometrics = Econometrics(data=unemployment, changes='difference')
+
+        econometrics.get_augmented_dickey_fuller()
         ```
+
+        Which returns:
+
+        |                       |   United States |    Germany |
+        |:----------------------|----------------:|-----------:|
+        | ADF Statistic         |      -2.98304   |  -0.930407 |
+        | P-Value               |       0.0365087 |   0.777794 |
+        | Lags Used             |       0         |   3        |
+        | Observations          |     310         | 307        |
+        | Critical Value 1%     |      -3.45162   |  -3.45183  |
+        | Critical Value 5%     |      -2.87091   |  -2.871    |
+        | Critical Value 10%    |      -2.57176   |  -2.57181  |
+        | Reject Unit Root (5%) |       1         |   0        |
         """
-        self._historical_data = historical_data
-        self._tickers = tickers
+        if data is not None:
+            if historical_data is not None:
+                raise ValueError(
+                    "Pass either data (any metric) or historical_data (from a Toolkit), not both."
+                )
+            historical_data, series = data_model.build_historical_data(
+                data, changes=changes, start_date=start_date, end_date=end_date
+            )
+            tickers = series if tickers is None else tickers
+        if tickers is None:
+            raise ValueError(
+                "Pass the data to analyze, e.g. Econometrics(data=dataframe), or use the "
+                "Econometrics module of a Toolkit: toolkit.econometrics."
+            )
+
+        # Mirrors the Risk controller: the Toolkit always passes the period dict, and an
+        # explicit empty dict keeps the lookups raising a plain KeyError.
+        self._historical_data = historical_data if historical_data is not None else {}
+        self._tickers_source = tickers
         self._quarterly = quarterly
         self._rounding: int | None = rounding
         self._start_date: str | None = start_date
         self._end_date: str | None = end_date
         self._portfolio_weights: dict | None = None
+        # Memo for the sliced-and-dropna'd frames handed to the calculations: nearly
+        # every method starts from the same (period, column) slice, and re-copying it
+        # per call adds up when many metrics are collected in a row (as the MCP server
+        # does). The historical data is never mutated once retrieved, and the
+        # slices are treated as read-only by every caller, so sharing them is safe.
+        self._data_cache: dict[tuple, pd.DataFrame] = {}
 
-        # Within Return Calculations
-        daily_historical_data = self._historical_data["daily"].copy().fillna(0)
-        intraday_historical_data = self._historical_data["intraday"].copy().fillna(0)
-
-        daily_historical_data.index = pd.DatetimeIndex(
-            daily_historical_data.to_timestamp().index
-        )
-
-        if not self._historical_data["intraday"].empty:
-            intraday_historical_data.index = pd.DatetimeIndex(
-                intraday_historical_data.to_timestamp().index
+        # The returns within each period, built when a method first asks for a period.
+        # Missing returns stay NaN (not 0), so a ticker without data in part of a period is
+        # not treated as flat there.
+        self._within_historical_data = LazyDict(
+            lambda period: determine_within_historical_data(
+                period, self._historical_data, intraday_period
             )
-
-        self._within_historical_data = determine_within_historical_data(
-            daily_historical_data=daily_historical_data,
-            intraday_historical_data=intraday_historical_data,
-            intraday_period=intraday_period,
         )
+
+    @cached_property
+    def _tickers(self) -> list[str]:
+        """The tickers as a list, retrieved when first needed."""
+        tickers = (
+            self._tickers_source()
+            if callable(self._tickers_source)
+            else self._tickers_source
+        )
+
+        return [tickers] if isinstance(tickers, str) else list(tickers)
 
     @handle_portfolio
     @handle_errors
     def get_arch_lm_test(
         self,
         period: str | None = None,
-        within_period: bool = True,
+        within_period: bool = False,
         lags: int = 5,
         include_benchmark: bool = False,
         rounding: int | None = None,
@@ -132,6 +215,13 @@ class Econometrics:
         it. A high p-value suggests fitting GARCH would not be meaningful, since there
         is no detectable time-varying volatility to model.
 
+        The formula is as follows:
+
+        - εₜ = rₜ - mean(r), the returns of `period` demeaned by their sample mean
+        - Auxiliary regression: εₜ² = a₀ + Σ(i=1..q) aᵢ·εₜ₋ᵢ² + uₜ, with q = `lags` (5 by default)
+        - ARCH-LM = (T - q)·R², chi-squared with q degrees of freedom, where T - q is the number of
+          observations in the auxiliary regression
+
         For more information about the method, see the following paper:
 
         - Engle, R.F. (1982). "Autoregressive Conditional Heteroscedasticity with
@@ -142,10 +232,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
-                Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                Defaults to "daily".
             within_period (bool, optional): Whether to calculate the test within the specified period or for
             the entire period. Thus whether to look at the test within a specific year (if period = 'yearly')
-            or look at the entirety of all years. Defaults to True.
+            or look at the entirety of all years. Defaults to False. Note that this requires intraday data
+            when period = 'daily', since a single day only nests observations when intraday data was fetched.
             lags (int, optional): The number of lags to test for ARCH effects. Defaults to 5.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
@@ -163,46 +254,56 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["BTCUSD", "^GSPC", "EURUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_arch_lm_test(period="quarterly")
+        toolkit.econometrics.get_arch_lm_test()
         ```
 
         Which returns:
 
-        |                   |     AMZN |   TSLA |
-        |:------------------|---------:|-------:|
-        | ARCH-LM Statistic |   4.0116 | 3.7793 |
-        | P-Value           |   0.548  | 0.5817 |
+        |                   |   BTCUSD |   ^GSPC |   EURUSD |
+        |:------------------|---------:|--------:|---------:|
+        | ARCH-LM Statistic |  55.2071 | 165.389 |  67.7588 |
+        | P-Value           |   0      |   0     |   0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
+        if (
+            period == "daily"
+            and within_period
+            and self._historical_data["intraday"].empty
+        ):
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. Either set "
+                "within_period=False or initialise the Toolkit with an intraday_period."
+            )
 
         returns = self._filter_benchmark(
-            (
-                self._within_historical_data[period]["Return"]
-                if within_period
-                else self._historical_data[period]["Return"]
-            ).dropna(),
+            self._get_returns(period, within_period),
             include_benchmark=include_benchmark,
         )
 
         result = diagnostics_model.get_arch_lm_test(returns, lags=lags)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
     def get_jarque_bera_test(
         self,
         period: str | None = None,
-        within_period: bool = True,
+        within_period: bool = False,
         include_benchmark: bool = False,
         rounding: int | None = None,
     ) -> pd.DataFrame:
@@ -216,6 +317,12 @@ class Econometrics:
         relevant when choosing between e.g. gaussian and Student-T based Value at Risk
         models.
 
+        The formula is as follows:
+
+        - JB = (n / 6)·(S² + (K - 3)² / 4), chi-squared with 2 degrees of freedom
+        - S = m₃ / m₂^(3/2) and K = m₄ / m₂², with mₖ = (1 / n)·Σ(rₜ - mean(r))ᵏ the (biased) central
+          moments of the returns of `period`
+
         For more information about the method, see the following paper:
 
         - Jarque, C.M. and Bera, A.K. (1987). "A Test for Normality of Observations
@@ -225,10 +332,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
-                Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                Defaults to "daily".
             within_period (bool, optional): Whether to calculate the test within the specified period or for
             the entire period. Thus whether to look at the test within a specific year (if period = 'yearly')
-            or look at the entirety of all years. Defaults to True.
+            or look at the entirety of all years. Defaults to False. Note that this requires intraday data
+            when period = 'daily', since a single day only nests observations when intraday data was fetched.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to None.
@@ -245,46 +353,56 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["^GSPC", "BTCUSD", "TLT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_jarque_bera_test(period="quarterly")
+        toolkit.econometrics.get_jarque_bera_test(period="monthly")
         ```
 
         Which returns:
 
-        |                       |    AMZN |    TSLA |
-        |:----------------------|--------:|--------:|
-        | Jarque-Bera Statistic |  3.0505 |  1.9354 |
-        | P-Value               |  0.2175 |  0.38   |
+        |                       |   ^GSPC |   BTCUSD |    TLT |
+        |:----------------------|--------:|---------:|-------:|
+        | Jarque-Bera Statistic |  2.6001 |   1.0834 | 0.6166 |
+        | P-Value               |  0.2725 |   0.5818 | 0.7347 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
+        if (
+            period == "daily"
+            and within_period
+            and self._historical_data["intraday"].empty
+        ):
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. Either set "
+                "within_period=False or initialise the Toolkit with an intraday_period."
+            )
 
         returns = self._filter_benchmark(
-            (
-                self._within_historical_data[period]["Return"]
-                if within_period
-                else self._historical_data[period]["Return"]
-            ).dropna(),
+            self._get_returns(period, within_period),
             include_benchmark=include_benchmark,
         )
 
         result = diagnostics_model.get_jarque_bera_test(returns)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
     def get_ljung_box_test(
         self,
         period: str | None = None,
-        within_period: bool = True,
+        within_period: bool = False,
         lags: int = 10,
         include_benchmark: bool = False,
         rounding: int | None = None,
@@ -300,6 +418,13 @@ class Econometrics:
         walk) and as a residual diagnostic after fitting a model (e.g. checking that GARCH
         residuals are no longer autocorrelated).
 
+        The formula is as follows:
+
+        - Q = n·(n + 2)·Σ(k=1..h) ρₖ² / (n - k), chi-squared with h degrees of freedom, h = `lags` (10 by
+          default)
+        - ρₖ = Σ(t=k+1..n) (rₜ - mean(r))·(rₜ₋ₖ - mean(r)) / Σ(t=1..n) (rₜ - mean(r))², the sample
+          autocorrelation of the returns of `period` at lag k
+
         For more information about the method, see the following paper:
 
         - Ljung, G.M., & Box, G.E.P. (1978). "On a Measure of Lack of Fit in Time Series
@@ -309,10 +434,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
-                Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                Defaults to "daily".
             within_period (bool, optional): Whether to calculate the test within the specified period or for
             the entire period. Thus whether to look at the test within a specific year (if period = 'yearly')
-            or look at the entirety of all years. Defaults to True.
+            or look at the entirety of all years. Defaults to False. Note that this requires intraday data
+            when period = 'daily', since a single day only nests observations when intraday data was fetched.
             lags (int, optional): The number of lags to test for autocorrelation up to. Defaults to 10.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
@@ -330,46 +456,56 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["WMT", "COST", "TGT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_ljung_box_test(period="quarterly", within_period=False)
+        toolkit.econometrics.get_ljung_box_test()
         ```
 
         Which returns:
 
-        |                     |   AMZN |   TSLA |
-        |:--------------------|-------:|-------:|
-        | Ljung-Box Statistic | 8.7703 | 7.1814 |
-        | P-Value             | 0.554  | 0.7082 |
+        |                     |     WMT |    COST |     TGT |
+        |:--------------------|--------:|--------:|--------:|
+        | Ljung-Box Statistic | 12.8794 | 10.9863 | 11.9887 |
+        | P-Value             |  0.2305 |  0.3586 |  0.2858 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
+        if (
+            period == "daily"
+            and within_period
+            and self._historical_data["intraday"].empty
+        ):
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. Either set "
+                "within_period=False or initialise the Toolkit with an intraday_period."
+            )
 
         returns = self._filter_benchmark(
-            (
-                self._within_historical_data[period]["Return"]
-                if within_period
-                else self._historical_data[period]["Return"]
-            ).dropna(),
+            self._get_returns(period, within_period),
             include_benchmark=include_benchmark,
         )
 
         result = diagnostics_model.get_ljung_box_test(returns, lags=lags)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
     def get_variance_ratio_test(
         self,
         period: str | None = None,
-        within_period: bool = True,
+        within_period: bool = False,
         q: int = 2,
         include_benchmark: bool = False,
         rounding: int | None = None,
@@ -377,12 +513,28 @@ class Econometrics:
         """
         Calculate the Lo-MacKinlay Variance Ratio test for the random walk hypothesis.
 
-        The test compares the Variance of `q`-period (overlapping) compounded returns to `q`
-        times the Variance of single-period returns. Under the random walk hypothesis these
-        should be equal, giving a Variance Ratio of 1. A Variance Ratio above 1 with a
-        significant (low) p-value indicates positive autocorrelation (momentum/trending
-        behavior), while a Variance Ratio below 1 with a significant p-value indicates negative
-        autocorrelation (mean-reversion).
+        The test compares the Variance of `q`-period (overlapping) returns, the sum of `q`
+        consecutive returns, to `q` times the Variance of single-period returns. Under the
+        random walk hypothesis these should be equal, giving a Variance Ratio of 1. A Variance
+        Ratio above 1 with a significant (low) p-value indicates positive autocorrelation
+        (momentum/trending behavior), while a Variance Ratio below 1 with a significant p-value
+        indicates negative autocorrelation (mean-reversion).
+
+        The result holds two statistics. The homoskedastic z(q) assumes a constant volatility;
+        daily returns cluster in volatility, and under such heteroskedasticity z(q) rejects the
+        random walk too often. The heteroskedasticity-robust z*(q) of Lo and MacKinlay stays
+        valid when volatility clusters and is the safer reading for returns.
+        `get_arch_lm_test` shows whether a series has that volatility clustering.
+
+        The formula is as follows:
+
+        - VR(q) = σ²(q) / σ²(1), with σ²(1) = Σ(rₜ - μ)² / (n - 1) and σ²(q) = Σ(rₜ + ... + rₜ₋q₊₁ - q·μ)² / m
+          over the overlapping q-period sums, m = q·(n - q + 1)·(1 - q / n) and μ the mean return
+          (the unbiased estimators of Lo & MacKinlay), q = 2 by default
+        - z(q) = (VR(q) - 1) / √φ(q), with φ(q) = 2·(2q - 1)·(q - 1) / (3q·n)
+        - z*(q) = √n·(VR(q) - 1) / √θ(q), with θ(q) = Σ(k=1..q-1) 4·(1 - k / q)²·δ(k) and
+          δ(k) = n·Σ(t=k+1..n) (rₜ - μ)²·(rₜ₋ₖ - μ)² / (Σ(t=1..n) (rₜ - μ)²)²
+        - P-Value = 2·(1 - Φ(|z|)) for both statistics, with Φ the standard normal CDF
 
         For more information about the method, see the following paper:
 
@@ -394,18 +546,19 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
-                Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                Defaults to "daily".
             within_period (bool, optional): Whether to calculate the test within the specified period or for
             the entire period. Thus whether to look at the test within a specific year (if period = 'yearly')
-            or look at the entirety of all years. Defaults to True.
-            q (int, optional): The number of periods to compound returns over. Defaults to 2.
+            or look at the entirety of all years. Defaults to False. Note that this requires intraday data
+            when period = 'daily', since a single day only nests observations when intraday data was fetched.
+            q (int, optional): The number of periods to sum returns over. Defaults to 2.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to None.
 
         Returns:
-            pd.DataFrame: The Variance Ratio, the (homoskedastic) test statistic and its p-value
-            per asset.
+            pd.DataFrame: The Variance Ratio, the homoskedastic test statistic and its p-value,
+            and the heteroskedasticity-robust test statistic and its p-value per asset.
 
         Notes:
         - The method retrieves historical return data based on the specified `period` and runs the
@@ -416,47 +569,59 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XLE", "XLF", "XLK"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_variance_ratio_test(period="quarterly", within_period=False)
+        toolkit.econometrics.get_variance_ratio_test()
         ```
 
         Which returns:
 
-        |                          |    AMZN |    TSLA |
-        |:-------------------------|--------:|--------:|
-        | Variance Ratio           |  0.8526 |  0.7523 |
-        | Variance Ratio Statistic | -0.6757 | -1.1353 |
-        | P-Value                  |  0.4993 |  0.2563 |
+        |                                 |    XLE |    XLF |     XLK |
+        |:--------------------------------|-------:|-------:|--------:|
+        | Variance Ratio                  | 1.0249 | 1.0249 |  0.9611 |
+        | Variance Ratio Statistic        | 0.8815 | 0.8805 | -1.3774 |
+        | P-Value                         | 0.3781 | 0.3786 |  0.1684 |
+        | Robust Variance Ratio Statistic | 0.6193 | 0.6256 | -0.9679 |
+        | Robust P-Value                  | 0.5358 | 0.5316 |  0.3331 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
+        if (
+            period == "daily"
+            and within_period
+            and self._historical_data["intraday"].empty
+        ):
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. Either set "
+                "within_period=False or initialise the Toolkit with an intraday_period."
+            )
 
         returns = self._filter_benchmark(
-            (
-                self._within_historical_data[period]["Return"]
-                if within_period
-                else self._historical_data[period]["Return"]
-            ).dropna(),
+            self._get_returns(period, within_period),
             include_benchmark=include_benchmark,
         )
 
         result = diagnostics_model.get_variance_ratio_test(returns, q=q)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
     def get_cusum_test(
         self,
         period: str | None = None,
-        within_period: bool = True,
+        within_period: bool = False,
         include_benchmark: bool = False,
         rounding: int | None = None,
     ) -> pd.DataFrame:
@@ -470,6 +635,13 @@ class Econometrics:
         change) drags the path away from zero; the test statistic is the maximum
         absolute value of that path.
 
+        The formula is as follows:
+
+        - êₜ = rₜ - mean(r), the OLS residuals of the constant-mean model rₜ = μ + eₜ
+        - CUSUM = max over k of |Σ(t=1..k) êₜ| / (σ̂·√n), with σ̂² = Σêₜ² / (n - 1)
+        - P-Value = P(sup|B(s)| > CUSUM) for a Brownian Bridge B (the Kolmogorov distribution), with
+          stability rejected when the p-value is below 0.05
+
         For more information about the method, see the following paper:
 
         - Ploberger, W., & Kramer, W. (1992). "The CUSUM Test with OLS Residuals."
@@ -479,10 +651,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
-                Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                Defaults to "daily".
             within_period (bool, optional): Whether to calculate the test within the specified period or for
             the entire period. Thus whether to look at the test within a specific year (if period = 'yearly')
-            or look at the entirety of all years. Defaults to True.
+            or look at the entirety of all years. Defaults to False. Note that this requires intraday data
+            when period = 'daily', since a single day only nests observations when intraday data was fetched.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to None.
@@ -502,59 +675,108 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT"],
+            ["BA", "AIR.PA"],
             api_key="FINANCIAL_MODELING_PREP_KEY",
-            start_date="2019-01-01",
-            end_date="2023-12-31",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_cusum_test(period="quarterly", within_period=False)
+        # The critical values are the asymptotic Brownian Bridge boundaries, so they
+        # are the same constants for every asset.
+        toolkit.econometrics.get_cusum_test()
         ```
 
-        Which returns (the critical values are the asymptotic Brownian Bridge
-        boundaries, so they are the same constants for every asset):
+        Which returns:
 
-        |                        |    AAPL |    MSFT |
-        |:-----------------------|--------:|--------:|
-        | CUSUM Statistic        |  0.7712 |  0.706  |
-        | P-Value                |  0.5915 |  0.7013 |
-        | Observations           | 19      | 19      |
-        | Critical Value 1%      |  1.63   |  1.63   |
-        | Critical Value 5%      |  1.36   |  1.36   |
-        | Critical Value 10%     |  1.22   |  1.22   |
-        | Reject Stability (5%)  |  0      |  0      |
+        |                       |          BA |      AIR.PA |
+        |:----------------------|------------:|------------:|
+        | CUSUM Statistic       |    0.685425 |    0.441916 |
+        | P-Value               |    0.735342 |    0.989762 |
+        | Observations          | 1291        | 1291        |
+        | Critical Value 1%     |    1.63     |    1.63     |
+        | Critical Value 5%     |    1.36     |    1.36     |
+        | Critical Value 10%    |    1.22     |    1.22     |
+        | Reject Stability (5%) |    0        |    0        |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
+        if (
+            period == "daily"
+            and within_period
+            and self._historical_data["intraday"].empty
+        ):
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. Either set "
+                "within_period=False or initialise the Toolkit with an intraday_period."
+            )
 
         returns = self._filter_benchmark(
-            (
-                self._within_historical_data[period]["Return"]
-                if within_period
-                else self._historical_data[period]["Return"]
-            ).dropna(),
+            self._get_returns(period, within_period),
             include_benchmark=include_benchmark,
         )
 
         result = diagnostics_model.get_cusum_test(returns)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
-    def _get_price_column(self, period: str, column: str) -> pd.DataFrame:
+    def _get_series_column(
+        self, period: str, column: str, tickers: list[str] | None = None
+    ) -> pd.DataFrame:
+        """
+        The `column` slice of `period`, memoized -- see `_data_cache` in `__init__`. It
+        serves the Toolkit's prices and returns and any data given with `data=` alike.
+
+        Without `tickers` only the dates no series has are dropped: per-series and
+        pairwise methods drop their own missing values, so each series keeps its own
+        history and a series observed at other dates -- a monthly series next to a daily
+        one, an asset listed later, another holiday calendar -- does not cut the others
+        down to the shared dates. Methods that combine series date by date (regressions,
+        VAR, cointegration systems) pass the `tickers` they use and keep the dates all of
+        those series have, so a series outside the model never removes dates.
+        """
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
 
-        return self._historical_data[period][column].dropna()
+        # Deduplicated so a ticker named twice (e.g. as dependent and independent)
+        # still selects a single column.
+        tickers = list(dict.fromkeys(tickers)) if tickers is not None else None
+        key = ("column", period, column, tuple(tickers) if tickers else None)
+
+        if key not in self._data_cache:
+            data = self._historical_data[period][column]
+            self._data_cache[key] = (
+                data.dropna(how="all") if tickers is None else data[tickers].dropna()
+            )
+
+        return self._data_cache[key]
+
+    def _get_returns(self, period: str, within_period: bool) -> pd.DataFrame:
+        """
+        The Return slice the diagnostic tests run on, memoized per (period,
+        within_period) pair -- see `_data_cache` in `__init__`. Only the dates no
+        series has are dropped: every test runs per series on its own non-missing
+        values, so a younger ticker (or a series observed at other dates) does not
+        shorten another series' history.
+        """
+        if not within_period:
+            return self._get_series_column(period, "Return")
+
+        key = ("returns", period, within_period)
+
+        if key not in self._data_cache:
+            self._data_cache[key] = self._within_historical_data[period][
+                "Return"
+            ].dropna(how="all")
+
+        return self._data_cache[key]
 
     def _get_tickers(self, include_benchmark: bool = False) -> list[str]:
         """
@@ -563,9 +785,7 @@ class Econometrics:
         having every relevant ticker passed in explicitly), so `include_benchmark`
         behaves identically everywhere it appears.
         """
-        tickers = (
-            [self._tickers] if isinstance(self._tickers, str) else list(self._tickers)
-        )
+        tickers = list(self._tickers)
 
         if not include_benchmark:
             tickers = [ticker for ticker in tickers if ticker != BENCHMARK_TICKER]
@@ -680,6 +900,14 @@ class Econometrics:
         stationary. This is a standard first step before modeling a price series or spread
         with mean-reverting methods, since those methods assume stationarity.
 
+        The formula is as follows:
+
+        - ΔYₜ = α + γ·Yₜ₋₁ + Σ(i=1..p) δᵢ·ΔYₜ₋ᵢ + εₜ, with Yₜ the `column` level (Adj Close by default)
+          and regression="c" (the default); "ct" adds a trend β·t and "n" drops α
+        - ADF = γ̂ / SE(γ̂), compared with MacKinnon (1994, 2010) critical values and p-values
+        - p = the number of lags that minimises the AIC, searched from 0 up to `max_lag`, which defaults to
+          min(ceil(12·(n / 100)^(1/4)), (n - 5) // 3)
+
         For more information about the method, see the following paper:
 
         - Dickey, D.A. and Fuller, W.A. (1979). "Distribution of the Estimators for
@@ -690,10 +918,10 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
             max_lag (int, optional): The maximum number of lagged differences to consider. Defaults to
-            the Schwert (1989) rule of thumb.
+            the Schwert (1989) rule of thumb, capped at (n - 5) // 3 for short samples.
             regression (str, optional): Which deterministic terms to include, one of "n" (none), "c"
             (constant) or "ct" (constant and trend). Defaults to "c".
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
@@ -715,31 +943,32 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AMZN", "TSLA"],
+            ["EURUSD", "USDJPY", "GBPUSD"],
             api_key="FINANCIAL_MODELING_PREP_KEY",
-            start_date="2019-01-01",
-            end_date="2023-12-31",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_augmented_dickey_fuller(period="quarterly")
+        toolkit.econometrics.get_augmented_dickey_fuller()
         ```
 
         Which returns:
 
-        |                       |     AMZN |     TSLA |
-        |:----------------------|---------:|---------:|
-        | ADF Statistic         |  -7.1569 |  -2.2371 |
-        | P-Value               |   0      |   0.1931 |
-        | Lags Used             |   8      |   8      |
-        | Observations          |  11      |  11      |
-        | Critical Value 1%     |  -4.2232 |  -4.2232 |
-        | Critical Value 5%     |  -3.1894 |  -3.1894 |
-        | Critical Value 10%    |  -2.7298 |  -2.7298 |
-        | Reject Unit Root (5%) |   1      |   0      |
+        |                       |      EURUSD |     USDJPY |      GBPUSD |
+        |:----------------------|------------:|-----------:|------------:|
+        | ADF Statistic         |   -1.83568  |   -1.68762 |   -1.81162  |
+        | P-Value               |    0.362896 |    0.4375  |    0.374708 |
+        | Lags Used             |    5        |    0       |    2        |
+        | Observations          | 1345        | 1351       | 1349        |
+        | Critical Value 1%     |   -3.43522  |   -3.4352  |   -3.43521  |
+        | Critical Value 5%     |   -2.86369  |   -2.86368 |   -2.86368  |
+        | Critical Value 10%    |   -2.56792  |   -2.56791 |   -2.56791  |
+        | Reject Unit Root (5%) |    0        |    0       |    0        |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
         prices = self._filter_benchmark(
-            self._get_price_column(period, column), include_benchmark=include_benchmark
+            self._get_series_column(period, column),
+            include_benchmark=include_benchmark,
         )
 
         result = pd.DataFrame(
@@ -751,7 +980,9 @@ class Econometrics:
             }
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -774,6 +1005,17 @@ class Econometrics:
         and KPSS failing to reject stationarity together give a confident stationarity
         conclusion, while the two tests disagreeing flags an ambiguous case.
 
+        The formula is as follows:
+
+        - Yₜ = α + eₜ fitted by OLS on the `column` level (Adj Close by default), with regression="c"
+          (the default); "ct" adds a trend β·t
+        - Sₜ = Σ(i=1..t) êᵢ
+        - KPSS = Σ(t=1..n) Sₜ² / (n²·λ²)
+        - λ² = (1 / n)·Σêₜ² + (2 / n)·Σ(s=1..l) (1 - s / (l + 1))·Σ(t=s+1..n) êₜ·êₜ₋ₛ, with l = `lags` or,
+          by default, the Hobijn, Franses and Ooms (2004) automatic bandwidth
+        - The p-value is interpolated from the KPSS (1992) critical value table, so it is bounded
+          between 0.01 and 0.10
+
         For more information about the method, see the following paper:
 
         - Kwiatkowski, D., Phillips, P.C.B., Schmidt, P., & Shin, Y. (1992). "Testing the Null
@@ -784,7 +1026,7 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
             regression (str, optional): Which deterministic term to remove before testing, one of "c"
             (constant, level-stationarity) or "ct" (constant and trend, trend-stationarity).
@@ -811,32 +1053,33 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AMZN", "TSLA"],
+            ["^GSPC", "^N225"],
             api_key="FINANCIAL_MODELING_PREP_KEY",
-            start_date="2019-01-01",
-            end_date="2023-12-31",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_kpss_test(period="quarterly")
+        toolkit.econometrics.get_kpss_test()
         ```
 
         Which returns:
 
-        |                           |    AMZN |    TSLA |
-        |:--------------------------|--------:|--------:|
-        | KPSS Statistic            |  0.1739 |  0.5193 |
-        | P-Value                   |  0.1    |  0.0373 |
-        | Lags Used                 |  2      |  2      |
-        | Observations              | 20      | 20      |
-        | Critical Value 1%         |  0.739  |  0.739  |
-        | Critical Value 2.5%       |  0.574  |  0.574  |
-        | Critical Value 5%         |  0.463  |  0.463  |
-        | Critical Value 10%        |  0.347  |  0.347  |
-        | Reject Stationarity (5%)  |  0      |  1      |
+        |                          |      ^GSPC |      ^N225 |
+        |:-------------------------|-----------:|-----------:|
+        | KPSS Statistic           |    4.73448 |    4.79639 |
+        | P-Value                  |    0.01    |    0.01    |
+        | Lags Used                |   21       |   21       |
+        | Observations             | 1299       | 1298       |
+        | Critical Value 1%        |    0.739   |    0.739   |
+        | Critical Value 2.5%      |    0.574   |    0.574   |
+        | Critical Value 5%        |    0.463   |    0.463   |
+        | Critical Value 10%       |    0.347   |    0.347   |
+        | Reject Stationarity (5%) |    1       |    1       |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
         prices = self._filter_benchmark(
-            self._get_price_column(period, column), include_benchmark=include_benchmark
+            self._get_series_column(period, column),
+            include_benchmark=include_benchmark,
         )
 
         result = pd.DataFrame(
@@ -848,7 +1091,9 @@ class Econometrics:
             }
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -870,6 +1115,17 @@ class Econometrics:
         lagged-difference terms to the regression as ADF does. PP and ADF should broadly agree
         on the same series since they test the same null with different correction methods.
 
+        The formula is as follows:
+
+        - Yₜ = α + ρ·Yₜ₋₁ + uₜ fitted by OLS on the `column` level (Adj Close by default), with
+          regression="c" (the default); "ct" adds a trend β·t
+        - t_ρ = (ρ̂ - 1) / SE(ρ̂), γ₀ = Σûₜ² / n and s² = Σûₜ² / (n - k), with k the number of coefficients
+        - λ² = γ₀ + 2·Σ(j=1..l) (1 - j / (l + 1))·γⱼ, with γⱼ = (1 / n)·Σ(t=j+1..n) ûₜ·ûₜ₋ⱼ and l = `lags`,
+          which defaults to int(12·(n / 100)^(1/4))
+        - Z_t = √(γ₀ / λ²)·t_ρ - (λ² - γ₀) / (2·λ·s)·n·SE(ρ̂)
+        - The unit root is rejected at 5% when Z_t is below the MacKinnon (1996) asymptotic critical value
+          (-2.86 for "c", -3.41 for "ct"); no p-value is reported
+
         For more information about the method, see the following paper:
 
         - Phillips, P.C.B., & Perron, P. (1988). "Testing for a Unit Root in Time Series
@@ -879,21 +1135,23 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
             regression (str, optional): Which deterministic term to include, one of "c" (constant) or
             "ct" (constant and trend). Defaults to "c". Note "n" (no constant) is not supported, see
             `econometrics.unitroot_model.get_phillips_perron_test` for why.
             lags (int, optional): The truncation lag for the Newey-West long-run variance estimate.
-            Defaults to the Schwert (1989) rule of thumb.
+            Defaults to None, meaning the Schwert (1989) rule ceil(12 * (n / 100) ** 0.25), capped
+            for short samples as the ADF lag search is.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             assets tested. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
             None.
 
         Returns:
-            pd.DataFrame: The Phillips-Perron Z_t statistic, truncation lag used, observations used,
-            1%/5%/10% critical values, and whether the unit root is rejected at the 5% level, per asset.
+            pd.DataFrame: The Phillips-Perron Z_t statistic, its MacKinnon (1994) p-value, truncation
+            lag used, observations used, the finite-sample MacKinnon (2010) 1%/5%/10% critical values,
+            and whether the unit root is rejected at the 5% level, per asset.
 
         Notes:
         - The method retrieves historical price data based on the specified `period` and runs the
@@ -904,26 +1162,33 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GCUSD", "SIUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_phillips_perron_test(period="quarterly")
+        toolkit.econometrics.get_phillips_perron_test()
         ```
 
         Which returns:
 
-        |                           |     AMZN |     TSLA |
-        |:--------------------------|---------:|---------:|
-        | Phillips-Perron Statistic |  -0.6688 |  -1.2623 |
-        | Lags Used                 |   9      |   9      |
-        | Observations              |  46      |  46      |
-        | Critical Value 1%         |  -3.43   |  -3.43   |
-        | Critical Value 5%        |  -2.86   |  -2.86   |
-        | Critical Value 10%       |  -2.57   |  -2.57   |
-        | Reject Unit Root (5%)     |   0      |   0      |
+        |                           |      GCUSD |      SIUSD |
+        |:--------------------------|-----------:|-----------:|
+        | Phillips-Perron Statistic |    3.39009 |    4.5285  |
+        | P-Value                   |    1       |    1       |
+        | Lags Used                 |   23       |   23       |
+        | Observations              | 1300       | 1300       |
+        | Critical Value 1%         |   -3.43539 |   -3.43539 |
+        | Critical Value 5%         |   -2.86377 |   -2.86377 |
+        | Critical Value 10%        |   -2.56796 |   -2.56796 |
+        | Reject Unit Root (5%)     |    0       |    0       |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
         prices = self._filter_benchmark(
-            self._get_price_column(period, column), include_benchmark=include_benchmark
+            self._get_series_column(period, column),
+            include_benchmark=include_benchmark,
         )
 
         result = pd.DataFrame(
@@ -935,7 +1200,9 @@ class Econometrics:
             }
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -964,6 +1231,17 @@ class Econometrics:
         favorable to the stationary alternative -- which is why it needs its own
         (more negative) critical values rather than the ordinary ADF ones.
 
+        The formula is as follows:
+
+        - ΔYₜ = μ + θ·DUₜ + β·t + α·Yₜ₋₁ + Σ(i=1..p) cᵢ·ΔYₜ₋ᵢ + εₜ, with Yₜ the `column` level (Adj Close
+          by default) and DUₜ = 1 after the break date T_B and 0 before it (regression="c", the default)
+        - regression="t" replaces θ·DUₜ by a trend break γ·DTₜ, with DTₜ = t - T_B after the break and 0
+          before it, and regression="ct" includes both
+        - ZA = min over T_B of α̂ / SE(α̂), searching every break date outside the first and last `trim`
+          (15% by default) of the sample
+        - p = the number of lags that minimises the AIC, up to `max_lag` (same default as
+          `get_augmented_dickey_fuller`)
+
         For more information about the method, see the following papers:
 
         - Zivot, E., & Andrews, D.W.K. (1992). "Further Evidence on the Great Crash,
@@ -976,10 +1254,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
             max_lag (int, optional): The maximum number of lagged differences to consider when
-            selecting the (single, reused) lag length. Defaults to the Schwert (1989) rule of thumb.
+            selecting the (single, reused) lag length. Defaults to the Schwert (1989) rule of thumb,
+            capped at (n - 5) // 3 for short samples.
             regression (str, optional): Which break to allow for, one of "c" (a break in the
             level/intercept), "t" (a break in the trend slope) or "ct" (both). Defaults to "c".
             trim (float, optional): The fraction of observations excluded from the candidate break
@@ -1005,32 +1284,33 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT"],
+            ["CLUSD"],
             api_key="FINANCIAL_MODELING_PREP_KEY",
-            start_date="2019-01-01",
-            end_date="2023-12-31",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_zivot_andrews_test(period="weekly")
+        toolkit.econometrics.get_zivot_andrews_test()
         ```
 
         Which returns:
 
-        |                         |     AAPL |     MSFT |
-        |:------------------------|---------:|---------:|
-        | Zivot-Andrews Statistic |  -4.7109 |  -4.4313 |
-        | P-Value                 |   0.0686 |   0.1414 |
-        | Break Index             | 169      | 169      |
-        | Observations            | 261      | 261      |
-        | Lags Used               |   0      |   0      |
-        | Critical Value 1%       |  -5.2764 |  -5.2764 |
-        | Critical Value 5%       |  -4.8107 |  -4.8107 |
-        | Critical Value 10%      |  -4.5662 |  -4.5662 |
-        | Reject Unit Root (5%)   |   0      |   0      |
+        |                         |       CLUSD |
+        |:------------------------|------------:|
+        | Zivot-Andrews Statistic |   -4.1369   |
+        | P-Value                 |    0.271885 |
+        | Break Index             |  243        |
+        | Observations            | 1280        |
+        | Lags Used               |   10        |
+        | Critical Value 1%       |   -5.27644  |
+        | Critical Value 5%       |   -4.81067  |
+        | Critical Value 10%      |   -4.56618  |
+        | Reject Unit Root (5%)   |    0        |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
         prices = self._filter_benchmark(
-            self._get_price_column(period, column), include_benchmark=include_benchmark
+            self._get_series_column(period, column),
+            include_benchmark=include_benchmark,
         )
 
         result = pd.DataFrame(
@@ -1042,7 +1322,9 @@ class Econometrics:
             }
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_engle_granger_cointegration(
@@ -1064,6 +1346,23 @@ class Econometrics:
         pairs-trading: if two assets are cointegrated, deviations of the spread from its
         equilibrium level tend to revert, making the spread itself tradeable.
 
+        In pairs trading the slope of the regression of the dependent on the independent
+        ticker is the hedge ratio, and its residual is the spread that is traded.
+        Cointegration found in one window often breaks down in the next, so the relationship
+        is usually tested again on a later sample before it is relied on. The result depends
+        on which ticker is the dependent one, so the two orderings can disagree;
+        `get_johansen_cointegration` tests the pair without that choice.
+
+        The formula is as follows:
+
+        - Step 1: Aₜ = α + β·Bₜ + uₜ, the OLS regression of the dependent on the independent `column`
+          level (Adj Close by default)
+        - Step 2: Δûₜ = γ·ûₜ₋₁ + Σ(i=1..p) δᵢ·Δûₜ₋ᵢ + εₜ, an ADF regression without constant on the residuals
+        - EG = γ̂ / SE(γ̂), compared with the MacKinnon (1994, 2010) cointegration critical values and
+          p-values for two variables
+        - p = the number of lags that minimises the AIC, up to `max_lag` (same default as
+          `get_augmented_dickey_fuller`)
+
         For more information about the method, see the following paper:
 
         - Engle, R.F. and Granger, C.W.J. (1987). "Co-integration and Error Correction:
@@ -1073,10 +1372,11 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
             max_lag (int, optional): The maximum number of lagged differences to consider in the
-            underlying ADF test on the residuals. Defaults to `statsmodels`' automatic selection.
+            underlying ADF test on the residuals. Defaults to the Schwert (1989) rule of thumb,
+            capped at (n - 5) // 3 for short samples.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             tickers paired up. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
@@ -1097,21 +1397,28 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["KO", "PEP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_engle_granger_cointegration(period="quarterly")
+        engle_granger = toolkit.econometrics.get_engle_granger_cointegration()
+
+        # The 1% and 10% critical values follow the same pattern as the 5% one.
+        engle_granger[["Engle-Granger Statistic", "P-Value", "Critical Value 5%", "Cointegrated (5%)"]]
         ```
 
-        Which returns: (the 1%/10% critical value columns follow the same pattern as
-        5%, omitted here for width)
+        Which returns:
 
-        | Dependent   | Independent   |   EG Statistic |   P-Value |   Crit. 5% | Cointegrated (5%)   |
-        |:------------|:--------------|---------------:|----------:|-----------:|:--------------------|
-        | AAPL        | MSFT          |        -1.4334 |    0.7858 |    -3.8927 | False               |
-        | MSFT        | AAPL          |        -2.8297 |    0.1564 |    -3.8927 | False               |
+        |               |   Engle-Granger Statistic |   P-Value |   Critical Value 5% | Cointegrated (5%)   |
+        |:--------------|--------------------------:|----------:|--------------------:|:--------------------|
+        | ('KO', 'PEP') |                   -1.0266 |    0.8977 |              -3.341 | False               |
+        | ('PEP', 'KO') |                   -2.0565 |    0.4991 |              -3.341 | False               |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        prices = self._get_price_column(period, column)
+        period = period if period else "daily"
+        prices = self._get_series_column(period, column)
 
         pairs = self._all_ordered_pairs(include_benchmark=include_benchmark)
         logger.info("Computing %d dependent/independent ticker pairs", len(pairs))
@@ -1123,10 +1430,14 @@ class Econometrics:
             for ticker_a, ticker_b in pairs
         }
 
-        result = pd.DataFrame(rows).T
+        # Transposing rows that mix numbers and a boolean leaves object columns, which
+        # pandas does not round, so the numeric columns are restored first.
+        result = pd.DataFrame(rows).T.infer_objects()
         result.index = result.index.set_names(["Dependent", "Independent"])
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_johansen_cointegration(
@@ -1152,23 +1463,39 @@ class Econometrics:
         independent stationary combinations exist among the `N` individually non-stationary
         price series.
 
+        The formula is as follows:
+
+        - ΔYₜ = Π·Yₜ₋₁ + Σ(i=1..k) Γᵢ·ΔYₜ₋ᵢ + μ + εₜ, with Yₜ the vector of `column` levels (Adj Close by
+          default), k = `k_ar_diff` (1 by default) and the deterministic term μ set by `det_order`: none
+          (-1, Johansen's case 1), an unrestricted constant μ₀ (0, the default, case 3) or a linear trend
+          (1: the levels are linearly detrended before the test, evaluated against the case 5 critical
+          values)
+        - λ₁ ≥ ... ≥ λ_N: the eigenvalues of the reduced-rank regression of ΔYₜ on Yₜ₋₁, both corrected for
+          the lagged differences and μ
+        - Trace(r) = -T·Σ(i=r+1..N) ln(1 - λᵢ)
+        - Max-Eigenvalue(r) = -T·ln(1 - λᵣ₊₁)
+        - Each statistic rejects "rank ≤ r" at the 5% level when it exceeds its 95% critical value
+
         For more information about the method, see the following papers:
 
         - Johansen, S. (1988). "Statistical Analysis of Cointegration Vectors." Journal of
         Economic Dynamics and Control, 12(2-3), 231-254.
         - Johansen, S. (1991). "Estimation and Hypothesis Testing of Cointegration Vectors in
         Gaussian Vector Autoregressive Models." Econometrica, 59(6), 1551-1580.
+        - MacKinnon, J.G., Haug, A.A., & Michelis, L. (1999). "Numerical Distribution
+        Functions of Likelihood Ratio Tests for Cointegration." Journal of Applied
+        Econometrics, 14(5), 563-577.
 
         Also known as: Johansen test, Johansen procedure, VECM rank test.
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Adj Close".
-            det_order (int, optional): Which deterministic term to include: -1 (none), 0 (a
-            constant, restricted to lie in the cointegrating relation) or 1 (a linear trend
-            restricted to the cointegrating relation, alongside an unrestricted constant in
-            the short-run dynamics). Defaults to 0.
+            det_order (int, optional): Which deterministic term to include: -1 (none,
+            Johansen's case 1), 0 (an unrestricted constant, case 3) or 1 (a linear trend,
+            evaluated against the case 5 critical values). The critical values are those of
+            MacKinnon, Haug & Michelis (1999). Defaults to 0.
             k_ar_diff (int, optional): The number of lagged first differences to include as
             short-run dynamics. Defaults to 1.
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
@@ -1191,29 +1518,37 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["V", "MA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_johansen_cointegration(period="quarterly")
+        johansen = toolkit.econometrics.get_johansen_cointegration()
+
+        # The maximum eigenvalue statistic columns follow the same pattern as the trace ones.
+        johansen[["Eigenvalue", "Trace Statistic", "Trace Critical Value 95%", "Reject (Trace, 5%)"]]
         ```
 
-        Which returns: (showing the trace-statistic columns; the max-eigenvalue-statistic
-        columns follow the same pattern)
+        Which returns:
 
-        |        |   Eigenvalue |   Trace Statistic |   Trace Critical Value 95% |   Reject (Trace, 5%)   |
-        |:-------|-------------:|-------------------:|-----------------------------:|:------------------------|
-        | r <= 0 |       0.5653 |             14.1993 |                       15.4943 | False                   |
-        | r <= 1 |       0.3674 |              5.0363 |                        3.8415 | True                    |
+        |        |   Eigenvalue |   Trace Statistic |   Trace Critical Value 95% | Reject (Trace, 5%)   |
+        |:-------|-------------:|------------------:|---------------------------:|:---------------------|
+        | r <= 0 |       0.0107 |           13.9015 |                    15.4943 | False                |
+        | r <= 1 |       0.0003 |            0.3612 |                     3.8415 | False                |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        prices = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        prices = self._get_series_column(period, column, tickers)
 
         result = cointegration_model.get_johansen_cointegration(
             prices[tickers], det_order=det_order, k_ar_diff=k_ar_diff
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_granger_causality(
@@ -1233,6 +1568,21 @@ class Econometrics:
         combined with past values of the second itself, predict the second
         significantly better than past values of the second alone.
 
+        On daily data a significant result can reflect trading hours rather than
+        information: of two markets that close at different times, the one that closes
+        later already contains news the other only prices the next day, so it appears to
+        predict it. The result also depends on `max_lag`, so it is usually checked at a few
+        lag lengths, and across many pairs some significant results arise by chance alone.
+
+        The formula is as follows:
+
+        - Restricted: Aₜ = c + Σ(i=1..p) aᵢ·Aₜ₋ᵢ + eₜ
+        - Unrestricted: Aₜ = c + Σ(i=1..p) aᵢ·Aₜ₋ᵢ + Σ(i=1..p) bᵢ·Bₜ₋ᵢ + uₜ
+        - F = ((RSS_r - RSS_u) / p) / (RSS_u / (T - 2p - 1)), F-distributed with (p, T - 2p - 1) degrees
+          of freedom
+        - A is the dependent and B the independent ticker's `column` (Return by default), p = `max_lag`
+          (5 by default) and T the number of observations after the lags
+
         For more information about the method, see the following paper:
 
         - Granger, C.W.J. (1969). "Investigating Causal Relations by Econometric Models
@@ -1242,7 +1592,7 @@ class Econometrics:
 
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to test. Defaults to "Return", since
             Granger causality assumes a stationary series (unlike the ADF/Engle-Granger tests, which
             operate on price levels on purpose).
@@ -1268,20 +1618,25 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["CLUSD", "XLE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_granger_causality(period="weekly", max_lag=3)
+        toolkit.econometrics.get_granger_causality()
         ```
 
         Which returns:
 
-        | Dependent   | Independent   |   F-Statistic |   P-Value | Granger-Causes (5%)   |
-        |:------------|:--------------|--------------:|----------:|:----------------------|
-        | AAPL        | MSFT          |        2.4852 |    0.0630 | False                 |
-        | MSFT        | AAPL          |        0.3750 |    0.7712 | False                 |
+        |                  |   F-Statistic |   P-Value | Granger-Causes (5%)   |
+        |:-----------------|--------------:|----------:|:----------------------|
+        | ('CLUSD', 'XLE') |        4.2749 |    0.0007 | True                  |
+        | ('XLE', 'CLUSD') |        1.5533 |    0.1705 | False                 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(period, column)
 
         pairs = self._all_ordered_pairs(include_benchmark=include_benchmark)
         logger.info("Computing %d dependent/independent ticker pairs", len(pairs))
@@ -1293,10 +1648,14 @@ class Econometrics:
             for ticker_a, ticker_b in pairs
         }
 
-        result = pd.DataFrame(rows).T
+        # Transposing rows that mix numbers and a boolean leaves object columns, which
+        # pandas does not round, so the numeric columns are restored first.
+        result = pd.DataFrame(rows).T.infer_objects()
         result.index = result.index.set_names(["Dependent", "Independent"])
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -1322,15 +1681,34 @@ class Econometrics:
         plain rolling-window Standard Deviation -- to determine whether one is
         significantly more accurate than the other for a given asset.
 
-        For more information about the method, see the following paper:
+        The squared return is a noisy stand-in for the true Variance. Patton (2011) shows
+        that the squared-error loss still ranks two volatility forecasts correctly with such
+        a proxy, while the absolute-error loss can rank them the wrong way round, so
+        `loss="squared"` is the safer choice. A negative statistic favors `method_a`.
+
+        The formula is as follows:
+
+        - Realized Variance: rₜ²
+        - EWMA forecast ("ewma"): σₜ² = λ·σₜ₋₁² + (1 - λ)·rₜ₋₁², with λ = `lambda_` (0.94 by default), so
+          the forecast for t uses returns up to t - 1
+        - Rolling forecast ("rolling"): the sample variance (ddof=1) of the `window_size` (22 by default)
+          returns up to t - 1
+        - dₜ = L(rₜ² - f_a,ₜ) - L(rₜ² - f_b,ₜ), with L(e) = e² (loss="squared") or |e| (loss="absolute")
+        - DM = mean(d) / √(γ₀ / n)·√((n - 1) / n), with γ₀ = (1 / n)·Σ(dₜ - mean(d))² and the Harvey,
+          Leybourne and Newbold (1997) correction for a one-step horizon
+        - P-Value = 2·P(T > |DM|) for a Student-t distribution with n - 1 degrees of freedom
+
+        For more information about the method, see the following papers:
 
         - Diebold, F.X., & Mariano, R.S. (1995). "Comparing Predictive Accuracy."
         Journal of Business & Economic Statistics, 13(3), 253-263.
+        - Patton, A.J. (2011). "Volatility Forecast Comparison Using Imperfect Volatility
+        Proxies." Journal of Econometrics, 160(1), 246-256.
 
         Also known as: DM test, forecast comparison test.
 
         Args:
-            period (str, optional): The data frequency for returns (daily, weekly, quarterly, or yearly).
+            period (str, optional): The data frequency for returns (daily, weekly, monthly, quarterly, or yearly).
             Defaults to "daily", since `window_size` is expressed in return observations of this
             frequency.
             method_a (str, optional): The first volatility forecasting method, one of "ewma" or "rolling".
@@ -1352,9 +1730,10 @@ class Econometrics:
             favors `method_a`) and the number of observations used, per asset.
 
         Notes:
-        - Both forecasts are lagged by one period (i.e. use only information available up to, and
-        including, the prior period) before being compared to the realized squared return, so this is a
-        genuinely out-of-sample forecast comparison rather than an in-sample fit comparison.
+        - Both forecasts for period t use only the returns up to, and including, period t - 1, so this
+        is a genuinely out-of-sample forecast comparison rather than an in-sample fit comparison.
+        - Each asset uses its own return history, so an asset with a shorter history does not shorten
+        the comparison of the others.
         - Like `Risk.get_var_backtest`, this is calculated over the full return history rather than the
         `within_period` slices used elsewhere in this module, since the rolling/EWMA forecasts need more
         history than a single sub-period provides.
@@ -1364,19 +1743,24 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XOM", "CVX", "SHEL", "BP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.econometrics.get_diebold_mariano_test(method_a="ewma", method_b="rolling")
         ```
 
         Which returns:
 
-        |                           |     AAPL |     MSFT |
-        |:--------------------------|---------:|---------:|
-        | Diebold-Mariano Statistic |  -2.4324 |  -2.8338 |
-        | P-Value                   |   0.0152 |   0.0047 |
-        | Mean Loss Differential    |  -0.0000 |  -0.0000 |
-        | Observations              | 735      | 735      |
+        |                           |       XOM |       CVX |      SHEL |        BP |
+        |:--------------------------|----------:|----------:|----------:|----------:|
+        | Diebold-Mariano Statistic |   -3.9115 |   -4.9425 |   -1.8262 |   -1.3358 |
+        | P-Value                   |    0.0001 |    0      |    0.0681 |    0.1818 |
+        | Mean Loss Differential    |    0      |    0      |    0      |    0      |
+        | Observations              | 1232      | 1232      | 1232      | 1232      |
         """
         if method_a not in ("ewma", "rolling") or method_b not in ("ewma", "rolling"):
             raise ValueError("method_a and method_b must be 'ewma' or 'rolling'.")
@@ -1389,7 +1773,7 @@ class Econometrics:
             )
 
         returns = self._filter_benchmark(
-            self._historical_data[period]["Return"].dropna(),
+            self._historical_data[period]["Return"].dropna(how="all"),
             include_benchmark=include_benchmark,
         )
 
@@ -1405,7 +1789,9 @@ class Econometrics:
             actual, forecast_a, forecast_b, loss=loss, horizon=1
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_ols(
@@ -1423,11 +1809,39 @@ class Econometrics:
     ) -> pd.DataFrame:
         """
         Fit an Ordinary Least Squares (OLS) regression of `dependent_ticker` on
-        `independent_tickers`.
+        `independent_tickers`, using the selected `column` (returns by default) of each ticker.
+
+        OLS estimates the coefficients that minimise the sum of squared residuals, i.e. the
+        line (or plane) that best explains the dependent ticker from the independent tickers.
+
+        The formula is as follows:
+
+        - β̂ = (X'X)⁻¹X'y, with y the dependent ticker's `column` (Return by default) and X the
+          independent tickers' `column` plus a constant column (add_constant=True)
+        - Cov(β̂) = σ̂²·(X'X)⁻¹, with σ̂² = e'e / (n - k) (cov_type="nonrobust"); "HC0" to "HC3",
+          "cluster" and "HAC" (Newey-West with `maxlags`) use statsmodels' sandwich estimators
+        - t = β̂ⱼ / SE(β̂ⱼ), with p-values from a Student-t distribution with n - k degrees of freedom
+        - R² = 1 - e'e / Σ(yₜ - mean(y))²
+
+        Each coefficient is the expected change in `dependent_ticker` for a one-unit change in
+        that independent ticker, holding the others fixed, and the intercept is what remains
+        when all of them are zero. With returns this is the familiar way to estimate how
+        strongly one asset moves with others (e.g. a beta against an index).
+
+        Under the classical assumptions (linearity, no perfect multicollinearity, homoskedastic
+        and uncorrelated errors) OLS is the Best Linear Unbiased Estimator (Gauss-Markov). The
+        coefficients stay unbiased when the errors are heteroskedastic, but the classical
+        standard errors do not: check with `get_breusch_pagan_test` or `get_white_test` and,
+        if needed, refit with a robust `cov_type` such as "HC1" (or "HC3" for small samples),
+        or "HAC" when the errors are also autocorrelated.
+
+        For more information about the HAC covariance, see the following paper:
+
+        - Newey, W.K. & West, K.D. (1987). "A Simple, Positive Semi-Definite,
+        Heteroskedasticity and Autocorrelation Consistent Covariance Matrix." Econometrica,
+        55(3), 703-708.
 
         Also known as: linear regression, least squares regression.
-
-        For more information about the method, see `regression_model.get_ols`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -1439,13 +1853,13 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
             cov_type (str, optional): Which covariance estimator to use for the standard errors --
             one of "nonrobust" (classical, assumes homoskedastic errors), "HC0"/"HC1"/"HC2"/"HC3"
             (heteroskedasticity-robust), "cluster" (cluster-robust, requires `clusters`) or "HAC"
-            (Newey-West, heteroskedasticity-and-autocorrelation-consistent, requires `maxlags`).
+            (Newey-West, heteroskedasticity-and-autocorrelation-consistent, uses `maxlags`).
             Use `get_breusch_pagan_test`/`get_white_test` to check for heteroskedasticity and
             `get_ljung_box_test` to check for autocorrelation first. Defaults to "nonrobust".
             clusters (pd.Series | None, optional): The cluster label for each observation
@@ -1455,9 +1869,9 @@ class Econometrics:
             index even though the regression drops periods with missing data. Defaults
             to None.
             maxlags (int | None, optional): The maximum lag to include when estimating the
-            HAC (Newey-West) covariance matrix, required when `cov_type="HAC"`. A common
-            rule of thumb is `floor(4 * (n / 100)^(2/9))` (Newey & West, 1994). Defaults to
-            None.
+            HAC (Newey-West) covariance matrix, only used when `cov_type="HAC"`. Defaults to
+            None, meaning the Newey & West (1994) rule of thumb `floor(4 * (n / 100)^(2/9))`
+            with `n` the number of observations.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
             None.
 
@@ -1470,41 +1884,35 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AMZN (the first ticker) is dependent; TSLA is independent
-        toolkit.econometrics.get_ols(period="quarterly")
-
-        # Or, override which ticker is dependent/independent, and pull in Benchmark too
-        toolkit.econometrics.get_ols(
-            dependent_ticker="AMZN",
-            independent_tickers=["TSLA", "Benchmark"],
-            period="quarterly",
-            cov_type="HC1",
+        toolkit = Toolkit(
+            ["XOM", "USO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
-        # Or, simply opt every default independent ticker (here, just TSLA) into
-        # including Benchmark too:
-        toolkit.econometrics.get_ols(period="quarterly", include_benchmark=True)
 
-        # Or, use Newey-West (HAC) standard errors for time-series regressions
-        # where errors may be both heteroskedastic and autocorrelated:
-        toolkit.econometrics.get_ols(period="quarterly", cov_type="HAC", maxlags=4)
+        # XOM (the first ticker) is dependent; USO and the Benchmark are independent.
+        # dependent_ticker and independent_tickers choose others, cov_type='HC1' gives
+        # heteroskedasticity-robust and cov_type='HAC' (with maxlags) Newey-West standard errors.
+        toolkit.econometrics.get_ols(include_benchmark=True)
         ```
 
-        Which returns: (for the first call, AMZN regressed on TSLA)
+        Which returns:
 
         |           |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
         |:----------|--------------:|-------------:|--------------:|----------:|
-        | Intercept |        0.0134 |       0.026  |        0.5143 |    0.6119 |
-        | TSLA      |        0.2479 |       0.0817 |        3.0331 |    0.0059 |
+        | Intercept |        0.0005 |       0.0004 |        1.5047 |    0.1327 |
+        | USO       |        0.4878 |       0.0172 |       28.4214 |    0      |
+        | Benchmark |        0.366  |       0.0333 |       10.9991 |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         # Positionally aligned by statsmodels, so it has to be reindexed onto the regression's own index first -- `returns` has already dropped any period with missing data, which a caller-supplied cluster label will not have.  # noqa: E501
@@ -1521,14 +1929,15 @@ class Econometrics:
             maxlags=maxlags,
         )
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
     def get_wls(
         self,
-        weights: pd.Series,
+        weights: pd.Series | str = "feasible",
         dependent_ticker: str | None = None,
         independent_tickers: str | list[str] | None = None,
         include_benchmark: bool = False,
@@ -1544,13 +1953,40 @@ class Econometrics:
         Fit a Weighted Least Squares (WLS) regression of `dependent_ticker` on
         `independent_tickers`.
 
-        Also known as: weighted regression.
+        When the error variance differs across observations (heteroskedasticity) with a known
+        or estimable structure, `Var(e_i) = sigma^2 / w_i`, OLS remains unbiased but is no
+        longer the most efficient estimator. WLS restores efficiency by minimising the
+        weighted sum of squared residuals, so noisier observations (low weight) count less
+        than precise ones (high weight).
 
-        For more information about the method, see `regression_model.get_wls`.
+        The formula is as follows:
+
+        - β̂ = (X'WX)⁻¹X'Wy, with W = diag(weights), the same as OLS of √wₜ·yₜ on √wₜ·xₜ
+        - Cov(β̂) = σ̂²·(X'WX)⁻¹, with σ̂² = Σwₜ·eₜ² / (n - k) (cov_type="nonrobust")
+        - y is the dependent ticker's `column` (Return by default) and X the independent tickers'
+          `column` plus a constant, on the dates where the returns and `weights` all have data
+
+        With equal weights WLS reduces to OLS. A typical use is down-weighting periods of
+        high volatility, so that a few turbulent periods do not dominate the estimated
+        relationship. By default (weights="feasible") the weights are estimated from the
+        regression itself with the feasible GLS procedure of Wooldridge (2016): the
+        logarithm of the squared OLS residuals is regressed on the independent tickers, and
+        each period's weight is 1 / exp(fitted value), the inverse of its estimated error
+        variance. Use `get_breusch_pagan_test` or `get_white_test` to establish whether
+        heteroskedasticity is present before choosing WLS over OLS.
+
+        For more information about the feasible weights, see the following book:
+
+        - Wooldridge, J.M. (2016). "Introductory Econometrics: A Modern Approach", 6th
+        edition, Section 8.4. Cengage Learning.
+
+        Also known as: weighted regression, feasible WLS.
 
         Args:
-            weights (pd.Series): The (positive) weight of each observation, aligned to
-            the same period index as the return data (e.g. `1 / rolling_variance`).
+            weights (pd.Series | str, optional): The (positive) weight of each observation,
+            aligned to the same period index as the return data (e.g. `1 / rolling_variance`),
+            or "feasible" to estimate them from the regression's own residuals with the
+            feasible GLS procedure of Wooldridge (2016). Defaults to "feasible".
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
             Defaults to None, meaning the Toolkit instance's first ticker.
             independent_tickers (str | list[str] | None, optional): The independent
@@ -1560,7 +1996,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
             cov_type (str, optional): Which covariance estimator to use, applied to the weighted/
@@ -1569,8 +2005,8 @@ class Econometrics:
             clusters (pd.Series | None, optional): The cluster label for each observation,
             required when `cov_type="cluster"`. Defaults to None.
             maxlags (int | None, optional): The maximum lag to include when estimating the
-            HAC (Newey-West) covariance matrix, required when `cov_type="HAC"`. See
-            `get_ols`'s `maxlags` for the rule-of-thumb formula. Defaults to None.
+            HAC (Newey-West) covariance matrix, only used when `cov_type="HAC"`. Defaults to
+            None, meaning the Newey & West (1994) rule of thumb (see `get_ols`).
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
             None.
 
@@ -1584,9 +2020,14 @@ class Econometrics:
         import pandas as pd
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        returns = toolkit.econometrics._get_price_column("weekly", "Return")
+        returns = toolkit.econometrics._get_series_column("weekly", "Return", ["AAPL", "MSFT"])
         weights = pd.Series(1.0, index=returns.index)
 
         # AAPL (the first ticker) is dependent, MSFT is independent
@@ -1597,43 +2038,61 @@ class Econometrics:
 
         |           |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
         |:----------|--------------:|-------------:|--------------:|----------:|
-        | Intercept |        0.0016 |       0.0024 |        0.6712 |    0.5031 |
-        | MSFT      |        0.8681 |       0.0596 |       14.5659 |    0      |
+        | Intercept |        0.0012 |       0.0019 |        0.6328 |    0.5274 |
+        | MSFT      |        0.6283 |       0.058  |       10.8323 |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
         )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
+        )
 
-        to_align = [returns[dependent_ticker], returns[independent_tickers], weights]
+        estimate_weights = isinstance(weights, str)
+        if estimate_weights and weights != "feasible":
+            raise ValueError(
+                f"weights must be a Series of weights or 'feasible', received '{weights}'."
+            )
+
+        to_align = [returns[dependent_ticker], returns[independent_tickers]]
+        if not estimate_weights:
+            to_align.append(weights.rename("__weights__"))
         if clusters is not None:
             to_align.append(clusters.rename("__clusters__"))
 
         aligned = pd.concat(to_align, axis=1, join="inner").dropna()
         aligned_clusters = aligned.pop("__clusters__") if clusters is not None else None
+        # Estimated weights come from the same observations as the regression they weight.
+        aligned_weights = (
+            regression_model.get_feasible_weights(
+                aligned.iloc[:, 0], aligned[independent_tickers], add_constant
+            )
+            if estimate_weights
+            else aligned.pop("__weights__")
+        )
 
         result = regression_model.get_wls(
             aligned.iloc[:, 0],
             aligned[independent_tickers],
-            aligned.iloc[:, -1],
+            aligned_weights,
             add_constant=add_constant,
             cov_type=cov_type,
             clusters=aligned_clusters,
             maxlags=maxlags,
         )
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
     def get_gls(
         self,
-        omega: pd.DataFrame,
+        omega: pd.DataFrame | str = "ar1",
         dependent_ticker: str | None = None,
         independent_tickers: str | list[str] | None = None,
         include_benchmark: bool = False,
@@ -1646,13 +2105,39 @@ class Econometrics:
         Fit a Generalized Least Squares (GLS) regression of `dependent_ticker` on
         `independent_tickers`, given a known error covariance structure `omega`.
 
-        Also known as: GLS.
+        GLS generalises WLS to an arbitrary error covariance matrix `Var(e) = sigma^2 * Omega`.
+        Where WLS only corrects for heteroskedasticity (a diagonal `Omega`), GLS also
+        corrects for correlation between the errors of different observations, such as the
+        autocorrelation that is common in financial time series (a non-diagonal `Omega`).
 
-        For more information about the method, see `regression_model.get_gls`.
+        The formula is as follows:
+
+        - β̂ = (X'Ω⁻¹X)⁻¹X'Ω⁻¹y
+        - Cov(β̂) = σ̂²·(X'Ω⁻¹X)⁻¹, with σ̂² = e'Ω⁻¹e / (n - k)
+        - y is the dependent ticker's `column` (Return by default) and X the independent tickers'
+          `column` plus a constant (add_constant=True)
+
+        Under a correctly specified `Omega` this is the most efficient linear unbiased
+        estimator. By default (omega="ar1") `Omega` is estimated from the regression itself
+        as an AR(1) error structure, eₜ = ρ·eₜ₋₁ + uₜ: ρ is the slope of the OLS residuals on
+        their own lag and Ωᵢⱼ = ρ^|i - j|, which makes this the Prais-Winsten estimator. Any
+        other structure can be supplied as `omega`. `get_durbin_watson_test` helps establish
+        whether the residuals are autocorrelated in the first place.
+
+        For more information about the method, see the following paper:
+
+        - Aitken, A.C. (1935). "On Least Squares and Linear Combinations of Observations."
+        Proceedings of the Royal Society of Edinburgh, 55, 42-48.
+        - Prais, S.J. and Winsten, C.B. (1954). "Trend Estimators and Serial Correlation."
+        Cowles Commission Discussion Paper No. 383.
+
+        Also known as: GLS, Prais-Winsten.
 
         Args:
-            omega (pd.DataFrame): The (symmetric, positive-definite) error covariance
-            structure, up to a scalar, shape `(n, n)`.
+            omega (pd.DataFrame | str, optional): The (symmetric, positive-definite) error
+            covariance structure, up to a scalar, shape `(n, n)`, or "ar1" to estimate an
+            AR(1) structure from the regression's own residuals (Prais-Winsten). Defaults
+            to "ar1".
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
             Defaults to None, meaning the Toolkit instance's first ticker.
             independent_tickers (str | list[str] | None, optional): The independent
@@ -1662,7 +2147,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
@@ -1679,10 +2164,15 @@ class Econometrics:
         import pandas as pd
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        returns = toolkit.econometrics._get_price_column("weekly", "Return")
-        n = len(returns["AAPL"].dropna())
+        returns = toolkit.econometrics._get_series_column("weekly", "Return", ["AAPL", "MSFT"])
+        n = len(returns)
         omega = pd.DataFrame(np.eye(n))
 
         # AAPL (the first ticker) is dependent; MSFT is independent
@@ -1693,27 +2183,40 @@ class Econometrics:
 
         |           |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
         |:----------|--------------:|-------------:|--------------:|----------:|
-        | Intercept |        0.0016 |       0.0024 |        0.6712 |    0.5031 |
-        | MSFT      |        0.8681 |       0.0596 |       14.5659 |    0      |
+        | Intercept |        0.0012 |       0.0019 |        0.6328 |    0.5274 |
+        | MSFT      |        0.6283 |       0.058  |       10.8323 |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
         )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
+        )
+
+        if isinstance(omega, str):
+            if omega != "ar1":
+                raise ValueError(
+                    f"omega must be a DataFrame or 'ar1', received '{omega}'."
+                )
+            omega_values = regression_model.get_ar1_covariance(
+                returns[dependent_ticker], returns[independent_tickers], add_constant
+            )
+        else:
+            omega_values = omega.to_numpy()
 
         result = regression_model.get_gls(
             returns[dependent_ticker],
             returns[independent_tickers],
-            omega.to_numpy(),
+            omega_values,
             add_constant=add_constant,
         )
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -1728,12 +2231,42 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Fit a Logistic Regression (Logit model) of whether `dependent_ticker`'s
-        return is positive on `independent_tickers`.
+        Fit a Logistic Regression (Logit model) of whether `dependent_ticker`'s return is
+        positive on `independent_tickers`.
+
+        The dependent variable is turned into a binary outcome (1 when the return is
+        positive, 0 otherwise) and the model estimates the probability of that outcome
+        through the logistic (sigmoid) function, which maps any value onto the 0 to 1 range.
+
+        The formula is as follows:
+
+        - yₜ = 1 if the dependent ticker's `column` (Return by default) is above 0, else 0
+        - P(yₜ = 1 | xₜ) = 1 / (1 + exp(-xₜ'β)), with xₜ the independent tickers' `column` plus a
+          constant
+        - β̂ = argmax Σ[yₜ·ln(pₜ) + (1 - yₜ)·ln(1 - pₜ)], solved by Newton-Raphson (statsmodels Logit)
+        - Pseudo R² = 1 - ln L(β̂) / ln L₀ (McFadden), with L₀ the likelihood of a constant-only model
+
+        The model is fitted by Maximum Likelihood. Coefficients are log-odds: a one-unit
+        increase in an independent ticker changes the log-odds of a positive return by that
+        coefficient, holding the others fixed, so a positive coefficient means a higher
+        probability of a positive return. This answers "does this asset tend to be up when
+        the others move this way" rather than "by how much", which is what `get_ols`
+        estimates. `get_probit_regression` is the closely related alternative with a normal
+        instead of a logistic link.
+
+        The coefficients are per unit of the independent ticker's return, and a unit is a
+        return of 100%: a coefficient of 90 on the benchmark means the log-odds of an up
+        period rise by about 0.9 for every 1% the benchmark moves. With returns of the same
+        period as regressors the model describes co-movement and predicts nothing; a
+        forecast needs regressors known in advance, such as the returns of the previous
+        period.
+
+        For more information about the method, see the following paper:
+
+        - Berkson, J. (1944). "Application of the Logistic Function to Bio-Assay." Journal of
+        the American Statistical Association, 39(227), 357-365.
 
         Also known as: logit model, logit regression.
-
-        For more information about the method, see `regression_model.get_logistic_regression`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent asset (whose
@@ -1746,7 +2279,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to derive returns from. Defaults to
             "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
@@ -1767,29 +2300,32 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_logistic_regression(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["AAPL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # AAPL (the first ticker) is dependent; the Benchmark is independent
+        toolkit.econometrics.get_logistic_regression(include_benchmark=True)
         ```
 
         Which returns:
 
         |           |   Coefficient |   Std. Error |   z-Statistic |   P-Value |
         |:----------|--------------:|-------------:|--------------:|----------:|
-        | Intercept |        0.0909 |       0.2195 |        0.4139 |    0.6789 |
-        | MSFT      |       24.8481 |      10.1178 |        2.4559 |    0.0141 |
-        | Benchmark |       63.677  |      15.5493 |        4.0952 |    0      |
+        | Intercept |       -0.0275 |       0.15   |       -0.1836 |    0.8543 |
+        | Benchmark |      164.846  |      25.4127 |        6.4868 |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         direction = (returns[dependent_ticker] > 0).astype(float)
@@ -1798,8 +2334,9 @@ class Econometrics:
             direction, returns[independent_tickers], add_constant=add_constant
         )
 
-        return regression_model.binary_regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.binary_regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -1814,12 +2351,33 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Fit a Probit Regression of whether `dependent_ticker`'s return is positive
-        on `independent_tickers`.
+        Fit a Probit Regression of whether `dependent_ticker`'s return is positive on
+        `independent_tickers`.
+
+        As with `get_logistic_regression`, the dependent variable is turned into a binary
+        outcome (1 when the return is positive, 0 otherwise). The probability of that outcome
+        is modelled through the standard normal cumulative distribution function instead of
+        the logistic function.
+
+        The formula is as follows:
+
+        - yₜ = 1 if the dependent ticker's `column` (Return by default) is above 0, else 0
+        - P(yₜ = 1 | xₜ) = Φ(xₜ'β), with xₜ the independent tickers' `column` plus a constant
+        - β̂ = argmax Σ[yₜ·ln(pₜ) + (1 - yₜ)·ln(1 - pₜ)], solved by Newton-Raphson (statsmodels Probit)
+        - Pseudo R² = 1 - ln L(β̂) / ln L₀ (McFadden), with L₀ the likelihood of a constant-only model
+
+        Where `Phi` is the standard normal CDF. The model is fitted by Maximum Likelihood. A
+        positive coefficient means a higher probability of a positive return, but the size of
+        a coefficient is not a log-odds ratio as in the Logit model. In practice Probit and
+        Logit give very similar fitted probabilities; Probit is the convention in parts of the
+        econometrics literature and underlies two-step estimators such as the Heckman
+        selection correction.
+
+        For more information about the method, see the following paper:
+
+        - Bliss, C.I. (1934). "The Method of Probits." Science, 79(2037), 38-39.
 
         Also known as: probit model.
-
-        For more information about the method, see `regression_model.get_probit_regression`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent asset (whose
@@ -1832,7 +2390,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to derive returns from. Defaults to
             "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
@@ -1853,29 +2411,32 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_probit_regression(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["TSLA", "QQQ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # TSLA (the first ticker) is dependent; QQQ is independent
+        toolkit.econometrics.get_probit_regression()
         ```
 
         Which returns:
 
         |           |   Coefficient |   Std. Error |   z-Statistic |   P-Value |
         |:----------|--------------:|-------------:|--------------:|----------:|
-        | Intercept |        0.0498 |       0.1266 |        0.3935 |    0.694  |
-        | MSFT      |       15.7063 |       5.7385 |        2.737  |    0.0062 |
-        | Benchmark |       35.3471 |       8.1355 |        4.3448 |    0      |
+        | Intercept |       -0.0848 |       0.0913 |       -0.9294 |    0.3527 |
+        | QQQ       |       78.1324 |      11.1444 |        7.0109 |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         direction = (returns[dependent_ticker] > 0).astype(float)
@@ -1884,8 +2445,9 @@ class Econometrics:
             direction, returns[independent_tickers], add_constant=add_constant
         )
 
-        return regression_model.binary_regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.binary_regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -1902,12 +2464,41 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Fit a Quantile Regression of `dependent_ticker` on `independent_tickers` at
-        quantile `tau`.
+        Fit a Quantile Regression of `dependent_ticker` on `independent_tickers` at quantile
+        `tau`.
+
+        Where OLS estimates how the average (conditional mean) of the dependent ticker depends
+        on the independent tickers, Quantile Regression estimates how a chosen quantile of it
+        does. It minimises an asymmetric ("pinball") loss that is smallest at the conditional
+        `tau`-quantile.
+
+        The formula is as follows:
+
+        - β̂(τ) = argmin Σ(τ·max(uₜ, 0) + (1 - τ)·max(-uₜ, 0)), with uₜ = yₜ - xₜ'β and τ = `tau` (0.5
+          by default)
+        - y is the dependent ticker's `column` (Return by default) and X the independent tickers'
+          `column` plus a constant (add_constant=True)
+        - SE(β̂): statsmodels' kernel sandwich estimator (Epanechnikov kernel, Hall-Sheather bandwidth),
+          or, when `n_bootstrap` > 0, the standard deviation (ddof=1) of β̂ over `n_bootstrap`
+          resampled-pairs fits
+
+        With `tau = 0.5` this is the median regression, which is far less sensitive to
+        outliers than OLS. Fitting at several quantiles (e.g. 0.05, 0.5 and 0.95) shows how
+        the whole distribution of returns responds to the independent tickers, for example
+        whether an asset's sensitivity to the market is larger in sell-offs (low quantiles)
+        than in normal periods, which is directly relevant for downside risk.
+
+        Comparing the coefficients at a low `tau` with those at `tau=0.5`, or with the
+        betas from `get_ols`, shows whether the sensitivity to the market rises in
+        sell-offs. The table has no p-values: a coefficient more than about two standard
+        errors from zero is significant at the 5% level.
+
+        For more information about the method, see the following paper:
+
+        - Koenker, R., & Bassett, G. (1978). "Regression Quantiles." Econometrica, 46(1),
+        33-50.
 
         Also known as: QR.
-
-        For more information about the method, see `regression_model.get_quantile_regression`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -1920,7 +2511,7 @@ class Econometrics:
             explicitly). Defaults to False.
             tau (float, optional): The quantile to fit, in (0, 1). Defaults to 0.5 (the median).
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
             n_bootstrap (int, optional): The number of bootstrap resamples used for coefficient
@@ -1937,29 +2528,34 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_quantile_regression(
-            independent_tickers=["MSFT", "Benchmark"], tau=0.5, period="weekly"
+        toolkit = Toolkit(
+            ["BAC", "KRE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
+
+        # BAC (the first ticker) is dependent; KRE and the Benchmark are independent.
+        # tau=0.05 describes how the worst 5% of days respond.
+        toolkit.econometrics.get_quantile_regression(include_benchmark=True, tau=0.05)
         ```
 
         Which returns:
 
         |           |   Coefficient |   Std. Error |
         |:----------|--------------:|-------------:|
-        | Intercept |        0.0007 |       0.0021 |
-        | MSFT      |        0.3593 |       0.0854 |
-        | Benchmark |        0.6885 |       0.1037 |
+        | Intercept |       -0.0146 |       0.0006 |
+        | KRE       |        0.5271 |       0.0484 |
+        | Benchmark |        0.3965 |       0.1133 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
             independent_tickers=independent_tickers,
             include_benchmark=include_benchmark,
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         result = regression_model.get_quantile_regression(
@@ -1970,8 +2566,9 @@ class Econometrics:
             n_bootstrap=n_bootstrap,
         )
 
-        return regression_model.quantile_regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.quantile_regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -1985,15 +2582,51 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Fit a Fama-MacBeth (1973) two-pass cross-sectional regression: `asset_tickers`
-        is treated as the cross-section of test assets, `factor_tickers` as the risk
-        factor(s) whose risk premia are estimated -- the standard procedure for
-        testing whether a proposed risk factor is actually priced.
+        Fit a Fama-MacBeth (1973) two-pass cross-sectional regression: `asset_tickers` is
+        treated as the cross-section of test assets, `factor_tickers` as the risk factor(s)
+        whose risk premia are estimated -- the standard procedure for testing whether a
+        proposed risk factor is actually priced.
+
+        The method runs in two passes:
+
+        1. Time-series pass (per asset): regress each asset's returns on the factor(s) to
+        estimate its factor loadings (betas).
+        2. Cross-sectional pass (per period): regress that period's returns of all assets on
+        those betas, which gives one estimate of each factor's risk premium per period.
+
+        The formula is as follows:
+
+        - First pass: R_i,t = alpha_i + beta_i' * F_t + e_i,t, for each asset i, over the full sample
+        - Second pass: R_i,t = gamma_0,t + gamma_t' * beta_i + u_i,t, for each period t (gamma_0,t only
+          with add_constant=True)
+        - Risk premium: gamma_hat = mean_t(gamma_t)
+        - Standard error: SE(gamma_hat) = std_t(gamma_t) / sqrt(T), with ddof=1
+        - t = gamma_hat / SE(gamma_hat), with p-values from a Student-t distribution with T - 1 degrees
+          of freedom
+        - R are the asset tickers' `column` (Return by default) and F the factor tickers' `column`
+          (the Benchmark by default)
+
+        The risk premium is the average of the per-period estimates, and its standard error
+        comes from how much those estimates vary over time. That is the method's key
+        contribution: it accounts for correlation between the assets' residuals without
+        having to model it. A significant positive premium means investors are compensated
+        for exposure to the factor. This uses a single full-sample set of betas (the
+        textbook variant), not the original rolling-window betas.
+
+        The first-pass betas are estimates, which makes the second-pass standard errors too
+        small; the Shanken (1992) correction, not applied here, widens them. The returns are
+        not in excess of the risk-free rate, so the intercept is the return of a zero-beta
+        asset, which should be close to the risk-free rate if the factors price the assets.
+
+        For more information about the method, see the following papers:
+
+        - Fama, E.F. & MacBeth, J.D. (1973). "Risk, Return, and Equilibrium: Empirical Tests."
+        Journal of Political Economy, 81(3), 607-636.
+        - Shanken, J. (1992). "On the Estimation of Beta-Pricing Models." Review of Financial
+        Studies, 5(1), 1-33.
+        - Cochrane, J.H. (2005). "Asset Pricing." Princeton University Press, Chapter 12.
 
         Also known as: two-pass regression, Fama-MacBeth procedure.
-
-        For more information about the method, see
-        `fama_macbeth_model.get_fama_macbeth_regression`.
 
         Args:
             factor_tickers (str | list[str] | None, optional): The ticker(s) whose
@@ -2003,7 +2636,7 @@ class Econometrics:
             cross-section of test assets. Defaults to None, meaning every Toolkit
             ticker (including "Benchmark") not already used as a factor.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the
             second-pass cross-sectional regression. Defaults to True.
@@ -2027,24 +2660,26 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # Benchmark (the default factor) is the single risk factor; AAPL and MSFT
-        # are the test assets. add_constant=False since only 2 assets are available.
-        toolkit.econometrics.get_fama_macbeth_regression(
-            period="weekly", add_constant=False
+        toolkit = Toolkit(
+            ["AAPL", "MSFT", "JPM", "XOM", "JNJ", "PG", "KO", "WMT", "CAT", "NEE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
+
+        # The Benchmark (the default factor) is the single risk factor and the ten
+        # stocks are the test assets.
+        toolkit.econometrics.get_fama_macbeth_regression(period="monthly")
         ```
 
         Which returns:
 
         |           |   Risk Premium |   Std. Error |   t-Statistic |   P-Value |
         |:----------|---------------:|-------------:|--------------:|----------:|
-        | Benchmark |         0.0032 |       0.0016 |        1.9798 |    0.0486 |
+        | Intercept |         0.0066 |       0.0058 |        1.1505 |    0.2547 |
+        | Benchmark |         0.0101 |       0.008  |        1.2668 |    0.2103 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         factor_tickers = (
             [factor_tickers]
             if isinstance(factor_tickers, str)
@@ -2068,14 +2703,19 @@ class Econometrics:
                 else list(asset_tickers)
             )
 
+        returns = self._get_series_column(
+            period, column, [*asset_tickers, *factor_tickers]
+        )
+
         result = fama_macbeth_model.get_fama_macbeth_regression(
             returns[asset_tickers],
             returns[factor_tickers],
             add_constant=add_constant,
         )
 
-        return fama_macbeth_model.fama_macbeth_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            fama_macbeth_model.fama_macbeth_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     def _fit_ols_result(
@@ -2093,13 +2733,14 @@ class Econometrics:
         since the F-test, Wald test and Likelihood Ratio test all operate directly
         on the result dict's residuals/coefficients/covariance matrix.
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         independent_tickers = (
             [independent_tickers]
             if isinstance(independent_tickers, str)
             else independent_tickers
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         return regression_model.get_ols(
@@ -2118,17 +2759,43 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Calculate a two-sample t-test for a difference in mean `column` between
-        every unordered pair of tickers in the Toolkit instance.
+        Calculate a two-sample t-test for a difference in mean `column` between every
+        unordered pair of tickers in the Toolkit instance.
+
+        The test checks the null hypothesis that two samples come from distributions with
+        the same mean, against the two-sided alternative that the means differ. Applied to
+        returns it answers whether one asset has had a genuinely different average return
+        than another, or whether the difference could be down to chance. By default this is
+        Welch's t-test, which does not assume the two tickers have the same variance.
+
+        The formula is as follows:
+
+        - Welch (the default): t = (mean_a - mean_b) / sqrt(s_a^2 / n_a + s_b^2 / n_b)
+        - Welch-Satterthwaite: df = (s_a^2 / n_a + s_b^2 / n_b)^2 / ((s_a^2 / n_a)^2 / (n_a - 1)
+          + (s_b^2 / n_b)^2 / (n_b - 1))
+        - Student (equal_variance=True): t = (mean_a - mean_b) / (s_p·sqrt(1 / n_a + 1 / n_b)), with
+          s_p^2 = ((n_a - 1)·s_a^2 + (n_b - 1)·s_b^2) / (n_a + n_b - 2) and df = n_a + n_b - 2
+        - s_a^2 and s_b^2 are sample variances (ddof=1) of the two tickers' `column` (Return by
+          default), with a two-sided p-value
+
+        Setting `equal_variance=True` pools the two variances instead (Student's t-test), which is
+        slightly more powerful but only valid when the variances are truly equal. Welch's
+        version is the safer default since assets rarely share the same volatility. A low
+        p-value (e.g. below 0.05) means the difference in means is statistically
+        significant.
+
+        For more information about the method, see the following papers:
+
+        - Student (1908). "The Probable Error of a Mean." Biometrika, 6(1), 1-25.
+        - Welch, B.L. (1947). "The Generalization of 'Student's' Problem when Several
+        Different Population Variances are Involved." Biometrika, 34(1/2), 28-35.
 
         Also known as: independent samples t-test, Welch's t-test (default), Student's
         t-test (`equal_variance=True`).
 
-        For more information about the method, see `hypothesis_testing_model.get_two_sample_t_test`.
-
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to compare. Defaults to "Return".
             equal_variance (bool, optional): Whether to assume the two samples share a common
             variance (Student's pooled t-test) instead of Welch's (unequal-variance) t-test.
@@ -2152,19 +2819,26 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["MSFT", "ORCL", "SAP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_two_sample_t_test(period="weekly")
+        toolkit.econometrics.get_two_sample_t_test()
         ```
 
         Which returns:
 
-        | Ticker A   | Ticker B   |   T-Statistic |   Degrees of Freedom |   P-Value |   Mean A |   Mean B |
-        |:-----------|:-----------|--------------:|----------------------:|----------:|---------:|---------:|
-        | AAPL       | MSFT       |        0.2318 |               306.6549 |    0.8168 |   0.0047 |   0.0036 |
+        |                  |   T-Statistic |   Degrees of Freedom |   P-Value |   Mean A |   Mean B |
+        |:-----------------|--------------:|---------------------:|----------:|---------:|---------:|
+        | ('MSFT', 'ORCL') |       -0.528  |              2176.24 |    0.5975 |   0.0008 |   0.0012 |
+        | ('MSFT', 'SAP')  |        0.1389 |              2504.05 |    0.8895 |   0.0008 |   0.0007 |
+        | ('ORCL', 'SAP')  |        0.6326 |              2210.92 |    0.5271 |   0.0012 |   0.0007 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(period, column)
 
         rows = {
             (ticker_a, ticker_b): hypothesis_testing_model.get_two_sample_t_test(
@@ -2175,10 +2849,14 @@ class Econometrics:
             )
         }
 
-        result = pd.DataFrame(rows).T
+        # Transposing rows that mix numbers and a boolean leaves object columns, which
+        # pandas does not round, so the numeric columns are restored first.
+        result = pd.DataFrame(rows).T.infer_objects()
         result.index = result.index.set_names(["Ticker A", "Ticker B"])
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_f_test(
@@ -2192,15 +2870,30 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate a nested-model F-test for the joint significance of the regressors
-        in `unrestricted_independent_tickers` that are not already in
+        Calculate a nested-model F-test for the joint significance of the regressors in
+        `unrestricted_independent_tickers` that are not already in
         `restricted_independent_tickers`.
 
-        Also known as: nested F-test, restricted vs. unrestricted F-test, partial F-test.
+        Two OLS regressions of `dependent_ticker` are fitted internally: a "restricted" one on
+        `restricted_independent_tickers` and an "unrestricted" one that adds the extra
+        tickers. The test checks the null hypothesis that the `q` extra tickers are jointly
+        zero, i.e. that adding them does not explain the dependent ticker any better, by
+        comparing how much the Residual Sum of Squares (RSS) drops when they are added.
 
-        Fits both a "restricted" and an "unrestricted" OLS regression of
-        `dependent_ticker` internally (via `regression_model.get_ols`) and compares
-        them. For more information about the method, see `hypothesis_testing_model.get_f_test`.
+        The formula is as follows:
+
+        - F = ((RSS_restricted - RSS_unrestricted) / q) / (RSS_unrestricted / (n - k_unrestricted))
+        - Both models are OLS regressions of the dependent ticker's `column` (Return by default),
+          with a constant when add_constant=True
+
+        Where `q = k_unrestricted - k_restricted` is the number of added regressors, `n` the
+        number of observations and `k_unrestricted` the number of parameters of the larger
+        model. Under the null, `F` follows an F(q, n - k_unrestricted) distribution. A low
+        p-value means the extra tickers meaningfully improve the fit as a group, even when
+        none of them is significant individually. `get_likelihood_ratio_test` is the
+        asymptotic Maximum Likelihood counterpart.
+
+        Also known as: nested F-test, restricted vs. unrestricted F-test, partial F-test.
 
         Args:
             dependent_ticker (str): The dependent (predicted) asset.
@@ -2209,7 +2902,7 @@ class Econometrics:
             unrestricted_independent_tickers (str | list[str]): The independent asset(s) in the
             unrestricted (larger) model -- must be a superset of `restricted_independent_tickers`.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in both models. Defaults
             to True.
@@ -2225,7 +2918,12 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.econometrics.get_f_test(
             "AAPL", "MSFT", ["MSFT", "Benchmark"], period="weekly"
@@ -2234,13 +2932,13 @@ class Econometrics:
 
         Which returns:
 
-        | Metric                     |     Value |
-        |:----------------------------|----------:|
-        | F-Statistic                 |   43.6897 |
-        | Df Numerator                 |    1      |
-        | Df Denominator                |  154      |
-        | P-Value                      |    0.0000 |
-        | Reject Restrictions (5%)      |    1      |
+        |                          |       0 |
+        |:-------------------------|--------:|
+        | F-Statistic              | 104.748 |
+        | Df Numerator             |   1     |
+        | Df Denominator           | 257     |
+        | P-Value                  |   0     |
+        | Reject Restrictions (5%) |   1     |
         """
         restricted_result = self._fit_ols_result(
             dependent_ticker,
@@ -2261,7 +2959,9 @@ class Econometrics:
             restricted_result, unrestricted_result
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_likelihood_ratio_test(
@@ -2275,17 +2975,35 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate a nested-model Likelihood Ratio (LR) test, the Maximum Likelihood
-        analogue of `get_f_test`, for the joint significance of the regressors in
+        Calculate a nested-model Likelihood Ratio (LR) test, the Maximum Likelihood analogue
+        of `get_f_test`, for the joint significance of the regressors in
         `unrestricted_independent_tickers` that are not already in
         `restricted_independent_tickers`.
 
-        Also known as: LR test, Wilks' likelihood ratio test.
+        As with `get_f_test`, a "restricted" and an "unrestricted" OLS regression of
+        `dependent_ticker` are fitted internally and the null hypothesis is that the `q` extra
+        tickers are jointly zero. Instead of an F-statistic, the two models are compared
+        through the ratio of their likelihoods, which for linear models with normal errors
+        reduces to a function of the two Residual Sums of Squares (RSS).
 
-        Fits both a "restricted" and an "unrestricted" OLS regression of
-        `dependent_ticker` internally (via `regression_model.get_ols`) and compares
-        them. For more information about the method, see
-        `hypothesis_testing_model.get_likelihood_ratio_test`.
+        The formula is as follows:
+
+        - LR = -2·(ln L_restricted - ln L_unrestricted) = n * ln(RSS_restricted / RSS_unrestricted)
+        - Both models are OLS regressions of the dependent ticker's `column` (Return by default),
+          with a constant when add_constant=True
+
+        Under the null this is asymptotically chi-squared distributed with `q` degrees of
+        freedom. Where the F-test is exact in small samples under the classical assumptions,
+        the LR test relies on a large-sample approximation: both agree for long return
+        histories and can differ somewhat for short ones. A low p-value means the extra
+        tickers meaningfully improve the model.
+
+        For more information about the method, see the following paper:
+
+        - Wilks, S.S. (1938). "The Large-Sample Distribution of the Likelihood Ratio for
+        Testing Composite Hypotheses." Annals of Mathematical Statistics, 9(1), 60-62.
+
+        Also known as: LR test, Wilks' likelihood ratio test.
 
         Args:
             dependent_ticker (str): The dependent (predicted) asset.
@@ -2294,7 +3012,7 @@ class Econometrics:
             unrestricted_independent_tickers (str | list[str]): The independent asset(s) in the
             unrestricted (larger) model -- must be a superset of `restricted_independent_tickers`.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in both models. Defaults
             to True.
@@ -2310,7 +3028,12 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.econometrics.get_likelihood_ratio_test(
             "AAPL", "MSFT", ["MSFT", "Benchmark"], period="weekly"
@@ -2319,12 +3042,12 @@ class Econometrics:
 
         Which returns:
 
-        | Metric                     |    Value |
-        |:----------------------------|---------:|
-        | LR Statistic                 |  39.2102 |
-        | Degrees of Freedom            |   1      |
-        | P-Value                       |   0.0000 |
-        | Reject Restrictions (5%)       |   1      |
+        |                          |       0 |
+        |:-------------------------|--------:|
+        | LR Statistic             | 88.8863 |
+        | Degrees of Freedom       |  1      |
+        | P-Value                  |  0      |
+        | Reject Restrictions (5%) |  1      |
         """
         restricted_result = self._fit_ols_result(
             dependent_ticker,
@@ -2345,36 +3068,60 @@ class Econometrics:
             restricted_result, unrestricted_result
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_wald_test(
         self,
-        restriction_matrix: pd.DataFrame | np.ndarray,
+        restriction_matrix: pd.DataFrame | np.ndarray | list[list[float]],
         dependent_ticker: str | None = None,
         independent_tickers: str | list[str] | None = None,
         include_benchmark: bool = False,
-        restriction_values: pd.Series | np.ndarray | None = None,
+        restriction_values: pd.Series | np.ndarray | list[float] | None = None,
         period: str | None = None,
         column: str = "Return",
         add_constant: bool = True,
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate a Wald test of `q` general linear restriction(s) on the coefficients
-        of an OLS regression of `dependent_ticker` on `independent_tickers`.
+        Calculate a Wald test of `q` general linear restriction(s) on the coefficients of an
+        OLS regression of `dependent_ticker` on `independent_tickers`.
+
+        A single OLS regression is fitted internally and the test checks the null hypothesis
+        `H0: R @ beta = r`, where `R` (`restriction_matrix`) encodes `q` linear restrictions
+        on the coefficients and `r` (`restriction_values`) holds their hypothesised values
+        (zero by default). This generalises the t-test reported for each coefficient to
+        combinations of coefficients, for example that two coefficients are jointly zero,
+        that a coefficient equals a specific value (such as a beta of exactly 1), or that two
+        tickers have the same coefficient.
+
+        The formula is as follows:
+
+        - W = (R @ beta_hat - r)' @ (R @ Cov(beta_hat) @ R')^-1 @ (R @ beta_hat - r)
+        - F = W / q, F-distributed with (q, n - k) degrees of freedom
+        - beta_hat and the classical Cov(beta_hat) = σ̂²·(X'X)⁻¹ come from the OLS regression of the
+          dependent ticker's `column` (Return by default), with a constant when add_constant=True
+
+        Which is asymptotically chi-squared distributed with `q` degrees of freedom. `W / q`
+        is reported alongside it as an F-statistic for small samples; for a single
+        restriction it equals the squared t-statistic of that coefficient. A low p-value
+        means the data reject the restriction(s).
+
+        For more information about the method, see the following paper:
+
+        - Wald, A. (1943). "Tests of Statistical Hypotheses Concerning Several Parameters When
+        the Number of Observations is Large." Transactions of the American Mathematical
+        Society, 54(3), 426-482.
 
         Also known as: Wald chi-squared test.
 
-        Fits a single OLS regression internally (via `regression_model.get_ols`) and
-        tests `H0: restriction_matrix @ beta = restriction_values` on its
-        coefficients. For more information about the method, see
-        `hypothesis_testing_model.get_wald_test`.
-
         Args:
-            restriction_matrix (pd.DataFrame | np.ndarray): The `(q, k)` restriction matrix `R`, one
-            row per restriction, one column per coefficient in the same order as `add_constant`
-            (if True, "Intercept" first) followed by the independent ticker(s).
+            restriction_matrix (pd.DataFrame | np.ndarray | list[list[float]]): The `(q, k)`
+            restriction matrix `R`, one row per restriction, one column per coefficient in the
+            same order as `add_constant` (if True, "Intercept" first) followed by the
+            independent ticker(s), e.g. [[0, 1, 0], [0, 0, 1]].
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
             Defaults to None, meaning the Toolkit instance's first ticker.
             independent_tickers (str | list[str] | None, optional): The independent
@@ -2385,10 +3132,11 @@ class Econometrics:
             include_benchmark (bool, optional): Whether to include "Benchmark" in the
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
-            restriction_values (pd.Series | np.ndarray | None, optional): The length-`q` vector of
-            hypothesized values. Defaults to None, i.e. all restrictions equal zero.
+            restriction_values (pd.Series | np.ndarray | list[float] | None, optional): The
+            length-`q` vector of hypothesized values. Defaults to None, i.e. all restrictions
+            equal zero.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
@@ -2403,7 +3151,12 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         # H0: the coefficients on both MSFT and Benchmark are jointly zero.
         toolkit.econometrics.get_wald_test(
@@ -2415,14 +3168,14 @@ class Econometrics:
 
         Which returns:
 
-        | Metric                      |     Value |
-        |:-----------------------------|----------:|
-        | Wald Statistic (Chi2)         |  314.2908 |
-        | Chi2 P-Value                  |    0.0000 |
-        | F-Statistic                   |  157.1454 |
-        | F P-Value                     |    0.0000 |
-        | Restrictions (q)              |    2      |
-        | Reject Restrictions (5%)       |    1      |
+        |                          |       0 |
+        |:-------------------------|--------:|
+        | Wald Statistic (Chi2)    | 269.191 |
+        | Chi2 P-Value             |   0     |
+        | F-Statistic              | 134.595 |
+        | F P-Value                |   0     |
+        | Restrictions (q)         |   2     |
+        | Reject Restrictions (5%) |   1     |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -2453,7 +3206,9 @@ class Econometrics:
             result, restriction_matrix_values, restriction_values_array
         )
 
-        return wald_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            wald_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_hausman_wu_test(
@@ -2467,16 +3222,45 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate a regression-based Hausman-Wu test for the endogeneity of
-        `suspect_ticker` in a regression of `dependent_ticker` on `suspect_ticker`
-        (and, optionally, `other_independent_tickers`), using `instrument_tickers` as
-        instruments for `suspect_ticker`.
+        Calculate a regression-based Hausman-Wu test for the endogeneity of `suspect_ticker`
+        in a regression of `dependent_ticker` on `suspect_ticker` (and, optionally,
+        `other_independent_tickers`), using `instrument_tickers` as instruments for
+        `suspect_ticker`.
+
+        OLS requires every regressor to be uncorrelated with the error term. When that fails,
+        for example because of an omitted common driver, reverse causality or measurement
+        error, the regressor is "endogenous" and OLS is biased; an instrumental-variables
+        approach such as `get_iv_2sls` is then needed. This test checks whether that is the
+        case before committing to a full IV fit, using two auxiliary OLS regressions:
+
+        1. Regress `suspect_ticker` on the instruments (and the other tickers, if given) and
+        keep the residuals: the part of `suspect_ticker` that the instruments do not explain.
+        2. Regress `dependent_ticker` on `suspect_ticker`, those residuals (and the other
+        tickers) and test whether the coefficient on the residuals is zero.
+
+        If `suspect_ticker` is exogenous the residuals add no information, so their coefficient
+        should be statistically zero. A low p-value is evidence that `suspect_ticker` is
+        endogenous and that the OLS estimate is unreliable. The test is only as good as the
+        instruments: they must be correlated with `suspect_ticker` but not with the error term.
+
+        The formula is as follows:
+
+        - Stage 1: Xₜ = π₀ + π'Zₜ + δ'Wₜ + vₜ, the OLS regression of `suspect_ticker` (X) on a constant,
+          the instruments (Z) and `other_independent_tickers` (W), keeping the residuals v̂ₜ
+        - Stage 2: yₜ = β₀ + β₁·Xₜ + ρ·v̂ₜ + γ'Wₜ + εₜ, the OLS regression of `dependent_ticker` (y)
+        - t = ρ̂ / SE(ρ̂), with the classical OLS standard error and a Student-t distribution with n - k
+          degrees of freedom; endogeneity is flagged when the p-value is below 0.05
+        - All variables are the tickers' `column` (Return by default)
+
+        For more information about the method, see the following papers:
+
+        - Wu, D-M. (1973). "Alternative Tests of Independence Between Stochastic Regressors
+        and Disturbances." Econometrica, 41(4), 733-750.
+        - Hausman, J.A. (1978). "Specification Tests in Econometrics." Econometrica, 46(6),
+        1251-1271.
 
         Also known as: Hausman test, Durbin-Wu-Hausman test, regression test for
         endogeneity.
-
-        For more information about the method, see
-        `hypothesis_testing_model.get_hausman_wu_test`.
 
         Args:
             dependent_ticker (str): The dependent (predicted) asset.
@@ -2487,7 +3271,7 @@ class Econometrics:
             other_independent_tickers (str | list[str] | None, optional): Any other (assumed
             exogenous) independent asset(s) to include. Defaults to None.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to
             None.
@@ -2501,26 +3285,29 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["SMCI", "NVDA", "TSM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.econometrics.get_hausman_wu_test(
-            "AAPL", "MSFT", "Benchmark", period="weekly"
+            dependent_ticker="SMCI", suspect_ticker="NVDA", instrument_tickers="TSM"
         )
         ```
 
         Which returns:
 
-        | Metric                  |    Value |
-        |:-------------------------|---------:|
-        | V-Hat Coefficient         |  -0.7162 |
-        | T-Statistic               |  -6.6098 |
-        | Degrees of Freedom         | 154      |
-        | P-Value                   |   0.0000 |
-        | Endogenous (5%)            |   1      |
+        |                    |    Value |
+        |:-------------------|---------:|
+        | V-Hat Coefficient  |  -0.4021 |
+        | T-Statistic        |  -2.3377 |
+        | Degrees of Freedom | 246      |
+        | P-Value            |   0.0202 |
+        | Endogenous (5%)    |   1      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         instrument_tickers = (
             [instrument_tickers]
             if isinstance(instrument_tickers, str)
@@ -2530,6 +3317,17 @@ class Econometrics:
             [other_independent_tickers]
             if isinstance(other_independent_tickers, str)
             else other_independent_tickers
+        )
+
+        returns = self._get_series_column(
+            period,
+            column,
+            [
+                dependent_ticker,
+                suspect_ticker,
+                *instrument_tickers,
+                *(other_independent_tickers or []),
+            ],
         )
 
         result = hypothesis_testing_model.get_hausman_wu_test(
@@ -2543,7 +3341,9 @@ class Econometrics:
             ),
         )
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     def _get_ols_result(
         self,
@@ -2562,13 +3362,14 @@ class Econometrics:
         so the controller's job is simply to assemble that same fit `get_ols` itself
         produces before handing it off to the requested diagnostic.
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         independent_tickers = (
             [independent_tickers]
             if isinstance(independent_tickers, str)
             else independent_tickers
+        )
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
         )
 
         return regression_model.get_ols(
@@ -2592,10 +3393,36 @@ class Econometrics:
         Calculate the Breusch-Pagan test for heteroskedasticity of a regression of
         `dependent_ticker` on `independent_tickers`.
 
-        Also known as: BP test, Breusch-Pagan-Godfrey test.
+        OLS standard errors assume that the residual variance is constant
+        (homoskedasticity). The test regresses the squared residuals of the regression on the
+        original independent tickers and checks whether they explain any of the residual
+        variance, by testing whether the R-squared of that auxiliary regression is
+        significantly different from zero.
 
-        For more information about the method, see
-        `specification_tests_model.get_breusch_pagan_test`.
+        The formula is as follows:
+
+        - Auxiliary regression: e_t^2 = a_0 + a' * x_t + v_t, with e_t the OLS residuals and x_t the
+          independent tickers' `column` (Return by default)
+        - LM = n * R^2_auxiliary (Koenker's studentized form, the statsmodels default)
+
+        This is the studentized statistic of Koenker (1981), which does not assume normally
+        distributed errors. It is asymptotically chi-squared distributed with `k - 1` degrees
+        of freedom under the null hypothesis of homoskedasticity, where `k` is the number of parameters of the
+        auxiliary regression. A low p-value means the residual variance moves with the
+        independent tickers (for example, errors grow when the market moves more), so the
+        regression's standard errors, t-statistics and p-values are unreliable even though
+        the coefficients themselves remain unbiased. Remedies are a robust `cov_type` in
+        `get_ols` or `get_wls`. `get_white_test` is a more general alternative that also
+        catches non-linear forms of heteroskedasticity.
+
+        For more information about the method, see the following paper:
+
+        - Breusch, T.S., & Pagan, A.R. (1979). "A Simple Test for Heteroscedasticity and
+        Random Coefficient Variation." Econometrica, 47(5), 1287-1294.
+        - Koenker, R. (1981). "A Note on Studentizing a Test for Heteroscedasticity."
+        Journal of Econometrics, 17(1), 107-112.
+
+        Also known as: BP test, Breusch-Pagan-Godfrey test.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -2607,7 +3434,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the underlying
             regression. Defaults to True.
@@ -2623,21 +3450,24 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_breusch_pagan_test(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["CAT", "DE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # CAT (the first ticker) is dependent; DE is independent
+        toolkit.econometrics.get_breusch_pagan_test()
         ```
 
         Which returns:
 
-        | Metric                        |   Value |
-        |:-------------------------------|--------:|
-        | Breusch-Pagan Statistic       |  1.5544 |
-        | P-Value                       |  0.4597 |
-        | Reject Homoskedasticity (5%)  |  0      |
+        |                              |   Value |
+        |:-----------------------------|--------:|
+        | Breusch-Pagan Statistic      |  0.0129 |
+        | P-Value                      |  0.9096 |
+        | Reject Homoskedasticity (5%) |  0      |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -2651,7 +3481,9 @@ class Econometrics:
 
         test_result = specification_tests_model.get_breusch_pagan_test(result)
 
-        return test_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            test_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_white_test(
@@ -2665,12 +3497,32 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate White's test for heteroskedasticity of a regression of
-        `dependent_ticker` on `independent_tickers`.
+        Calculate White's test for heteroskedasticity of a regression of `dependent_ticker` on
+        `independent_tickers`.
+
+        A more general version of `get_breusch_pagan_test`. Instead of regressing the squared
+        residuals on only the original independent tickers, the auxiliary regression uses
+        each ticker, its square and every pairwise cross-product.
+
+        The formula is as follows:
+
+        - e_t^2 = a_0 + SUM_i(a_i * x_it) + SUM_i(b_i * x_it^2) + SUM_{i<j}(c_ij * x_it * x_jt) + v_t
+        - LM = n * R^2_auxiliary, chi-squared with as many degrees of freedom as the auxiliary
+          regression has terms besides a_0
+        - e_t are the OLS residuals and x_it the independent tickers' `column` (Return by default)
+
+        The null hypothesis is homoskedasticity (constant residual variance). A low p-value means the
+        regression's standard errors are unreliable and a robust `cov_type` should be used.
+        Because it also detects non-linear patterns in the residual variance, White's test
+        makes fewer assumptions than Breusch-Pagan, at the cost of power when there are many
+        independent tickers, since the number of auxiliary terms grows quadratically.
+
+        For more information about the method, see the following paper:
+
+        - White, H. (1980). "A Heteroskedasticity-Consistent Covariance Matrix Estimator and a
+        Direct Test for Heteroskedasticity." Econometrica, 48(4), 817-838.
 
         Also known as: White's general test.
-
-        For more information about the method, see `specification_tests_model.get_white_test`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -2682,7 +3534,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the underlying
             regression. Defaults to True.
@@ -2698,21 +3550,24 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_white_test(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["GS", "MS"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # GS (the first ticker) is dependent; MS is independent
+        toolkit.econometrics.get_white_test()
         ```
 
         Which returns:
 
-        | Metric                        |   Value |
-        |:-------------------------------|--------:|
-        | White Statistic                |  2.2886 |
-        | P-Value                        |  0.8079 |
-        | Reject Homoskedasticity (5%)   |  0      |
+        |                              |   Value |
+        |:-----------------------------|--------:|
+        | White Statistic              | 11.5102 |
+        | P-Value                      |  0.0032 |
+        | Reject Homoskedasticity (5%) |  1      |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -2726,7 +3581,9 @@ class Econometrics:
 
         test_result = specification_tests_model.get_white_test(result)
 
-        return test_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            test_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_durbin_watson_test(
@@ -2743,10 +3600,34 @@ class Econometrics:
         Calculate the Durbin-Watson statistic for first-order autocorrelation in the
         residuals of a regression of `dependent_ticker` on `independent_tickers`.
 
-        Also known as: DW statistic.
+        OLS standard errors assume that the residuals of consecutive periods are
+        uncorrelated. The Durbin-Watson statistic compares each residual with the one before
+        it.
 
-        For more information about the method, see
-        `specification_tests_model.get_durbin_watson_test`.
+        The formula is as follows:
+
+        - DW = SUM_{t=2}^{n}((e_t - e_(t-1))^2) / SUM_{t=1}^{n}(e_t^2)
+        - e_t are the residuals of the OLS regression of the dependent ticker's `column` (Return by
+          default) on the independent tickers' `column`
+        - Interpretation: DW < 1.5 positive autocorrelation likely, DW > 2.5 negative autocorrelation
+          likely, otherwise no strong evidence
+
+        The statistic ranges from 0 to 4. A value near 2 means no first-order
+        autocorrelation; values below 2 point to positive autocorrelation (consecutive
+        residuals tend to share the same sign, often a sign of an omitted trend or lagged
+        effect) and values above 2 to negative autocorrelation (residuals tend to alternate in
+        sign). Like heteroskedasticity, autocorrelation leaves the coefficients unbiased but
+        makes the standard errors unreliable; a "HAC" `cov_type` in `get_ols`, or `get_gls`
+        with an AR(1) `omega`, are common remedies. There is no exact p-value: the returned
+        interpretation is a rule of thumb (below 1.5 is likely positive, above 2.5 likely
+        negative autocorrelation).
+
+        For more information about the method, see the following paper:
+
+        - Durbin, J., & Watson, G.S. (1950). "Testing for Serial Correlation in Least Squares
+        Regression I." Biometrika, 37(3/4), 409-428.
+
+        Also known as: DW statistic.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -2758,7 +3639,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the underlying
             regression. Defaults to True.
@@ -2777,20 +3658,23 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_durbin_watson_test(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["HD", "LOW"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # HD (the first ticker) is dependent; LOW is independent
+        toolkit.econometrics.get_durbin_watson_test()
         ```
 
         Which returns:
 
-        | Metric                    | Value               |
-        |:---------------------------|:---------------------|
-        | Durbin-Watson Statistic    | 2.0538               |
-        | Interpretation             | No Strong Evidence   |
+        |                         | Value              |
+        |:------------------------|:-------------------|
+        | Durbin-Watson Statistic | 1.8584             |
+        | Interpretation          | No Strong Evidence |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -2822,16 +3706,34 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate the Variance Inflation Factor (VIF) of every ticker in the
-        Toolkit instance, treated as regressors against one another.
+        Calculate the Variance Inflation Factor (VIF) of every ticker in the Toolkit
+        instance, treated as regressors against one another.
+
+        Multicollinearity, where one regressor can (nearly) be predicted from the others, does
+        not bias regression coefficients but inflates their standard errors. Individual
+        coefficients can then look insignificant, and swing wildly between samples, even when
+        the regressors jointly explain the dependent variable well. VIF measures this for
+        each ticker by regressing it on all the other tickers.
+
+        The formula is as follows:
+
+        - VIF_i = 1 / (1 - R^2_i)
+        - R^2_i is the R-squared of the OLS regression of ticker i's `column` (Return by default) on a
+          constant and every other ticker's `column`
+
+        Where `R^2_i` is the R-squared of regressing ticker `i` on all other tickers. A VIF of
+        1 means the ticker is uncorrelated with the others; a VIF of `V` means the variance of
+        its coefficient is `V` times larger than it would be without multicollinearity. As a
+        rule of thumb, a VIF above 10 (or above 5 for a stricter cutoff) signals problematic
+        multicollinearity. This is common with assets that move closely together, such as
+        several stocks from the same sector, and is worth checking before using them together
+        as independent tickers in `get_ols` or the other regression methods.
 
         Also known as: VIF.
 
-        For more information about the method, see `specification_tests_model.get_vif`.
-
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to use. Defaults to "Return".
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
             regressors tested. Defaults to False.
@@ -2851,26 +3753,33 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GOOGL", "META", "AMZN"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_vif(period="weekly")
+        toolkit.econometrics.get_vif()
         ```
 
         Which returns:
 
-        |      |    VIF |
-        |:-----|-------:|
-        | AAPL | 2.3688 |
-        | MSFT | 2.3688 |
+        |       |    VIF |
+        |:------|-------:|
+        | GOOGL | 1.4431 |
+        | META  | 1.8234 |
+        | AMZN  | 2.0804 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        returns = self._get_series_column(period, column, tickers)
 
         test_result = specification_tests_model.get_vif(returns[tickers])
 
-        return test_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            test_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_ramsey_reset_test(
@@ -2885,13 +3794,37 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate Ramsey's RESET test for functional form misspecification of a
-        regression of `dependent_ticker` on `independent_tickers`.
+        Calculate Ramsey's RESET test for functional form misspecification of a regression of
+        `dependent_ticker` on `independent_tickers`.
+
+        If the true relationship is non-linear, or a relevant transformation or variable is
+        missing, the fitted values of a linear regression still carry information about that
+        missing piece. RESET tests for this by adding powers of the fitted values (`fitted^2`,
+        ..., `fitted^power`) to the regression and checking whether they are jointly
+        significant with an F-test that compares the original (restricted) and augmented
+        (unrestricted) model.
+
+        The formula is as follows:
+
+        - Augmented model: y_t = x_t' * beta + SUM_{j=2}^{power}(gamma_j * yhat_t^j) + u_t, with yhat_t
+          the fitted values of the original OLS regression and `power` = 3 by default
+        - F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u))
+
+        Where `RSS_r` and `RSS_u` are the residual sums of squares of both models, `q` is the
+        number of added terms (`power - 1`), `n` the number of observations and `k_u` the
+        number of parameters of the augmented model. Under the null hypothesis that the linear
+        form is correct, `F` follows an F(q, n - k_u) distribution. A low p-value suggests the
+        model is missing something, for example a squared or interaction term or a log
+        transformation, without saying what; it is a signal to reconsider the specification,
+        not a prescription.
+
+        For more information about the method, see the following paper:
+
+        - Ramsey, J.B. (1969). "Tests for Specification Errors in Classical Linear
+        Least-Squares Regression Analysis." Journal of the Royal Statistical Society, Series
+        B, 31(2), 350-371.
 
         Also known as: RESET test, Ramsey RESET.
-
-        For more information about the method, see
-        `specification_tests_model.get_ramsey_reset_test`.
 
         Args:
             dependent_ticker (str | None, optional): The dependent (predicted) asset.
@@ -2903,7 +3836,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly).
-            Defaults to "quarterly".
+            Defaults to "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the underlying
             regression. Defaults to True.
@@ -2920,21 +3853,24 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_ramsey_reset_test(
-            independent_tickers=["MSFT", "Benchmark"], period="weekly"
+        toolkit = Toolkit(
+            ["NKE", "ADS.DE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
         )
+
+        # NKE (the first ticker) is dependent; ADS.DE is independent
+        toolkit.econometrics.get_ramsey_reset_test()
         ```
 
         Which returns:
 
-        | Metric                              |   Value |
-        |:--------------------------------------|--------:|
-        | RESET F-Statistic                    |  1.1591 |
-        | P-Value                              |  0.3165 |
-        | Reject Correct Specification (5%)    |  0      |
+        |                                   |   Value |
+        |:----------------------------------|--------:|
+        | RESET F-Statistic                 |  1.4847 |
+        | P-Value                           |  0.2285 |
+        | Reject Correct Specification (5%) |  0      |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -2950,7 +3886,9 @@ class Econometrics:
             result, power=power
         )
 
-        return test_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            test_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_chow_test(
@@ -2965,12 +3903,36 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate the Chow test for a structural break at `break_date` in a
-        regression of `dependent_ticker` on `independent_tickers`.
+        Calculate the Chow test for a structural break at `break_date` in a regression of
+        `dependent_ticker` on `independent_tickers`.
+
+        The sample is split at `break_date` into a "before" and "after" period, a regression
+        is fitted on each part separately and on the full sample, and an F-test checks whether
+        allowing the coefficients to differ between the two periods significantly reduces the
+        residual sum of squares.
+
+        The formula is as follows:
+
+        - F = ((RSS_pooled - (RSS_1 + RSS_2)) / k) / ((RSS_1 + RSS_2) / (n - 2k))
+        - The second sub-period starts at the first date on or after `break_date`, and `k` includes
+          the constant when add_constant=True
+
+        Where `RSS_pooled` is the residual sum of squares of the full-sample regression,
+        `RSS_1` and `RSS_2` those of the two sub-periods, `k` the number of parameters and `n`
+        the total number of observations. Under the null hypothesis of no structural break
+        (the same coefficients apply throughout), `F` follows an F(k, n - 2k) distribution. A
+        low p-value means the relationship changed at `break_date`, for example an asset's
+        beta shifting after a merger, a regulatory change or a market regime change, so a
+        single regression over the full sample is misspecified. The break date must be chosen
+        in advance; testing many candidate dates and keeping the most significant overstates
+        the evidence.
+
+        For more information about the method, see the following paper:
+
+        - Chow, G.C. (1960). "Tests of Equality Between Sets of Coefficients in Two Linear
+        Regressions." Econometrica, 28(3), 591-605.
 
         Also known as: Chow breakpoint test.
-
-        For more information about the method, see `specification_tests_model.get_chow_test`.
 
         Args:
             break_date (str): The date (e.g. "2021-06-30") at which to split the sample -- all
@@ -2985,7 +3947,7 @@ class Econometrics:
             default independent ticker(s) (has no effect when independent_tickers is given
             explicitly). Defaults to False.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept in the underlying
             regression(s). Defaults to True.
@@ -3005,23 +3967,24 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        # AAPL (the first ticker) is dependent; MSFT and Benchmark are independent
-        toolkit.econometrics.get_chow_test(
-            break_date="2021-06-30",
-            independent_tickers=["MSFT", "Benchmark"],
-            period="weekly",
+        toolkit = Toolkit(
+            ["NVDA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
+
+        # NVDA is dependent and the Benchmark independent, with a break at the launch of ChatGPT
+        toolkit.econometrics.get_chow_test(break_date="2022-11-30", include_benchmark=True)
         ```
 
         Which returns:
 
-        | Metric                              |   Value |
-        |:--------------------------------------|--------:|
-        | Chow F-Statistic                     |  1.6807 |
-        | P-Value                              |  0.1736 |
-        | Reject No Structural Break (5%)      |  0      |
+        |                                 |   Value |
+        |:--------------------------------|--------:|
+        | Chow F-Statistic                |  0.811  |
+        | P-Value                         |  0.4447 |
+        | Reject No Structural Break (5%) |  0      |
         """
         dependent_ticker, independent_tickers = self._resolve_dependent_independent(
             dependent_ticker=dependent_ticker,
@@ -3029,8 +3992,10 @@ class Econometrics:
             include_benchmark=include_benchmark,
         )
 
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, *independent_tickers]
+        )
 
         result_full = regression_model.get_ols(
             returns[dependent_ticker],
@@ -3041,10 +4006,12 @@ class Econometrics:
         index = returns.index
         timestamps = (
             index.to_timestamp()
-            if hasattr(index, "to_timestamp")
+            if isinstance(index, pd.PeriodIndex)
             else pd.DatetimeIndex(index)
         )
-        break_index = int(timestamps.searchsorted(pd.Timestamp(break_date)))
+        break_index = int(
+            timestamps.searchsorted(pd.Timestamp(break_date).to_datetime64())
+        )
 
         test_result = specification_tests_model.get_chow_test(
             result_full,
@@ -3054,7 +4021,9 @@ class Econometrics:
             add_constant=add_constant,
         )
 
-        return test_result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            test_result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_iv_2sls(
@@ -3088,6 +4057,15 @@ class Econometrics:
         `dependent_ticker`, if at all, THROUGH `endogenous_ticker`) allows recovering a
         cleaner estimate of the causal pass-through.
 
+        The formula is as follows:
+
+        - Z = [1, exogenous tickers, instruments] and X = [1, exogenous tickers, endogenous tickers], all
+          in `column` (Return by default), the constant only with add_constant=True
+        - Stage 1: X̂ = Z(Z'Z)⁻¹Z'X, the fitted values of each endogenous ticker regressed on Z
+        - Stage 2: β̂ = (X̂'X)⁻¹X̂'y
+        - Cov(β̂) = σ̂²·(X̂'X̂)⁻¹, with σ̂² = Σ(yₜ - xₜ'β̂)² / (n - k) (linearmodels IV2SLS with
+          cov_type="unadjusted" and debiased=True)
+
         Args:
             dependent_ticker (str): The dependent (predicted) asset.
             endogenous_ticker (str | list[str]): The endogenous regressor asset(s) --
@@ -3098,7 +4076,7 @@ class Econometrics:
             exogenous_tickers (str | list[str] | None, optional): Other, non-instrumented
             control asset(s) included as-is in both stages. Defaults to None.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to regress on. Defaults to
             "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
@@ -3116,21 +4094,26 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["SMCI", "NVDA", "TSM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_iv_2sls("AAPL", "MSFT", "Benchmark", period="weekly")
+        toolkit.econometrics.get_iv_2sls(
+            dependent_ticker="SMCI", endogenous_ticker="NVDA", instrument_tickers="TSM"
+        )
         ```
 
         Which returns:
 
         |           |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
-        |:----------|---------------:|--------------:|---------------:|-----------:|
-        | Intercept |         0.0006 |        0.0025 |         0.2336 |     0.8156 |
-        | MSFT      |         1.1453 |        0.0813 |        14.0938 |     0.0000 |
+        |:----------|--------------:|-------------:|--------------:|----------:|
+        | Intercept |       -0.0008 |       0.0027 |       -0.2931 |    0.7697 |
+        | NVDA      |        1.2518 |       0.1094 |       11.441  |    0      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         endogenous_ticker = (
             [endogenous_ticker]
             if isinstance(endogenous_ticker, str)
@@ -3147,6 +4130,17 @@ class Econometrics:
             else exogenous_tickers
         )
 
+        returns = self._get_series_column(
+            period,
+            column,
+            [
+                dependent_ticker,
+                *endogenous_ticker,
+                *instrument_tickers,
+                *(exogenous_tickers or []),
+            ],
+        )
+
         result = causal_inference_model.get_iv_2sls(
             returns[dependent_ticker],
             returns[endogenous_ticker],
@@ -3155,8 +4149,9 @@ class Econometrics:
             add_constant=add_constant,
         )
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -3192,15 +4187,31 @@ class Econometrics:
         affecting only some tickers, an earnings surprise) that hits `treated_tickers`
         but not `control_tickers`, at a known date.
 
+        With returns as the outcome, the `Treated x Post` coefficient is the change in the
+        average return per period after the event, not the price impact around it, which
+        is what `get_event_study` measures. The panel stacks tickers observed on the same
+        dates, whose returns are correlated, while the standard errors treat every
+        observation as independent, so the p-value tends to be too low for closely related
+        tickers. The estimate rests on parallel trends, so the first check is whether both
+        groups moved alike before the event.
+
+        The formula is as follows:
+
+        - yᵢₜ = β₀ + β₁·Treatedᵢ + β₂·Postₜ + δ·(Treatedᵢ × Postₜ) + εᵢₜ, fitted by OLS with classical
+          standard errors on the stacked (ticker, date) panel of `column` (Return by default)
+        - Treatedᵢ = 1 for `treated_tickers`, Postₜ = 1 on or after `treatment_date`
+        - δ̂ = (mean(y_treated,post) - mean(y_treated,pre)) - (mean(y_control,post) - mean(y_control,pre))
+
         Args:
             treated_tickers (str | list[str]): The asset(s) subject to the event/treatment.
             treatment_date (str): The date the event/treatment occurs, in the same format
             accepted by `pd.Timestamp`. Observations on or after this date are `Post = 1`.
             control_tickers (str | list[str] | None, optional): The untreated comparison
-            asset(s). Defaults to None, which uses every ticker (and "Benchmark", if
-            present) NOT in `treated_tickers`.
+            asset(s). Defaults to None, which uses every ticker NOT in `treated_tickers`,
+            excluding "Benchmark" (pass `control_tickers="Benchmark"` to use the benchmark as
+            the control group).
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to use as the outcome.
             Defaults to "Return".
             add_constant (bool, optional): Whether to include an intercept. Defaults to True.
@@ -3217,24 +4228,32 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["NVDA", "INTC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.econometrics.get_difference_in_differences(
-            treated_tickers="AAPL", treatment_date="2021-06-30", period="weekly"
+            treated_tickers="NVDA",
+            control_tickers="INTC",
+            treatment_date="2023-06-01",
+            period="monthly",
         )
         ```
 
         Which returns:
 
-        |                 |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
-        |:----------------|---------------:|--------------:|---------------:|-----------:|
-        | Intercept       |         0.0064 |        0.0031 |         2.0495 |     0.0410 |
-        | Treated         |         0.0029 |        0.0054 |         0.5399 |     0.5896 |
-        | Post            |        -0.0074 |        0.0045 |        -1.6572 |     0.0982 |
-        | Treated x Post  |        -0.0020 |        0.0077 |        -0.2571 |     0.7972 |
+        |                |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
+        |:---------------|--------------:|-------------:|--------------:|----------:|
+        | Intercept      |       -0.0126 |       0.0262 |       -0.4794 |    0.6325 |
+        | Treated        |        0.0669 |       0.0371 |        1.8061 |    0.0735 |
+        | Post           |        0.0291 |       0.0362 |        0.8044 |    0.4229 |
+        | Treated x Post |       -0.0246 |       0.0511 |       -0.4817 |    0.6309 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(period, column)
 
         treated_tickers = (
             [treated_tickers] if isinstance(treated_tickers, str) else treated_tickers
@@ -3242,7 +4261,9 @@ class Econometrics:
 
         if control_tickers is None:
             control_tickers = [
-                ticker for ticker in returns.columns if ticker not in treated_tickers
+                ticker
+                for ticker in self._get_tickers()
+                if ticker not in treated_tickers
             ]
         elif isinstance(control_tickers, str):
             control_tickers = [control_tickers]
@@ -3252,7 +4273,7 @@ class Econometrics:
         index = returns.index
         timestamps = (
             index.to_timestamp()
-            if hasattr(index, "to_timestamp")
+            if isinstance(index, pd.PeriodIndex)
             else pd.DatetimeIndex(index)
         )
         post_flags = pd.Series(
@@ -3276,14 +4297,25 @@ class Econometrics:
 
         outcome = pd.concat(outcome_values, ignore_index=True)
         treated = pd.concat(treated_values, ignore_index=True)
+
+        # Without one of the two groups the Treated dummy is constant and the design
+        # is rank deficient, which says nothing about the cause.
+        for group, flag in (("treated", 1.0), ("control", 0.0)):
+            if not treated.eq(flag).any():
+                raise ValueError(
+                    f"There are no {group} observations: the {group} tickers have no "
+                    f"{column} data in this period."
+                )
+
         post = pd.concat(post_values, ignore_index=True)
 
         result = causal_inference_model.get_difference_in_differences(
             outcome, treated, post, add_constant=add_constant
         )
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -3317,6 +4349,16 @@ class Econometrics:
         `running_variable_ticker` value, one on each side of `cutoff`, and reports the
         gap between the two fitted lines exactly at the cutoff.
 
+        The formula is as follows:
+
+        - x̃ₜ = xₜ - cutoff, keeping the observations with |x̃ₜ| < h, where xₜ is the running ticker's
+          `column` (Return by default) and h = `bandwidth`, or half the range of xₜ by default
+        - Each side (x̃ₜ < 0 and x̃ₜ ≥ 0): yₜ = a + b·x̃ₜ + eₜ, fitted by OLS (kernel="uniform", the
+          default) or by WLS with weights 1 - |x̃ₜ| / h (kernel="triangular")
+        - Discontinuity = a_right - a_left, with SE = √(SE(a_right)² + SE(a_left)²)
+        - t = Discontinuity / SE, with a Student-t distribution on the two sides' residual degrees of
+          freedom combined
+
         Args:
             dependent_ticker (str): The outcome asset.
             running_variable_ticker (str): The asset (or column) whose value determines
@@ -3324,7 +4366,7 @@ class Econometrics:
             cutoff (float): The threshold value of `running_variable_ticker` at which the
             discontinuity is estimated.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to use for both series.
             Defaults to "Return".
             bandwidth (float | None, optional): The maximum distance from `cutoff` an
@@ -3345,10 +4387,16 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["COIN", "BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2022-01-01",
+            end_date="2025-12-31",
+        )
 
+        # COIN's return on days Bitcoin rises versus days it falls
         toolkit.econometrics.get_regression_discontinuity(
-            "AAPL", "MSFT", cutoff=0.0, period="weekly"
+            dependent_ticker="COIN", running_variable_ticker="BTCUSD", cutoff=0
         )
         ```
 
@@ -3356,17 +4404,19 @@ class Econometrics:
 
         |               |    Value |
         |:--------------|---------:|
-        | Discontinuity |   0.0003 |
-        | Std. Error    |   0.0077 |
-        | t-Statistic   |   0.0343 |
-        | P-Value       |   0.9726 |
-        | Cutoff        |   0.0000 |
-        | Bandwidth     |   0.1257 |
-        | N Left        |  71      |
-        | N Right       |  85      |
+        | Discontinuity |   0.0031 |
+        | Std. Error    |   0.0027 |
+        | t-Statistic   |   1.1191 |
+        | P-Value       |   0.2633 |
+        | Cutoff        |   0      |
+        | Bandwidth     |   0.1497 |
+        | N Left        | 729      |
+        | N Right       | 728      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, running_variable_ticker]
+        )
 
         result = causal_inference_model.get_regression_discontinuity(
             returns[dependent_ticker],
@@ -3376,9 +4426,10 @@ class Econometrics:
             kernel=kernel,
         )
 
-        return causal_inference_model.regression_discontinuity_summary_table(
-            result
-        ).round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            causal_inference_model.regression_discontinuity_summary_table(result),
+            rounding if rounding is not None else self._rounding,
+        )
 
     @handle_errors
     def get_propensity_score_matching(
@@ -3412,6 +4463,18 @@ class Econometrics:
         (to control for the possibility that `treatment_ticker` tends to move on the
         same periods/regimes that also independently affect `dependent_ticker`)?"
 
+        The formula is as follows:
+
+        - Dₜ = 1 if the treatment ticker's `column` (Return by default) is above `treatment_threshold`
+          (0 by default), else 0
+        - e(xₜ) = 1 / (1 + exp(-xₜ'β)), a logit of Dₜ on the covariate tickers (plus a constant)
+        - Matching on ℓₜ = ln(e / (1 - e)): each treated period, in order, takes the nearest unmatched
+          control period (one-to-one, without replacement) if |ℓ_treated - ℓ_control| ≤ caliper, which
+          defaults to 0.2 × the standard deviation (ddof=1) of ℓ
+        - ATT = (1 / m)·Σ(y_treated - y_control) over the m matched pairs
+        - SE = std(y_treated - y_control, ddof=1) / √m, with a Student-t distribution with m - 1 degrees
+          of freedom
+
         Args:
             dependent_ticker (str): The outcome asset.
             treatment_ticker (str): The asset whose return, once it exceeds
@@ -3422,7 +4485,7 @@ class Econometrics:
             treatment_threshold (float, optional): The return threshold defining
             treatment. Defaults to 0.0.
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to use. Defaults to "Return".
             caliper (float | None, optional): The maximum allowed logit-propensity-score
             matching distance. Defaults to None, which uses Austin's (2011) rule of thumb
@@ -3441,34 +4504,44 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XOM", "USO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
+        # XOM's return on days USO rises more than 2%, matched on the Benchmark's return
         toolkit.econometrics.get_propensity_score_matching(
-            "AAPL", "MSFT", "Benchmark", period="weekly"
+            dependent_ticker="XOM",
+            treatment_ticker="USO",
+            covariate_tickers="Benchmark",
+            treatment_threshold=0.02,
         )
         ```
 
         Which returns:
 
-        | Metric        |    Value |
-        |:--------------|---------:|
-        | ATT           |   0.0335 |
-        | Std. Error    |   0.0060 |
-        | t-Statistic   |   5.5598 |
-        | P-Value       |   0.0000 |
-        | Matched Pairs |  33      |
-        | N Treated     |  84      |
-        | N Control     |  73      |
+        |               |     Value |
+        |:--------------|----------:|
+        | ATT           |    0.0163 |
+        | Std. Error    |    0.0016 |
+        | t-Statistic   |    9.9366 |
+        | P-Value       |    0      |
+        | Matched Pairs |  181      |
+        | N Treated     |  185      |
+        | N Control     | 1069      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         covariate_tickers = (
             [covariate_tickers]
             if isinstance(covariate_tickers, str)
             else covariate_tickers
         )
 
+        returns = self._get_series_column(
+            period, column, [dependent_ticker, treatment_ticker, *covariate_tickers]
+        )
         treatment = (returns[treatment_ticker] > treatment_threshold).astype(float)
 
         result = causal_inference_model.get_propensity_score_matching(
@@ -3479,8 +4552,9 @@ class Econometrics:
             add_constant=add_constant,
         )
 
-        return causal_inference_model.propensity_score_matching_summary(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            causal_inference_model.propensity_score_matching_summary(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -3495,15 +4569,47 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Construct a Synthetic Control for `treated_ticker` from a weighted combination
-        of `donor_tickers` (Abadie, Diamond & Hainmueller, 2010), and estimate the
-        effect of an event/intervention as the post-`treatment_period` gap between
-        `treated_ticker`'s actual and synthetic counterfactual return path.
+        Construct a Synthetic Control for `treated_ticker` from a weighted combination of
+        `donor_tickers` (Abadie, Diamond & Hainmueller, 2010), and estimate the effect of an
+        event/intervention as the post-`treatment_period` gap between `treated_ticker`'s
+        actual and synthetic counterfactual return path.
+
+        When a single company or market experiences an event (an acquisition, a regulatory
+        change, an index inclusion) and there is no single obvious comparison, the synthetic
+        control builds one from the data: a weighted average of unaffected "donor" tickers,
+        with weights chosen so it tracks the treated ticker as closely as possible before the
+        event. If that pre-event fit is good, the synthetic control's path after the event
+        estimates what would have happened without it, and the gap is the estimated effect.
+
+        The formula is as follows:
+
+        - Weights: w* = argmin_w ||treated_pre - donors_pre @ w||^2, subject to w >= 0 and
+          sum(w) = 1 (SLSQP), with pre the dates before `treatment_period`
+        - Synthetic control: synthetic_t = donors_t @ w*, for every period t
+        - Treatment effect: gap_t = treated_t - synthetic_t, for every post-event period t
+        - Average Treatment Effect = mean of gap_t over the post-event periods
+        - RMSPE ratio = sqrt(mean(gap_post^2)) / sqrt(mean(gap_pre^2))
+        - P-Value = the share of the treated ticker's and every placebo donor's RMSPE ratios that are at
+          least the treated ticker's ratio
+        - All series are the tickers' `column` (Return by default)
+
+        Unlike difference-in-differences, this does not require the treated and comparison
+        units to follow parallel trends, as the synthetic control is built to match the
+        treated ticker's own pre-event path. Because there is only one treated unit, the
+        p-value comes from placebo tests: the procedure is rerun with each donor as if it were
+        treated, and the treated ticker's post/pre fit ratio is compared with theirs. Matching
+        is done on the pre-event outcome path only, a common simplification of the original
+        method.
+
+        For more information about the method, see the following papers:
+
+        - Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for
+        Comparative Case Studies: Estimating the Effect of California's Tobacco Control
+        Program." Journal of the American Statistical Association, 105(490), 493-505.
+        - Abadie, A. (2021). "Using Synthetic Controls: Feasibility, Data Requirements, and
+        Methodological Aspects." Journal of Economic Literature, 59(2), 391-425.
 
         Also known as: SCM, synthetic control method.
-
-        For more information about the method, see
-        `causal_inference_model.get_synthetic_control`.
 
         Args:
             treated_ticker (str): The asset believed to be affected by an event/
@@ -3516,7 +4622,7 @@ class Econometrics:
             the donor pool the synthetic control is built from. Defaults to None,
             meaning every other Toolkit ticker (subject to `include_benchmark`).
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to use. Defaults to "Return".
             include_benchmark (bool, optional): Whether to include "Benchmark" in the
             default donor pool (has no effect when donor_tickers is given explicitly).
@@ -3540,32 +4646,31 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        toolkit.econometrics.get_synthetic_control(
-            "AAPL",
-            treatment_period="2021-07-01",
-            donor_tickers=["MSFT", "Benchmark"],
-            period="weekly",
+        toolkit = Toolkit(
+            ["BA", "AIR.PA", "LMT", "GD", "RTX", "NOC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2023-01-01",
+            end_date="2024-12-31",
         )
+
+        # Boeing after the 737 MAX 9 grounding, with the other aerospace companies as donors
+        toolkit.econometrics.get_synthetic_control(treated_ticker="BA", treatment_period="2024-01-08")
         ```
 
         Which returns:
 
-        |                           |   Value |
-        |:--------------------------|--------:|
-        | Average Treatment Effect  |  0.0012 |
-        | Pre-Treatment RMSPE       |  0.0286 |
-        | Post-Treatment RMSPE      |  0.024  |
-        | RMSPE Ratio               |  0.8417 |
-        | P-Value                   |  0.3333 |
-        | N Donors                  |  2      |
-        | N Pre-Periods             | 78      |
-        | N Post-Periods            | 79      |
+        |                          |    Value |
+        |:-------------------------|---------:|
+        | Average Treatment Effect |  -0.0017 |
+        | Pre-Treatment RMSPE      |   0.0156 |
+        | Post-Treatment RMSPE     |   0.0204 |
+        | RMSPE Ratio              |   1.3094 |
+        | P-Value                  |   0.5    |
+        | N Donors                 |   5      |
+        | N Pre-Periods            | 260      |
+        | N Post-Periods           | 255      |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         if donor_tickers is None:
             donor_tickers = [
                 ticker
@@ -3579,14 +4684,19 @@ class Econometrics:
                 else list(donor_tickers)
             )
 
+        returns = self._get_series_column(
+            period, column, [treated_ticker, *donor_tickers]
+        )
+
         result = causal_inference_model.get_synthetic_control(
             returns[treated_ticker],
             returns[donor_tickers],
             treatment_period=treatment_period,
         )
 
-        return causal_inference_model.synthetic_control_summary(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            causal_inference_model.synthetic_control_summary(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     def _get_panel_data(
@@ -3596,6 +4706,7 @@ class Econometrics:
         dependent_tickers: str | list[str] | None,
         period: str | None,
         column: str,
+        include_benchmark: bool = False,
     ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
         """
         Shared input-shaping step for `get_fixed_effects`/`get_random_effects`/
@@ -3605,9 +4716,9 @@ class Econometrics:
         that a handful of single ticker return series don't have on their own.
 
         This module treats `dependent_tickers` (defaulting to every ticker in the
-        `Toolkit` instance, minus `independent_tickers` if given) as the panel of
-        ENTITIES -- e.g. a panel of stocks -- and supports two, mutually exclusive
-        ways of building the regressor `x`:
+        `Toolkit` instance, without "Benchmark" unless `include_benchmark` is True, minus
+        `independent_tickers` if given) as the panel of ENTITIES -- e.g. a panel of stocks -- and supports
+        two, mutually exclusive ways of building the regressor `x`:
 
         - `independent_tickers`: a COMMON, time-varying factor (or factors),
         broadcast identically to every entity at each point in time -- e.g. a
@@ -3651,16 +4762,14 @@ class Econometrics:
                 "regressor taken from each dependent ticker's own data)."
             )
 
-        period = period if period else "quarterly" if self._quarterly else "yearly"
+        period = period if period else "daily"
 
         if period not in ["daily", "weekly", "monthly", "quarterly", "yearly"]:
             raise ValueError(
                 "Period must be daily, weekly, monthly, quarterly, or yearly."
             )
-        if period == "daily" and self._historical_data["intraday"].empty:
-            raise ValueError("Intraday data is required for daily calculations.")
 
-        # Not `_get_price_column`: panel methods need each entity's own NaN pattern.
+        # The raw slice: panel methods need each entity's own NaN pattern on the full date index.
         prices = self._historical_data[period][column]
 
         if independent_tickers is not None:
@@ -3670,11 +4779,21 @@ class Econometrics:
                 else list(independent_tickers)
             )
 
+            # The factor is read from the loaded data, so it has to be one of its tickers.
+            missing = [ticker for ticker in independent_tickers if ticker not in prices]
+            if missing:
+                raise ValueError(
+                    f"independent_tickers {', '.join(missing)} are not among the loaded "
+                    "tickers: add them to the tickers, or use 'Benchmark' for the "
+                    "benchmark."
+                )
+
             if dependent_tickers is None:
                 dependent_tickers = [
                     ticker
                     for ticker in prices.columns
                     if ticker not in independent_tickers
+                    and (include_benchmark or ticker != BENCHMARK_TICKER)
                 ]
             else:
                 dependent_tickers = (
@@ -3697,7 +4816,11 @@ class Econometrics:
             )
         else:
             if dependent_tickers is None:
-                dependent_tickers = list(prices.columns)
+                dependent_tickers = [
+                    ticker
+                    for ticker in prices.columns
+                    if include_benchmark or ticker != BENCHMARK_TICKER
+                ]
             else:
                 dependent_tickers = (
                     [dependent_tickers]
@@ -3728,6 +4851,7 @@ class Econometrics:
         dependent_tickers: str | list[str] | None = None,
         period: str | None = None,
         column: str = "Return",
+        include_benchmark: bool = False,
         entity_effects: bool = True,
         time_effects: bool = False,
         rounding: int | None = None,
@@ -3760,6 +4884,14 @@ class Econometrics:
         mean. See `panel_data_model.get_fixed_effects` for the full formula and
         references.
 
+        The formula is as follows:
+
+        - ỹᵢₜ = yᵢₜ - mean_t(yᵢₜ) and x̃ᵢₜ = xᵢₜ - mean_t(xᵢₜ) (entity_effects=True, the default);
+          time_effects=True also removes each date's mean (two-way fixed effects)
+        - β̂_FE = (X̃'X̃)⁻¹X̃'ỹ, without a separate constant (linearmodels PanelOLS, unadjusted covariance)
+        - Entity Effect: αᵢ = mean_t(yᵢₜ - xᵢₜ'β̂_FE); Time Effect: λₜ = mean_i(yᵢₜ - xᵢₜ'β̂_FE)
+        - yᵢₜ is each dependent ticker's `column` (Return by default)
+
         Args:
             independent_tickers (str | list[str] | None, optional): The factor
             ticker(s), whose `column` values are broadcast identically to every
@@ -3771,9 +4903,11 @@ class Econometrics:
             entity tickers to explain. Defaults to None, meaning every ticker in
             the `Toolkit` instance (other than `independent_tickers`, if given).
             period (str, optional): The data frequency (daily, weekly, monthly,
-            quarterly, or yearly). Defaults to "quarterly".
+            quarterly, or yearly). Defaults to "daily".
             column (str, optional): The dependent variable's historical data
             column. Defaults to "Return".
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+            entities. Defaults to False.
             entity_effects (bool, optional): Whether to control for time-invariant
             entity-specific characteristics. Defaults to True.
             time_effects (bool, optional): Whether to control for entity-invariant,
@@ -3791,30 +4925,43 @@ class Econometrics:
             ValueError: If both or neither of `independent_tickers`/
             `independent_column` are given, or (see `panel_data_model.
             get_fixed_effects`) if there are not enough observations for the
-            requested fixed effects.
+            requested fixed effects, or the fixed effects absorb the regressor: the
+            common factor of `independent_tickers` is identical for every entity at
+            each date, so it cannot be combined with `time_effects=True`.
 
         As an example:
 
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        toolkit.econometrics.get_fixed_effects(
-            independent_tickers="Benchmark", period="weekly"
+        toolkit = Toolkit(
+            ["XOM", "CVX", "SHEL", "BP", "TTE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
+
+        toolkit.econometrics.get_fixed_effects(independent_tickers="Benchmark")
         ```
 
         Which returns:
 
-        |                        |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
-        |:-----------------------|---------------:|--------------:|---------------:|-----------:|
-        | Benchmark              |         1.0772 |        0.0331 |        32.5314 |     0.0000 |
-        | Entity Effect: AAPL    |         0.0022 |      nan      |       nan      |   nan      |
-        | Entity Effect: MSFT    |         0.0017 |      nan      |       nan      |   nan      |
+        |                     |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
+        |:--------------------|--------------:|-------------:|--------------:|----------:|
+        | Benchmark           |        0.5795 |       0.0183 |       31.7272 |         0 |
+        | Entity Effect: BP   |        0.0004 |     nan      |      nan      |       nan |
+        | Entity Effect: CVX  |        0.0004 |     nan      |      nan      |       nan |
+        | Entity Effect: SHEL |        0.0005 |     nan      |      nan      |       nan |
+        | Entity Effect: TTE  |        0.0004 |     nan      |      nan      |       nan |
+        | Entity Effect: XOM  |        0.0008 |     nan      |      nan      |       nan |
         """
         y_panel, x_panel, dependent_tickers = self._get_panel_data(
-            independent_tickers, independent_column, dependent_tickers, period, column
+            independent_tickers,
+            independent_column,
+            dependent_tickers,
+            period,
+            column,
+            include_benchmark=include_benchmark,
         )
 
         result = panel_data_model.get_fixed_effects(
@@ -3836,7 +4983,7 @@ class Econometrics:
             time_rows.index = [f"Time Effect: {time}" for time in time_rows.index]
             summary = pd.concat([summary, time_rows])
 
-        return summary.round(rounding)
+        return apply_rounding(summary, rounding)
 
     @handle_errors
     def get_random_effects(
@@ -3846,6 +4993,7 @@ class Econometrics:
         dependent_tickers: str | list[str] | None = None,
         period: str | None = None,
         column: str = "Return",
+        include_benchmark: bool = False,
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
@@ -3864,6 +5012,14 @@ class Econometrics:
         Fixed Effects if entity effects are indeed uncorrelated with the
         regressor(s) (see `get_hausman_test` to check that assumption).
 
+        The formula is as follows:
+
+        - θᵢ = 1 - √(σ²_ε / (σ²_ε + Tᵢ·σ²_u)), with the Swamy-Arora estimates of the idiosyncratic (σ²_ε)
+          and entity (σ²_u) variance components
+        - y*ᵢₜ = yᵢₜ - θᵢ·mean_t(yᵢₜ) and x*ᵢₜ = xᵢₜ - θᵢ·mean_t(xᵢₜ), the constant becoming 1 - θᵢ
+        - β̂_RE = OLS of y* on x* (linearmodels RandomEffects), with yᵢₜ each dependent ticker's `column`
+          (Return by default)
+
         Args:
             independent_tickers (str | list[str] | None, optional): The factor
             ticker(s), whose `column` values are broadcast identically to every
@@ -3881,9 +5037,11 @@ class Econometrics:
             entity tickers to explain. Defaults to None, meaning every ticker in
             the `Toolkit` instance (other than `independent_tickers`, if given).
             period (str, optional): The data frequency (daily, weekly, monthly,
-            quarterly, or yearly). Defaults to "quarterly".
+            quarterly, or yearly). Defaults to "daily".
             column (str, optional): The dependent variable's historical data
             column. Defaults to "Return".
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+            entities. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the
             results to. Defaults to None.
 
@@ -3903,29 +5061,36 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY"
+            ["JPM", "BAC", "C", "WFC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_random_effects(
-            independent_column="Volume", period="weekly"
-        )
+        toolkit.econometrics.get_random_effects(independent_tickers="Benchmark")
         ```
 
         Which returns:
 
         |           |   Coefficient |   Std. Error |   t-Statistic |   P-Value |
-        |:----------|---------------:|--------------:|---------------:|-----------:|
-        | Intercept |         0.0094 |        0.0012 |         7.7341 |     0.0000 |
-        | Volume    |        -0.0000 |        0.0000 |        -5.1258 |     0.0000 |
+        |:----------|--------------:|-------------:|--------------:|----------:|
+        | Intercept |        0.0003 |       0.0002 |        1.7192 |    0.0856 |
+        | Benchmark |        0.9788 |       0.0183 |       53.4931 |    0      |
         """
         y_panel, x_panel, dependent_tickers = self._get_panel_data(
-            independent_tickers, independent_column, dependent_tickers, period, column
+            independent_tickers,
+            independent_column,
+            dependent_tickers,
+            period,
+            column,
+            include_benchmark=include_benchmark,
         )
 
         result = panel_data_model.get_random_effects(y_panel, x_panel)
 
-        return regression_model.regression_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            regression_model.regression_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -3936,6 +5101,7 @@ class Econometrics:
         dependent_tickers: str | list[str] | None = None,
         period: str | None = None,
         column: str = "Return",
+        include_benchmark: bool = False,
         rounding: int | None = None,
     ) -> pd.Series:
         """
@@ -3943,7 +5109,7 @@ class Econometrics:
         Random Effects fit of `dependent_tickers` (the panel of entities) on a
         regressor `x`.
 
-        Also known as: Hausman specification test, Hausman-Wu test.
+        Also known as: Hausman specification test, fixed versus random effects test.
 
         Random Effects is more efficient than Fixed Effects but relies on entity
         effects being uncorrelated with the regressor(s) -- if that assumption is
@@ -3953,6 +5119,14 @@ class Econometrics:
         how the two models being compared are estimated (including how
         `independent_tickers`/`independent_column` shape the panel, and why
         `independent_column` is generally the more reliable choice here).
+
+        The formula is as follows:
+
+        - H = (β̂_FE - β̂_RE)'·[Var(β̂_FE) - Var(β̂_RE)]⁻¹·(β̂_FE - β̂_RE), over the k slope coefficients
+          the two models share (a pseudo-inverse when the difference is singular, and H floored at 0)
+        - H is chi-squared with k degrees of freedom; Random Effects is rejected when the p-value is
+          below 0.05
+        - β̂_FE comes from `get_fixed_effects` with entity effects only and β̂_RE from `get_random_effects`
 
         Args:
             independent_tickers (str | list[str] | None, optional): The factor
@@ -3965,9 +5139,11 @@ class Econometrics:
             entity tickers to explain. Defaults to None, meaning every ticker in
             the `Toolkit` instance (other than `independent_tickers`, if given).
             period (str, optional): The data frequency (daily, weekly, monthly,
-            quarterly, or yearly). Defaults to "quarterly".
+            quarterly, or yearly). Defaults to "daily".
             column (str, optional): The dependent variable's historical data
             column. Defaults to "Return".
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+            entities. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the
             results to. Defaults to None.
 
@@ -3979,8 +5155,9 @@ class Econometrics:
         Raises:
             ValueError: If both or neither of `independent_tickers`/
             `independent_column` are given, or (see `panel_data_model.
-            get_hausman_test`) if there are not enough observations to fit either
-            model, or the two estimators share no common regressors to compare.
+            get_hausman_test`) if there are not enough observations or entities to
+            fit either model, or the two estimators share no common regressors to
+            compare.
 
         As an example:
 
@@ -3988,30 +5165,38 @@ class Econometrics:
         from financetoolkit import Toolkit
 
         toolkit = Toolkit(
-            ["AAPL", "MSFT", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY"
+            ["AAPL", "MSFT", "AMZN"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
 
-        toolkit.econometrics.get_hausman_test(
-            independent_column="Volume", period="weekly"
-        )
+        toolkit.econometrics.get_hausman_test(independent_column="Volume", period="weekly")
         ```
 
         Which returns:
 
-        | Metric                     |   Value |
-        |:----------------------------|--------:|
-        | Hausman Statistic           |  8.1289 |
-        | Degrees of Freedom          |  1      |
-        | P-Value                     |  0.0044 |
-        | Prefer Fixed Effects (5%)   |  1      |
+        |                           |   Value |
+        |:--------------------------|--------:|
+        | Hausman Statistic         |  0.5866 |
+        | Degrees of Freedom        |  1      |
+        | P-Value                   |  0.4438 |
+        | Prefer Fixed Effects (5%) |  0      |
         """
         y_panel, x_panel, dependent_tickers = self._get_panel_data(
-            independent_tickers, independent_column, dependent_tickers, period, column
+            independent_tickers,
+            independent_column,
+            dependent_tickers,
+            period,
+            column,
+            include_benchmark=include_benchmark,
         )
 
         result = panel_data_model.get_hausman_test(y_panel, x_panel)
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_arima_forecast(
@@ -4038,9 +5223,17 @@ class Econometrics:
         estimation method (exact Maximum Likelihood via the Kalman filter) and its
         practical caveats.
 
+        The formula is as follows:
+
+        - y'ₜ = ΔᵈYₜ, the `column` level (Adj Close by default) differenced d times (d = 1 by default)
+        - y'ₜ - μ = Σ(i=1..p) φᵢ·(y'ₜ₋ᵢ - μ) + εₜ + Σ(j=1..q) θⱼ·εₜ₋ⱼ, with p = q = 1 by default and μ the
+          mean (d = 0) or drift (d ≥ 1) of y'ₜ when include_constant=True, and μ = 0 otherwise
+        - Fitted by exact Maximum Likelihood via the Kalman filter (statsmodels ARIMA)
+        - Forecast: the conditional mean E[Y_T+h | Y_1..Y_T] for h = 1..`forecast_steps`, in levels
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to fit. Defaults to
             "Adj Close".
             p (int, optional): The autoregressive order. Defaults to 1.
@@ -4049,9 +5242,9 @@ class Econometrics:
             q (int, optional): The moving-average order. Defaults to 1.
             forecast_steps (int, optional): The number of periods ahead to forecast.
             Defaults to 5.
-            include_constant (bool, optional): Whether to estimate a free intercept.
-            Defaults to True -- see `time_series_model.get_arima_forecast` for when
-            to set this to False.
+            include_constant (bool, optional): Whether to estimate the mean of the
+            differenced series (its drift for `d >= 1`). Defaults to True -- see
+            `time_series_model.get_arima_forecast` for when to set this to False.
             include_benchmark (bool, optional): Whether to include "Benchmark" among
             the tickers forecast. Defaults to False.
             rounding (int | None, optional): The number of decimals to round the
@@ -4060,7 +5253,8 @@ class Econometrics:
         Returns:
             pd.DataFrame: The `forecast_steps`-ahead forecast, one column per ticker,
             indexed `1, ..., forecast_steps` (periods ahead, not a continuation of the
-            historical date index). Each ticker's ARIMA model is fit independently.
+            historical date index). Each ticker's ARIMA model is fit independently on
+            its own history; a ticker without enough data has an empty (NaN) column.
 
         Notes:
         - The method retrieves historical price data based on the specified `period`
@@ -4073,29 +5267,44 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_arima_forecast(period="quarterly")
+        toolkit.econometrics.get_arima_forecast(forecast_steps=10)
         ```
 
         Which returns:
 
-        | Step |    AAPL |    MSFT |
-        |-----:|--------:|--------:|
-        |    1 | 138.273 | 243.199 |
-        |    2 | 147.039 | 250.190 |
-        |    3 | 154.992 | 257.106 |
-        |    4 | 162.323 | 264.014 |
-        |    5 | 169.180 | 270.922 |
+        |   Step |   GCUSD |
+        |-------:|--------:|
+        |      1 | 4348.34 |
+        |      2 | 4348.38 |
+        |      3 | 4350.82 |
+        |      4 | 4352.47 |
+        |      5 | 4354.38 |
+        |      6 | 4356.2  |
+        |      7 | 4358.05 |
+        |      8 | 4359.89 |
+        |      9 | 4361.73 |
+        |     10 | 4363.57 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        prices = self._get_price_column(period, column)
+        period = period if period else "daily"
+        # Each ARIMA fit drops the missing values of its own series, so a series observed
+        # at other dates does not cut the others down to the shared rows.
+        prices = self._get_series_column(period, column)
 
         tickers = self._get_tickers(include_benchmark=include_benchmark)
 
-        result = pd.DataFrame(
-            {
-                ticker: time_series_model.get_arima_forecast(
+        forecasts = {}
+        for ticker in tickers:
+            # Each ticker is fitted on its own history; one without enough data of its
+            # own gets an empty column instead of failing the other tickers.
+            try:
+                forecasts[ticker] = time_series_model.get_arima_forecast(
                     prices[ticker],
                     p=p,
                     d=d,
@@ -4103,12 +5312,18 @@ class Econometrics:
                     forecast_steps=forecast_steps,
                     include_constant=include_constant,
                 )["forecast"]
-                for ticker in tickers
-            }
-        )
+            except ValueError as error:
+                logger.warning("No ARIMA forecast for %s: %s", ticker, error)
+
+        if not forecasts:
+            raise ValueError("None of the tickers has enough data for an ARIMA fit.")
+
+        result = pd.DataFrame(forecasts).reindex(columns=tickers)
         result.index.name = "Step"
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_var_forecast(
@@ -4121,19 +5336,40 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.DataFrame:
         """
-        Fit a Vector Autoregression (VAR) across every ticker in the Toolkit
-        instance and forecast `forecast_steps` periods ahead.
+        Fit a Vector Autoregression (VAR) across every ticker in the Toolkit instance and
+        forecast `forecast_steps` periods ahead.
+
+        A VAR models several series jointly: each ticker's value is regressed on `lags` past
+        values of all tickers, including its own. Each asset's future can therefore depend on
+        its own history and on the history of the others, without deciding in advance which
+        one drives which.
+
+        The formula is as follows:
+
+        - Y_t = c + SUM_{l=1}^{lags}(Phi_l * Y_(t-l)) + e_t, with Y_t every ticker's `column` (Return by
+          default) and `lags` = 1 by default
+        - Each equation is an OLS regression on a constant and the `lags` lagged values of all tickers
+        - Forecast: Yhat_(T+h) = c + SUM_{l=1}^{lags}(Phi_l * Yhat_(T+h-l)), with Yhat_s = Y_s for s <= T
+
+        Where `Y_t` holds the values of all tickers at time `t` and each `Phi_l` is a matrix of
+        coefficients. Because every equation has the same regressors, the model is estimated
+        exactly by a separate OLS regression per ticker. Forecasts are produced by running the
+        fitted equations forward one step at a time, feeding each forecast back in as the
+        most recent lag. The coefficients show how shocks spread between assets;
+        `get_impulse_response_function` and `get_variance_decomposition` summarise that, and
+        `get_granger_causality` tests whether one ticker helps predict another. A VAR assumes
+        stationary series, so returns are generally more suitable than prices (see
+        `get_augmented_dickey_fuller`).
+
+        For more information about the method, see the following paper:
+
+        - Sims, C.A. (1980). "Macroeconomics and Reality." Econometrica, 48(1), 1-48.
 
         Also known as: VAR model, vector autoregressive model.
 
-        A VAR jointly models every ticker's series, regressing each of them on `lags`
-        lagged values of ALL of them (including itself) -- see
-        `time_series_model.get_var_forecast` for the full formula and estimation
-        method (equation-by-equation OLS, reusing `regression_model.get_ols`).
-
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to model. Defaults to
             "Return".
             lags (int, optional): The VAR order. Defaults to 1.
@@ -4162,32 +5398,51 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["^VIX", "^VIX3M"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_var_forecast(period="quarterly")
+        toolkit.econometrics.get_var_forecast(column="Adj Close", forecast_steps=20)
         ```
 
         Which returns:
 
-        | Step |   AAPL |   MSFT |
-        |-----:|-------:|-------:|
-        |    1 | 0.1271 | 0.1046 |
-        |    2 | 0.1069 | 0.0640 |
-        |    3 | 0.0704 | 0.0428 |
-        |    4 | 0.0661 | 0.0454 |
-        |    5 | 0.0716 | 0.0496 |
+        |   Step |    ^VIX |   ^VIX3M |
+        |-------:|--------:|---------:|
+        |      1 | 15.2712 |  18.3667 |
+        |      2 | 15.5578 |  18.5342 |
+        |      3 | 15.8138 |  18.6846 |
+        |      4 | 16.0425 |  18.82   |
+        |      5 | 16.2471 |  18.9418 |
+        |      6 | 16.4301 |  19.0517 |
+        |      7 | 16.5941 |  19.1509 |
+        |      8 | 16.7411 |  19.2406 |
+        |      9 | 16.873  |  19.322  |
+        |     10 | 16.9915 |  19.3958 |
+        |     11 | 17.0981 |  19.4629 |
+        |     12 | 17.1942 |  19.5241 |
+        |     13 | 17.2808 |  19.58   |
+        |     14 | 17.359  |  19.6311 |
+        |     15 | 17.4298 |  19.6781 |
+        |     16 | 17.494  |  19.7213 |
+        |     17 | 17.5523 |  19.7611 |
+        |     18 | 17.6053 |  19.7979 |
+        |     19 | 17.6536 |  19.8321 |
+        |     20 | 17.6978 |  19.8639 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        returns = self._get_series_column(period, column, tickers)
 
         result = time_series_model.get_var_forecast(
             returns[tickers], lags=lags, forecast_steps=forecast_steps
         )
 
-        return result["forecast"].round(
-            rounding if rounding is not None else self._rounding
+        return result["forecast"].pipe(
+            apply_rounding, rounding if rounding is not None else self._rounding
         )
 
     @handle_errors
@@ -4203,9 +5458,11 @@ class Econometrics:
     ) -> pd.DataFrame:
         """
         Fit a Vector Autoregression (VAR) across every ticker in the Toolkit instance
-        and trace out the Impulse Response Function (IRF) -- how a one-standard-
-        deviation shock to each ticker propagates through the whole system over
-        `periods` periods ahead.
+        and trace out the Impulse Response Function (IRF) -- how a shock to each
+        ticker propagates through the whole system over `periods` periods ahead. The
+        shock is one standard deviation of the orthogonalized innovation when
+        `orthogonalized=True` (the default) and a unit shock to the reduced-form
+        residual when `orthogonalized=False`.
 
         Also known as: IRF.
 
@@ -4215,9 +5472,18 @@ class Econometrics:
         for the full formula, the Cholesky-orthogonalization used to identify the
         shocks, and why the ordering of tickers is an identifying assumption.
 
+        The formula is as follows:
+
+        - Ψ₀ = I and Ψₙ = Σ(l=1..min(n, p)) Φₗ·Ψₙ₋ₗ, the moving-average matrices of the VAR(p) fitted on
+          every ticker's `column` (Return by default), p = `lags` (1 by default)
+        - Σᵤ = Û'Û / (T - k·p - 1) = P·P', with P the lower-triangular Cholesky factor
+        - Θₙ = Ψₙ·P (orthogonalized=True, a one-standard-deviation shock) or Θₙ = Ψₙ
+          (orthogonalized=False, a unit reduced-form shock)
+        - Response of ticker i, n periods after a shock to ticker j: Θₙ[i, j], for n = 0..`periods`
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to model. Defaults to
             "Return".
             lags (int, optional): The VAR order. Defaults to 1.
@@ -4248,26 +5514,45 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["^VIX", "^OVX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_impulse_response_function(period="quarterly", periods=5)
+        toolkit.econometrics.get_impulse_response_function(column="Adj Close", periods=20)
         ```
 
         Which returns:
 
-        | Horizon   |   ('AAPL', 'AAPL') |   ('AAPL', 'MSFT') |   ('MSFT', 'AAPL') |   ('MSFT', 'MSFT') |
-        |:----------|--------------------:|--------------------:|--------------------:|--------------------:|
-        | 0         |              0.1667 |              0.0865 |               0     |              0.0708 |
-        | 1         |              0.0075 |             -0.0196 |               0.0836|              0.0553 |
-        | 2         |             -0.0274 |             -0.0192 |               0.0178|             -0.0006 |
-        | 3         |             -0.0071 |             -0.0007 |              -0.0108|             -0.0097 |
-        | 4         |              0.0033 |              0.0032 |              -0.0054|             -0.002  |
-        | 5         |              0.0019 |              0.0008 |               0.0007|              0.0013 |
+        |   Horizon |   ('^VIX', '^VIX') |   ('^VIX', '^OVX') |   ('^OVX', '^VIX') |   ('^OVX', '^OVX') |
+        |----------:|-------------------:|-------------------:|-------------------:|-------------------:|
+        |         0 |             1.7975 |             1.1106 |             0      |             2.4048 |
+        |         1 |             1.6806 |             1.1595 |             0.022  |             2.2148 |
+        |         2 |             1.5725 |             1.1956 |             0.0407 |             2.0416 |
+        |         3 |             1.4723 |             1.2207 |             0.0565 |             1.8834 |
+        |         4 |             1.3794 |             1.2361 |             0.0698 |             1.7389 |
+        |         5 |             1.2933 |             1.2433 |             0.0807 |             1.6069 |
+        |         6 |             1.2133 |             1.2434 |             0.0897 |             1.4861 |
+        |         7 |             1.1389 |             1.2374 |             0.097  |             1.3755 |
+        |         8 |             1.0698 |             1.2262 |             0.1027 |             1.2743 |
+        |         9 |             1.0054 |             1.2106 |             0.1071 |             1.1814 |
+        |        10 |             0.9454 |             1.1914 |             0.1104 |             1.0963 |
+        |        11 |             0.8895 |             1.1691 |             0.1126 |             1.0181 |
+        |        12 |             0.8374 |             1.1444 |             0.114  |             0.9462 |
+        |        13 |             0.7887 |             1.1176 |             0.1146 |             0.8801 |
+        |        14 |             0.7432 |             1.0893 |             0.1145 |             0.8193 |
+        |        15 |             0.7006 |             1.0597 |             0.1139 |             0.7633 |
+        |        16 |             0.6608 |             1.0292 |             0.1129 |             0.7117 |
+        |        17 |             0.6236 |             0.9981 |             0.1114 |             0.664  |
+        |        18 |             0.5886 |             0.9667 |             0.1096 |             0.6201 |
+        |        19 |             0.5559 |             0.9351 |             0.1075 |             0.5794 |
+        |        20 |             0.5252 |             0.9034 |             0.1052 |             0.5418 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        returns = self._get_series_column(period, column, tickers)
 
         var_result = time_series_model.get_var_forecast(
             returns[tickers], lags=lags, forecast_steps=1
@@ -4276,8 +5561,9 @@ class Econometrics:
             var_result, periods=periods, orthogonalized=orthogonalized
         )
 
-        return time_series_model.irf_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            time_series_model.irf_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -4305,9 +5591,16 @@ class Econometrics:
         classic signature of a ticker that is initially self-driven but increasingly
         explained by the rest of the system over time.
 
+        The formula is as follows:
+
+        - Θₙ = Ψₙ·P, the orthogonalized moving-average matrices of `get_impulse_response_function`, from
+          a VAR(p) on every ticker's `column` (Return by default), p = `lags` (1 by default)
+        - Share of ticker j's shock in ticker i's h-step forecast error variance:
+          ωᵢⱼ(h) = Σ(n=0..h-1) Θₙ[i, j]² / Σ(m=1..k) Σ(n=0..h-1) Θₙ[i, m]², for h = 1..`periods`
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to model. Defaults to
             "Return".
             lags (int, optional): The VAR order. Defaults to 1.
@@ -4332,25 +5625,44 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["^VIX", "^GVZ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_variance_decomposition(period="quarterly", periods=5)
+        toolkit.econometrics.get_variance_decomposition(column="Adj Close", periods=20)
         ```
 
         Which returns:
 
-        | Horizon   |   ('AAPL', 'AAPL') |   ('AAPL', 'MSFT') |   ('MSFT', 'AAPL') |   ('MSFT', 'MSFT') |
-        |:----------|--------------------:|--------------------:|--------------------:|--------------------:|
-        | 1         |              1      |              0      |              0.5984 |              0.4016 |
-        | 2         |              0.7993 |              0.2007 |              0.4935 |              0.5065 |
-        | 3         |              0.7965 |              0.2035 |              0.5049 |              0.4951 |
-        | 4         |              0.7942 |              0.2058 |              0.502  |              0.498  |
-        | 5         |              0.7936 |              0.2064 |              0.5022 |              0.4978 |
+        |   Horizon |   ('^VIX', '^VIX') |   ('^VIX', '^GVZ') |   ('^GVZ', '^VIX') |   ('^GVZ', '^GVZ') |
+        |----------:|-------------------:|-------------------:|-------------------:|-------------------:|
+        |         1 |             1      |             0      |             0.1832 |             0.8168 |
+        |         2 |             1      |             0      |             0.1925 |             0.8075 |
+        |         3 |             0.9999 |             0.0001 |             0.2016 |             0.7984 |
+        |         4 |             0.9998 |             0.0002 |             0.2104 |             0.7896 |
+        |         5 |             0.9997 |             0.0003 |             0.219  |             0.781  |
+        |         6 |             0.9996 |             0.0004 |             0.2273 |             0.7727 |
+        |         7 |             0.9995 |             0.0005 |             0.2354 |             0.7646 |
+        |         8 |             0.9993 |             0.0007 |             0.2432 |             0.7568 |
+        |         9 |             0.9991 |             0.0009 |             0.2506 |             0.7494 |
+        |        10 |             0.9989 |             0.0011 |             0.2578 |             0.7422 |
+        |        11 |             0.9987 |             0.0013 |             0.2647 |             0.7353 |
+        |        12 |             0.9985 |             0.0015 |             0.2714 |             0.7286 |
+        |        13 |             0.9983 |             0.0017 |             0.2777 |             0.7223 |
+        |        14 |             0.9981 |             0.0019 |             0.2837 |             0.7163 |
+        |        15 |             0.9978 |             0.0022 |             0.2895 |             0.7105 |
+        |        16 |             0.9976 |             0.0024 |             0.2949 |             0.7051 |
+        |        17 |             0.9974 |             0.0026 |             0.3002 |             0.6998 |
+        |        18 |             0.9971 |             0.0029 |             0.3051 |             0.6949 |
+        |        19 |             0.9969 |             0.0031 |             0.3098 |             0.6902 |
+        |        20 |             0.9967 |             0.0033 |             0.3142 |             0.6858 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        returns = self._get_series_column(period, column, tickers)
 
         var_result = time_series_model.get_var_forecast(
             returns[tickers], lags=lags, forecast_steps=1
@@ -4359,8 +5671,9 @@ class Econometrics:
             var_result, periods=periods
         )
 
-        return time_series_model.variance_decomposition_summary_table(result).round(
-            rounding if rounding is not None else self._rounding
+        return apply_rounding(
+            time_series_model.variance_decomposition_summary_table(result),
+            rounding if rounding is not None else self._rounding,
         )
 
     @handle_errors
@@ -4388,9 +5701,18 @@ class Econometrics:
         `time_series_model.get_vecm_forecast` for the full formula, estimation method
         and verification notes.
 
+        The formula is as follows:
+
+        - Rank r = the number of leading Johansen trace statistics (det_order=0, `k_ar_diff` lags) that
+          exceed their critical value at `significance` (5% by default); r = 0 raises an error
+        - ΔYₜ = α·β'·Yₜ₋₁ + Σ(i=1..k) Γᵢ·ΔYₜ₋ᵢ + c + εₜ, with Yₜ every ticker's `column` level (Adj Close by
+          default), k = `k_ar_diff` (1 by default) and c a constant outside the cointegrating relation
+          (statsmodels VECM with deterministic="co"), fitted by Maximum Likelihood
+        - Forecast: the fitted recursion run forward `forecast_steps` periods, in levels
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to model. Defaults to
             "Adj Close" -- a VECM needs price LEVELS (non-stationary, cointegrated
             series), not returns, the same input `get_johansen_cointegration` expects.
@@ -4427,27 +5749,30 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GOOGL", "GOOG"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        # AAPL/MSFT alone aren't cointegrated in this sample -- add Benchmark to the
-        # system to get one that is.
-        toolkit.econometrics.get_vecm_forecast(period="quarterly", include_benchmark=True)
+        # The two share classes of Alphabet are cointegrated: their prices cannot drift apart.
+        toolkit.econometrics.get_vecm_forecast()
         ```
 
         Which returns:
 
-        | Step |    AAPL |    MSFT |   Benchmark |
-        |-----:|--------:|--------:|------------:|
-        |    1 | 131.672 | 237.052 |     380.084 |
-        |    2 | 136.414 | 266.892 |     404.920 |
-        |    3 | 147.872 | 281.265 |     413.975 |
-        |    4 | 154.833 | 289.048 |     413.568 |
-        |    5 | 152.306 | 273.929 |     396.546 |
+        |   Step |   GOOGL |    GOOG |
+        |-------:|--------:|--------:|
+        |      1 | 312.569 | 313.352 |
+        |      2 | 312.75  | 313.553 |
+        |      3 | 312.929 | 313.747 |
+        |      4 | 313.109 | 313.941 |
+        |      5 | 313.289 | 314.135 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        prices = self._get_price_column(period, column)
-
+        period = period if period else "daily"
         tickers = self._get_tickers(include_benchmark=include_benchmark)
+        prices = self._get_series_column(period, column, tickers)
 
         result = time_series_model.get_vecm_forecast(
             prices[tickers],
@@ -4456,8 +5781,8 @@ class Econometrics:
             significance=significance,
         )
 
-        return result["forecast"].round(
-            rounding if rounding is not None else self._rounding
+        return result["forecast"].pipe(
+            apply_rounding, rounding if rounding is not None else self._rounding
         )
 
     @handle_errors
@@ -4474,8 +5799,7 @@ class Econometrics:
 
         Also known as: RMSD (Root Mean Squared Deviation).
 
-        See `forecast_evaluation_model.get_rmse` for the formula. This controller
-        method compares two ASSETS' series directly, treating one as a naive
+        This controller method compares two ASSETS' series directly, treating one as a naive
         "forecast" proxy for the other -- a simple, tracking-error style measure of
         how closely two series move together in absolute deviation terms (e.g. a
         portfolio versus a benchmark, or one asset as a naive stand-in forecast for
@@ -4483,9 +5807,20 @@ class Econometrics:
         rather than one asset as a naive proxy for another, use
         `get_out_of_sample_validation` instead.
 
+        For a fund against its index the RMSE comes close to the tracking error but is not
+        the same: the tracking error (`Performance.get_tracking_error`) is the Standard
+        Deviation of the return differences, which leaves out their average, while the RMSE
+        includes it. The RMSE is per period, so a daily figure is usually multiplied by the
+        square root of 252 to annualize it.
+
+        The formula is as follows:
+
+        - RMSE = √((1 / n)·Σ(aₜ - bₜ)²), with aₜ and bₜ the two tickers' `column` (Return by default) on
+          the n dates where both have data
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to compare. Defaults to
             "Return".
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
@@ -4501,19 +5836,26 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["IVV", "VOO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_rmse(period="quarterly")
+        toolkit.econometrics.get_rmse(include_benchmark=True)
         ```
 
         Which returns:
 
-        | Ticker A   | Ticker B   |   RMSE |
-        |:-----------|:-----------|-------:|
-        | AAPL       | MSFT       | 0.1084 |
+        |                      |   RMSE |
+        |:---------------------|-------:|
+        | ('IVV', 'VOO')       | 0.0004 |
+        | ('IVV', 'Benchmark') | 0.0009 |
+        | ('VOO', 'Benchmark') | 0.001  |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(period, column)
 
         values = {
             (ticker_a, ticker_b): forecast_evaluation_model.get_rmse(
@@ -4524,10 +5866,18 @@ class Econometrics:
             )
         }
 
+        if not values:
+            raise ValueError(
+                "The RMSE compares two series, a forecast and the actual values, so it "
+                "needs at least two tickers (or include_benchmark=True for the benchmark)."
+            )
+
         result = pd.Series(values, name="RMSE")
         result.index = result.index.set_names(["Ticker A", "Ticker B"])
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_mae(
@@ -4538,19 +5888,32 @@ class Econometrics:
         rounding: int | None = None,
     ) -> pd.Series:
         """
-        Calculate the Mean Absolute Error (MAE) between every unordered pair of
-        tickers' series in the Toolkit instance.
+        Calculate the Mean Absolute Error (MAE) between every unordered pair of tickers'
+        series in the Toolkit instance.
+
+        MAE is the average absolute difference between two series.
+
+        The formula is as follows:
+
+        - MAE = (1 / n)·Σ|aₜ - bₜ|, with aₜ and bₜ the two tickers' `column` (Return by default) on the
+          n dates where both have data
+
+        It is expressed in the units of the series itself (e.g. a return difference) and
+        answers "how far apart are the two series in a typical period". Every difference counts
+        in proportion to its size, so unlike `get_rmse`, which squares the differences and is
+        therefore dominated by a few large gaps, MAE is robust to occasional outliers. A
+        lower value means the two tickers track each other more closely.
+
+        This method compares two assets directly, for example how closely a fund tracks its
+        index or how two related stocks move together, rather than an asset against a model's
+        forecast; see `get_rmse` for the reasoning, and `get_out_of_sample_validation` for
+        evaluating actual forecasts.
 
         Also known as: MAD (Mean Absolute Deviation).
 
-        See `forecast_evaluation_model.get_mae` for the formula, and `get_rmse`'s
-        docstring for why this controller method compares two ASSETS directly (rather
-        than an asset against an actual forecasting model's output -- see
-        `get_out_of_sample_validation` for that).
-
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to compare. Defaults to
             "Return".
             include_benchmark (bool, optional): Whether to include "Benchmark" among the
@@ -4566,19 +5929,26 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GLD", "IAU", "GLDM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.econometrics.get_mae(period="quarterly")
+        toolkit.econometrics.get_mae()
         ```
 
         Which returns:
 
-        | Ticker A   | Ticker B   |    MAE |
-        |:-----------|:-----------|-------:|
-        | AAPL       | MSFT       | 0.0887 |
+        |                 |    MAE |
+        |:----------------|-------:|
+        | ('GLD', 'IAU')  | 0.0002 |
+        | ('GLD', 'GLDM') | 0.0003 |
+        | ('IAU', 'GLDM') | 0.0003 |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        returns = self._get_price_column(period, column)
+        period = period if period else "daily"
+        returns = self._get_series_column(period, column)
 
         values = {
             (ticker_a, ticker_b): forecast_evaluation_model.get_mae(
@@ -4589,10 +5959,18 @@ class Econometrics:
             )
         }
 
+        if not values:
+            raise ValueError(
+                "The MAE compares two series, a forecast and the actual values, so it "
+                "needs at least two tickers (or include_benchmark=True for the benchmark)."
+            )
+
         result = pd.Series(values, name="MAE")
         result.index = result.index.set_names(["Ticker A", "Ticker B"])
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_out_of_sample_validation(
@@ -4633,9 +6011,18 @@ class Econometrics:
           Toolkit instance if not given); only that ticker's own forecast column
           is scored against its holdout.
 
+        The formula is as follows:
+
+        - Training sample: the first int(`train_fraction`·n) observations (80% by default) of the
+          `column` level (Adj Close by default); the remaining H observations are the holdout
+        - Ŷₜ: the H-step forecast of the model fitted on the training sample only, an ARIMA(p, d, q)
+          (model="arima", ARIMA(1, 1, 1) by default) or a VAR(`lags`) on the ticker and `other_tickers`
+          (model="var")
+        - RMSE = √((1 / H)·Σ(Yₜ - Ŷₜ)²) and MAE = (1 / H)·Σ|Yₜ - Ŷₜ|, over the holdout
+
         Args:
             period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or yearly). Defaults to
-                "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+                "daily".
             column (str, optional): The historical data column to validate. Defaults
             to "Adj Close".
             model (str, optional): Either "arima" or "var". Defaults to "arima".
@@ -4661,7 +6048,8 @@ class Econometrics:
 
         Returns:
             pd.DataFrame: `RMSE`, `MAE` and `Holdout Observations`, one column per
-            ticker.
+            ticker. With `model="arima"` each ticker uses its own history and a ticker
+            without enough data has an empty (NaN) column.
 
         Raises:
             ValueError: If `model` is not "arima" or "var", or (for `model="var"`)
@@ -4672,23 +6060,28 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
-
-        toolkit.econometrics.get_out_of_sample_validation(
-            period="weekly", model="arima", p=1, d=1, q=1
+        toolkit = Toolkit(
+            ["BTCUSD", "ETHUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
         )
+
+        toolkit.econometrics.get_out_of_sample_validation()
         ```
 
         Which returns:
 
-        |                       |    AAPL |    MSFT |
-        |:----------------------|--------:|--------:|
-        | RMSE                  | 12.9091 | 24.2258 |
-        | MAE                   | 10.2476 | 20.6824 |
-        | Holdout Observations  | 32      | 32      |
+        |                      |   BTCUSD |   ETHUSD |
+        |:---------------------|---------:|---------:|
+        | RMSE                 | 11424.9  |  1003.11 |
+        | MAE                  |  9896.95 |   842.37 |
+        | Holdout Observations |   366    |   366    |
         """
-        period = period if period else "quarterly" if self._quarterly else "yearly"
-        prices = self._get_price_column(period, column)
+        period = period if period else "daily"
+        # Every series at its own observations: the ARIMA validation drops the missing
+        # values per series and the VAR branch aligns its own system with dropna below.
+        prices = self._get_series_column(period, column)
 
         tickers = self._get_tickers(include_benchmark=include_benchmark)
 
@@ -4698,17 +6091,22 @@ class Econometrics:
         columns = {}
         for ticker in tickers:
             if model == "arima":
-                columns[ticker] = (
-                    forecast_evaluation_model.get_out_of_sample_validation(
-                        prices[ticker],
-                        time_series_model.get_arima_forecast,
-                        train_fraction=train_fraction,
-                        p=p,
-                        d=d,
-                        q=q,
-                        include_constant=include_constant,
+                # As in get_arima_forecast, a ticker without enough data of its own
+                # gets an empty column instead of failing the other tickers.
+                try:
+                    columns[ticker] = (
+                        forecast_evaluation_model.get_out_of_sample_validation(
+                            prices[ticker],
+                            time_series_model.get_arima_forecast,
+                            train_fraction=train_fraction,
+                            p=p,
+                            d=d,
+                            q=q,
+                            include_constant=include_constant,
+                        )
                     )
-                )
+                except ValueError as error:
+                    logger.warning("No ARIMA validation for %s: %s", ticker, error)
                 continue
 
             ticker_other_tickers = (
@@ -4747,9 +6145,14 @@ class Econometrics:
                 }
             )
 
-        result = pd.DataFrame(columns)
+        if not columns:
+            raise ValueError("None of the tickers has enough data for an ARIMA fit.")
 
-        return result.round(rounding if rounding is not None else self._rounding)
+        result = pd.DataFrame(columns).reindex(columns=tickers)
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_event_study(
@@ -4779,6 +6182,24 @@ class Econometrics:
         impact attributable to the event, after stripping out what would have been
         expected from general market movements alone -- along with a t-test of
         whether CAR is significantly different from zero.
+
+        The `event_date` is the first trading day on which the news can be priced, so for
+        results released after the close it is the next trading day. The CAR runs from
+        `pre_event_days` before to `post_event_days` after it (21 trading days by default),
+        which also captures any leak ahead of the announcement. The t-test treats the
+        abnormal returns as independent and uses the residual Variance of the estimation
+        window, so a single event is weak evidence; studies average the CARs of many events
+        of the same kind.
+
+        The formula is as follows:
+
+        - Market model: Rₜ = α + β·R_m,t + εₜ, fitted by OLS on the daily `column` (Return by default) of
+          the ticker and the Benchmark over the `estimation_window` (250) trading days that end
+          `gap_days` (30) trading days before the event
+        - ARₜ = Rₜ - (α̂ + β̂·R_m,t), for t = -`pre_event_days` .. +`post_event_days` (10 and 10)
+        - CAR = Σ ARₜ over the L = `pre_event_days` + `post_event_days` + 1 event-window days
+        - t = CAR / √(L·σ̂²), with σ̂² = Σε̂ₜ² / (N - 2) over the N estimation-window days and a Student-t
+          distribution with N - 2 degrees of freedom
 
         Also known as: CAR analysis, abnormal returns analysis, market model event
         study.
@@ -4817,26 +6238,36 @@ class Econometrics:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "MSFT"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["NVDA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2022-01-01",
+            end_date="2023-12-31",
+        )
 
-        toolkit.econometrics.get_event_study(event_date="2023-05-04")
+        # NVDA's abnormal return around its May 2023 earnings release
+        toolkit.econometrics.get_event_study(event_date="2023-05-25")
         ```
 
         Which returns:
 
         |                                |    Value |
         |:-------------------------------|---------:|
-        | Cumulative Abnormal Return     |   0.0181 |
-        | CAR t-statistic                |   0.3693 |
-        | CAR p-value                    |   0.7122 |
-        | Alpha                          |   0.0005 |
-        | Beta                           |   1.294  |
+        | Cumulative Abnormal Return     |   0.2044 |
+        | CAR t-statistic                |   1.9468 |
+        | CAR p-value                    |   0.0527 |
+        | Alpha                          |   0.0018 |
+        | Beta                           |   2.0781 |
         | Estimation Window Observations | 250      |
         """
-        # Not `_get_price_column`: its daily branch checks intraday for emptiness.
-        returns = self._historical_data["daily"][column].dropna()
-
         dependent_ticker = dependent_ticker or self._get_tickers()[0]
+
+        # The windows count trading days of the dependent ticker and the Benchmark
+        # together, so only their common dates are kept: another ticker's missing
+        # dates do not shorten or shift the estimation and event windows.
+        returns = self._get_series_column(
+            "daily", column, [dependent_ticker, BENCHMARK_TICKER]
+        )
 
         result = event_study_model.get_event_study(
             returns=returns[dependent_ticker],
@@ -4861,4 +6292,619 @@ class Econometrics:
             }
         )
 
-        return summary.round(rounding if rounding is not None else self._rounding)
+        return apply_rounding(
+            summary, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_markov_regime_switching(
+        self,
+        period: str | None = None,
+        column: str = "Return",
+        regimes: int = 2,
+        switching_variance: bool = True,
+        probabilities: bool = False,
+        include_benchmark: bool = False,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fit a Markov regime switching model to every asset: the mean and volatility of its
+        returns depend on a regime that is not observed and switches from one period to the
+        next with fixed probabilities (Hamilton, 1989). With two regimes the model typically
+        separates calm markets (a higher mean and a low volatility) from turbulent ones (a
+        lower mean and a high volatility), and it says which regime the market is most
+        likely in today, how persistent each regime is and how long it lasts on average.
+
+        The regimes are ordered from the lowest to the highest volatility, so Regime 1 is
+        the calmest. With switching_variance=False all regimes share one volatility, and
+        they are ordered from the lowest to the highest mean instead, so Regime 1 is the
+        one with the lowest mean. The expected duration of a regime is 1 / (1 - p), with p
+        the probability of staying in it, in periods. The share is the part of the periods
+        in which the regime was the most likely one.
+
+        The likelihood of a mixture of regimes has local optima, so the model is fitted from
+        its default starting values and from the best of 20 random perturbations of them,
+        and the fit with the highest likelihood is kept. The random perturbations come from
+        NumPy's global random state, so when competing optima are close, repeated calls can
+        differ slightly; call np.random.seed beforehand for results that can be reproduced.
+
+        The formula is as follows:
+
+        - yₜ = μ_Sₜ + σ_Sₜ·εₜ, with yₜ the `column` series (Return by default), εₜ standard normal and
+          Sₜ ∈ {1, ..., K} the regime, K = `regimes` (2 by default); σ_Sₜ = σ for every regime when
+          switching_variance=False
+        - P(Sₜ = j | Sₜ₋₁ = i) = pᵢⱼ, a first-order Markov chain with constant transition probabilities
+        - μ, σ and pᵢⱼ are fitted by Maximum Likelihood with the Hamilton filter (statsmodels
+          MarkovRegression), keeping the best of the default start and 20 random perturbations
+        - Smoothed probabilities P(Sₜ = j | y₁..y_T) per date; Expected Duration = 1 / (1 - pⱼⱼ) periods;
+          Share = the fraction of dates where regime j has the highest smoothed probability; Current
+          Regime = that regime on the last date, with its smoothed probability
+
+        For more information, see the following paper:
+
+        - Hamilton, J.D. (1989). "A New Approach to the Economic Analysis of Nonstationary
+          Time Series and the Business Cycle." Econometrica, 57(2), 357-384.
+
+        Also known as: Markov switching model, hidden Markov model, regime detection,
+        bull and bear regimes.
+
+        Args:
+            period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or
+                yearly). Defaults to "daily".
+            column (str, optional): The historical data column to model. Defaults to "Return".
+            regimes (int, optional): The number of regimes. Defaults to 2.
+            switching_variance (bool, optional): Whether the volatility switches with the
+                regime as well as the mean. Defaults to True.
+            probabilities (bool, optional): Whether to return the smoothed probability of
+                every regime per date instead of the summary. Defaults to False.
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+                assets. Defaults to False.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None.
+
+        Returns:
+            pd.DataFrame: Per asset the Mean, Volatility, Probability of Staying, Expected
+            Duration and Share of every regime, and the Current Regime with its probability;
+            or, with probabilities=True, the probability of every regime per date.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2015-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.econometrics.get_markov_regime_switching(period="weekly")
+        ```
+
+        Which returns:
+
+        |                                 |    AAPL |    MSFT |
+        |:--------------------------------|--------:|--------:|
+        | Regime 1 Mean                   |  0.009  |  0.0065 |
+        | Regime 1 Volatility             |  0.0236 |  0.0217 |
+        | Regime 1 Probability of Staying |  0.917  |  0.9528 |
+        | Regime 1 Expected Duration      | 12.0479 | 21.194  |
+        | Regime 1 Share                  |  0.5436 |  0.6411 |
+        | Regime 2 Mean                   |  0.0006 |  0.0021 |
+        | Regime 2 Volatility             |  0.0488 |  0.0455 |
+        | Regime 2 Probability of Staying |  0.91   |  0.9209 |
+        | Regime 2 Expected Duration      | 11.1105 | 12.6346 |
+        | Regime 2 Share                  |  0.4564 |  0.3589 |
+        | Current Regime                  |  1      |  1      |
+        | Current Regime Probability      |  0.8877 |  0.8087 |
+        """
+        period = period if period else "daily"
+        data = self._filter_benchmark(
+            self._get_series_column(period, column), include_benchmark=include_benchmark
+        )
+
+        fits = {
+            ticker: regime_model.get_markov_regime_switching(
+                data[ticker], regimes=regimes, switching_variance=switching_variance
+            )
+            for ticker in data.columns
+        }
+
+        if probabilities:
+            result = pd.concat(
+                {ticker: smoothed for ticker, (_, smoothed) in fits.items()}, axis=1
+            )
+        else:
+            result = pd.DataFrame(
+                {ticker: summary for ticker, (summary, _) in fits.items()}
+            )
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_structural_breaks(
+        self,
+        period: str | None = None,
+        column: str = "Return",
+        max_breaks: int = 5,
+        minimum_segment: float = 0.15,
+        breaks: int | None = None,
+        include_benchmark: bool = False,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Find the dates at which the mean of every asset's series shifts, with the Bai and
+        Perron (1998, 2003) method for multiple structural breaks. For every number of breaks
+        the break dates that minimize the sum of squared residuals around a mean per segment
+        are found exactly (by dynamic programming), and the number of breaks is chosen by the
+        Bayesian information criterion. Every segment covers at least a share of the
+        observations (the integer part of that share times the number of observations, as
+        in Bai and Perron), so a break is not fitted to a few outliers.
+
+        The BIC works well for series without serial correlation, such as returns, but tends
+        to choose too many breaks when the series is serially correlated (Bai and Perron,
+        2003), as levels such as inflation or interest rates are: a persistent swing then
+        looks like a shift in the mean. For such series, compare the segments for a few
+        values of breaks rather than relying on the chosen number alone.
+
+        Breaks show when a series changed character, such as the regimes of inflation or of
+        interest rates, or a change in the average return of an asset. Unlike the Chow test,
+        the break dates do not have to be known in advance.
+
+        The formula is as follows:
+
+        - yₜ = μⱼ + εₜ for the dates of segment j = 1, ..., m + 1, with yₜ the `column` series (Return by
+          default) and m breaks
+        - SSR(m) = min over the break dates of Σⱼ Σ(t in segment j) (yₜ - ȳⱼ)², found exactly by dynamic
+          programming, with every segment at least h = max(⌊`minimum_segment`·T⌋, 2) observations
+          (`minimum_segment` = 0.15 by default)
+        - BIC(m) = T·ln(SSR(m) / T) + (2m + 1)·ln(T), for m = 0, ..., `max_breaks` (5 by default); the m
+          with the lowest BIC is chosen unless `breaks` is given
+        - Per segment: its Start, End, Observations, Mean ȳⱼ and Standard Deviation (ddof=1)
+
+        For more information, see the following papers:
+
+        - Bai, J. and Perron, P. (1998). "Estimating and Testing Linear Models with Multiple
+          Structural Changes." Econometrica, 66(1), 47-78.
+        - Bai, J. and Perron, P. (2003). "Computation and Analysis of Multiple Structural
+          Change Models." Journal of Applied Econometrics, 18(1), 1-22.
+
+        Also known as: Bai-Perron test, multiple structural breaks, change point detection,
+        regime shifts.
+
+        Args:
+            period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or
+                yearly). Defaults to "daily".
+            column (str, optional): The historical data column to analyze. Defaults to
+                "Return"; use "Adj Close" (or "Level" with standalone data) for the series
+                itself, such as an inflation rate.
+            max_breaks (int, optional): The most breaks considered. Defaults to 5.
+            minimum_segment (float, optional): The smallest segment as a share of the
+                observations (the trimming). Defaults to 0.15.
+            breaks (int | None, optional): The number of breaks to find instead of choosing
+                it by the BIC. Defaults to None.
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+                assets. Defaults to False.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None.
+
+        Returns:
+            pd.DataFrame: Per asset and segment the Start, End, Observations, Mean and
+            Standard Deviation, with the BIC of the chosen number of breaks.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Economics, Econometrics
+
+        economics = Economics(start_date="1960-01-01", end_date="2025-12-31")
+
+        inflation = economics.get_inflation_rate(countries="United States", period="yearly")
+
+        econometrics = Econometrics(data=inflation)
+
+        econometrics.get_structural_breaks(column="Level", max_breaks=3)
+        ```
+
+        Which returns:
+
+        |                      | Start      | End        |   Observations |   Mean |   Standard Deviation |      BIC |
+        |:---------------------|:-----------|:-----------|---------------:|-------:|---------------------:|---------:|
+        | ('United States', 1) | 1960-12-31 | 1972-12-31 |             13 | 0.0282 |               0.0169 | -519.037 |
+        | ('United States', 2) | 1973-12-31 | 1982-12-31 |             10 | 0.0876 |               0.0269 | -519.037 |
+        | ('United States', 3) | 1983-12-31 | 2025-12-31 |             43 | 0.0285 |               0.0143 | -519.037 |
+        """
+        period = period if period else "daily"
+        data = self._filter_benchmark(
+            self._get_series_column(period, column), include_benchmark=include_benchmark
+        )
+
+        result = pd.concat(
+            {
+                ticker: regime_model.get_structural_breaks(
+                    data[ticker],
+                    max_breaks=max_breaks,
+                    minimum_segment=minimum_segment,
+                    breaks=breaks,
+                )
+                for ticker in data.columns
+            }
+        )
+        result.index = result.index.set_names(["Asset", "Segment"])
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_time_varying_beta(
+        self,
+        dependent_tickers: str | list[str] | None = None,
+        independent_ticker: str | None = None,
+        period: str | None = None,
+        column: str = "Return",
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Estimate the alpha and beta of every asset as they change over time, with the Kalman
+        filter. The regression y_t = α_t + β_t x_t + ε_t lets both coefficients take a random
+        step every period; how large those steps are, and how much noise surrounds the
+        regression, is estimated by maximum likelihood. A beta that drifts, such as a stock
+        becoming more sensitive to the market, shows up without choosing the window of a
+        rolling regression, while a beta that is constant stays flat.
+
+        Every alpha and beta is the filtered estimate, updated with the observations up to
+        its date only. The three variances that set how fast the estimates adapt are
+        estimated on the whole sample, however, so the path is not entirely what would have
+        been known at the time. The filter starts without prior knowledge of the
+        coefficients, so the first date (or the first few, when the independent series
+        starts with zeros) cannot separate the alpha from the beta and is NaN.
+
+        By default every asset is regressed on the Benchmark of the Toolkit (or, with
+        standalone data, on the second series).
+
+        The formula is as follows:
+
+        - yₜ = αₜ + βₜ·xₜ + εₜ, εₜ ~ N(0, σ²_ε), with yₜ the asset's and xₜ the independent asset's `column`
+          series (Return by default), on the dates both have
+        - αₜ = αₜ₋₁ + ηₜ and βₜ = βₜ₋₁ + ζₜ, ηₜ ~ N(0, σ²_α) and ζₜ ~ N(0, σ²_β): random walks
+        - σ²_ε, σ²_α and σ²_β are fitted by Maximum Likelihood with the Kalman filter (diffusely
+          initialized) on the series divided by their standard deviations, and scaled back
+        - Alpha and Beta are the filtered states E[αₜ, βₜ | y₁..yₜ]; the Beta Standard Error is the square
+          root of the filtered variance of βₜ
+
+        For more information, see the following book:
+
+        - Durbin, J. and Koopman, S.J. (2012). "Time Series Analysis by State Space
+          Methods." Oxford University Press, 2nd edition.
+
+        Also known as: Kalman filter beta, rolling beta, dynamic beta, state space
+        regression.
+
+        Args:
+            dependent_tickers (str | list[str] | None, optional): The assets whose beta is
+                estimated. Defaults to None, which uses every asset except the independent one.
+            independent_ticker (str | None, optional): The asset the beta is measured
+                against. Defaults to None, which uses the Benchmark or the second series.
+            period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or
+                yearly). Defaults to "daily".
+            column (str, optional): The historical data column to use. Defaults to "Return".
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None.
+
+        Returns:
+            pd.DataFrame: Per date and asset the Alpha, the Beta and the standard error of
+            the beta, NaN on the first date(s) where they are not yet identified.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2015-01-01",
+            end_date="2025-12-31",
+        )
+
+        beta = toolkit.econometrics.get_time_varying_beta(period="monthly")
+
+        beta.xs("Beta", axis=1, level=1).iloc[12::24]
+        ```
+
+        Which returns:
+
+        | Date    |   AAPL |   MSFT |
+        |:--------|-------:|-------:|
+        | 2016-02 | 1.2708 | 1.5813 |
+        | 2018-02 | 1.1427 | 1.3183 |
+        | 2020-02 | 1.3197 | 1.1153 |
+        | 2022-02 | 1.2496 | 0.9853 |
+        | 2024-02 | 1.2526 | 0.9525 |
+        """
+        period = period if period else "daily"
+        # Every pair is aligned on its own common dates by the model.
+        data = self._get_series_column(period, column)
+
+        tickers = list(data.columns)
+        if independent_ticker is None:
+            independent_ticker = (
+                BENCHMARK_TICKER
+                if BENCHMARK_TICKER in tickers
+                else tickers[1] if len(tickers) > 1 else None
+            )
+        if independent_ticker is None or independent_ticker not in tickers:
+            raise ValueError(
+                f"The independent ticker {independent_ticker} is not available; choose from "
+                f"{', '.join(tickers)}."
+            )
+        dependent = (
+            [ticker for ticker in tickers if ticker != independent_ticker]
+            if dependent_tickers is None
+            else (
+                [dependent_tickers]
+                if isinstance(dependent_tickers, str)
+                else list(dependent_tickers)
+            )
+        )
+
+        result = pd.concat(
+            {
+                ticker: state_space_model.get_time_varying_beta(
+                    data[ticker], data[independent_ticker]
+                )[0]
+                for ticker in dependent
+            },
+            axis=1,
+        )
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_dcc_garch(
+        self,
+        period: str | None = None,
+        column: str = "Return",
+        parameters: bool = False,
+        include_benchmark: bool = False,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Estimate the correlation between every pair of assets as it changes over time, with
+        the dynamic conditional correlation (DCC) GARCH(1,1) model of Engle (2002). Every
+        asset gets its own GARCH(1,1) volatility, and the correlation of the standardized
+        returns follows a GARCH-like recursion around their long-run correlation. Correlations
+        between assets tend to rise in crises, exactly when diversification is needed most.
+        A rolling correlation sees that late and depends on its window; the DCC model
+        updates the correlation every period, with a (how strongly it reacts to news) and b
+        (how persistent it is) estimated by maximum likelihood.
+
+        The formula is as follows:
+
+        - zᵢ,ₜ = (rᵢ,ₜ - mean(rᵢ)) / σᵢ,ₜ, with rᵢ,ₜ the `column` series (Return by default) on the dates all
+          assets have and σ²ᵢ,ₜ = ω + α·uᵢ,ₜ₋₁² + β·σ²ᵢ,ₜ₋₁ each asset's GARCH(1,1) variance of the demeaned
+          returns u (GARCH Persistence = α + β)
+        - Qₜ = (1 - a - b)·Q̄ + a·zₜ₋₁·zₜ₋₁' + b·Qₜ₋₁, with Q̄ the sample correlation of z and Q₀ = Q̄
+        - Rₜ = diag(Qₜ)^(-1/2)·Qₜ·diag(Qₜ)^(-1/2), the conditional correlations
+        - a and b maximize the correlation log-likelihood -½·Σₜ (ln|Rₜ| + zₜ'·Rₜ⁻¹·zₜ), with a, b ≥ 0 and
+          a + b < 1
+
+        For more information, see the following paper:
+
+        - Engle, R. (2002). "Dynamic Conditional Correlation: A Simple Class of
+          Multivariate Generalized Autoregressive Conditional Heteroskedasticity Models."
+          Journal of Business & Economic Statistics, 20(3), 339-350.
+
+        Also known as: DCC-GARCH, dynamic conditional correlation, time-varying
+        correlation, multivariate GARCH.
+
+        Args:
+            period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or
+                yearly). Defaults to "daily".
+            column (str, optional): The historical data column to use. Defaults to "Return".
+            parameters (bool, optional): Whether to return the estimated parameters (a, b and
+                the GARCH persistence of every asset) instead of the correlations. Defaults
+                to False.
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+                assets. Defaults to False.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None.
+
+        Returns:
+            pd.DataFrame: The conditional correlation of every pair of assets per date, or
+            the parameters of the model.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["AAPL", "MSFT", "XOM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2018-01-01",
+            end_date="2025-12-31",
+        )
+
+        correlations = toolkit.econometrics.get_dcc_garch()
+
+        correlations.resample("Y").mean().round(4)
+        ```
+
+        Which returns:
+
+        | Date   |   AAPL / MSFT |   AAPL / XOM |   MSFT / XOM |
+        |:-------|--------------:|-------------:|-------------:|
+        | 2018   |        0.6047 |       0.2794 |       0.2729 |
+        | 2019   |        0.578  |       0.2982 |       0.2641 |
+        | 2020   |        0.6665 |       0.2879 |       0.226  |
+        | 2021   |        0.6199 |       0.1384 |       0.0786 |
+        | 2022   |        0.7084 |       0.2283 |       0.1692 |
+        | 2023   |        0.5802 |       0.1706 |       0.0386 |
+        | 2024   |        0.5378 |       0.1018 |       0.0237 |
+        | 2025   |        0.4636 |       0.1991 |       0.114  |
+        """
+        period = period if period else "daily"
+        # The model aligns the assets on the dates they share, after the Benchmark is left
+        # out, so the Benchmark's own gaps do not shorten the sample when it is excluded.
+        data = self._filter_benchmark(
+            self._get_series_column(period, column), include_benchmark=include_benchmark
+        )
+
+        correlations, estimates = state_space_model.get_dcc_garch(data)
+        result = (
+            pd.Series(estimates, name="Value").to_frame()
+            if parameters
+            else correlations
+        )
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )
+
+    @handle_errors
+    def get_pairs_trading(
+        self,
+        period: str | None = None,
+        column: str = "Adj Close",
+        window: int | None = None,
+        entry_z_score: float = 2.0,
+        exit_z_score: float = 0.5,
+        log_prices: bool = True,
+        time_series: bool = False,
+        include_benchmark: bool = False,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate the statistics of trading the spread between every pair of assets. The
+        hedge ratio follows from regressing one log price on the other; what remains is the
+        spread, and when the two are cointegrated the spread reverts to its mean. Its
+        z-score says how far it is from that mean in standard deviations, and threshold
+        rules trade on it: short the spread (sell the first asset, buy the hedge ratio of
+        the second) once the z-score rises above the entry threshold, buy it once it falls
+        below minus the threshold, and close the position once the z-score crosses the exit
+        threshold on its way back (below it for a short, above minus it for a long). A
+        z-score that jumps past the band in one period still closes the position, and one
+        that lands beyond the entry threshold on the other side reverses it. The half-life
+        says how many periods the spread takes to close half its gap to the mean.
+
+        Gatev, Goetzmann and Rouwenhorst (2006) open a position when the normalized prices
+        of a pair drift two standard deviations (of their formation period) apart and close
+        it when the prices cross, which is an exit threshold of 0; closing at 0.5 is a
+        common variant that takes profits before the spread is fully back at its mean.
+
+        The hedge ratio and intercept are estimated on the whole period, so the spread, and
+        with it every z-score and signal, uses information from after its date. A rolling
+        window only makes the mean and standard deviation of the z-score backward-looking;
+        a backtest without look-ahead estimates the hedge ratio on a formation period and
+        trades in the period after it. The Engle-Granger p-value says whether there is a
+        mean-reverting relationship to trade at all (below 0.05).
+
+        The formula is as follows:
+
+        - yₜ = c + h·xₜ + sₜ, fitted by OLS on the dates both have, with yₜ and xₜ the (log, when
+          log_prices=True) `column` levels (Adj Close by default): h the Hedge Ratio, c the Intercept and
+          sₜ the Spread
+        - Z-Scoreₜ = (sₜ - mean(s)) / std(s) (ddof=1), over the full sample or a rolling `window`
+        - Signal: -1 from Z > `entry_z_score` until Z < `exit_z_score`, +1 from Z < -`entry_z_score`
+          until Z > -`exit_z_score`, 0 otherwise (2.0 and 0.5 by default)
+        - Half-Life = -ln(2) / ln(1 + λ), with λ from Δsₜ = a + λ·sₜ₋₁ + εₜ (infinite when λ is (nearly)
+          zero or positive)
+        - Cointegration P-Value: the Engle-Granger test of yₜ on xₜ
+
+        For more information, see the following papers:
+
+        - Gatev, E., Goetzmann, W.N. and Rouwenhorst, K.G. (2006). "Pairs Trading:
+          Performance of a Relative-Value Arbitrage Rule." The Review of Financial Studies,
+          19(3), 797-827.
+        - Engle, R.F. and Granger, C.W.J. (1987). "Co-Integration and Error Correction:
+          Representation, Estimation, and Testing." Econometrica, 55(2), 251-276.
+
+        Also known as: statistical arbitrage, spread trading, z-score strategy, half-life
+        of mean reversion.
+
+        Args:
+            period (str, optional): The data frequency (daily, weekly, monthly, quarterly, or
+                yearly). Defaults to "daily".
+            column (str, optional): The price column. Defaults to "Adj Close".
+            window (int | None, optional): The rolling window of the z-score. Defaults to
+                None, which uses the full sample.
+            entry_z_score (float, optional): The z-score at which a position is opened.
+                Defaults to 2.0.
+            exit_z_score (float, optional): The z-score whose crossing on the way back closes
+                a position (0 closes when the spread is back at its mean). Defaults to 0.5.
+            log_prices (bool, optional): Whether to use log prices, so the hedge ratio is an
+                elasticity. Defaults to True.
+            time_series (bool, optional): Whether to return the Spread, Z-Score and Signal
+                per date instead of the summary. Defaults to False.
+            include_benchmark (bool, optional): Whether to include "Benchmark" among the
+                assets. Defaults to False.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None.
+
+        Returns:
+            pd.DataFrame: Per pair the Hedge Ratio, Intercept, Half-Life (in periods),
+            Cointegration P-Value, the latest Z-Score and Signal (1 long, -1 short, 0 flat)
+            and the Number of Trades (positions opened, a reversal counting as a new one);
+            or, with time_series=True, the Spread, Z-Score and Signal per date.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["KO", "PEP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2015-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.econometrics.get_pairs_trading(window=60)
+        ```
+
+        Which returns:
+
+        |               |   Hedge Ratio |   Intercept |   Half-Life |   Cointegration P-Value |   Z-Score |   Signal |   Number of Trades |
+        |:--------------|--------------:|------------:|------------:|------------------------:|----------:|---------:|-------------------:|
+        | ('KO', 'PEP') |        0.8685 |     -0.3098 |     290.448 |                  0.8345 |     0.684 |        0 |                 42 |
+        """
+        period = period if period else "daily"
+        # Every pair is aligned on its own common dates by the model.
+        prices = self._get_series_column(period, column)
+
+        fits = {
+            (ticker_a, ticker_b): pairs_trading_model.get_pairs_trading(
+                prices[ticker_a],
+                prices[ticker_b],
+                window=window,
+                entry=entry_z_score,
+                exit_=exit_z_score,
+                log_prices=log_prices,
+            )
+            for ticker_a, ticker_b in self._all_unordered_pairs(
+                include_benchmark=include_benchmark
+            )
+        }
+        if not fits:
+            raise ValueError("Pairs trading needs at least two assets.")
+
+        if time_series:
+            result = pd.concat(
+                {f"{a} / {b}": series for (a, b), (series, _) in fits.items()}, axis=1
+            )
+        else:
+            result = pd.DataFrame(
+                {pair: summary for pair, (_, summary) in fits.items()}
+            ).T
+            result.index = result.index.set_names(["Dependent", "Independent"])
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
+        )

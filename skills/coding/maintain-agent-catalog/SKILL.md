@@ -29,6 +29,9 @@ instructions that supply missing repository knowledge. Avoid duplicating an
 existing specialist or applying a task-specific workflow to every request.
 For a requested upstream addition, record its source and revision and preserve its
 license; follow this repository's policy for sources with unclear licensing.
+Add the source and its path mappings to `upstreams.json`, then run
+`scripts/sync-upstreams.py <id>` rather than copying by hand; the same command
+refreshes existing sources. Review renamed or retired upstream skills in the diff.
 
 ## Adapter invariants
 

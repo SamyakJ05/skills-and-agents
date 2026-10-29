@@ -7,13 +7,8 @@
 from enum import Enum
 
 ########################################################################################
-
-
-class LMMModelTypes(Enum):
-
-    ONE_FACTOR = 1
-    HW_M_FACTOR = 2
-    FULL_N_FACTOR = 3
+# Types are usuall located in the code where they are used
+# However where types are shared across different asset classes we put them here
 
 
 class BlackTypes(Enum):
@@ -21,22 +16,15 @@ class BlackTypes(Enum):
     CRR_TREE = 2
 
 
-class HestonNumericalSchemeTypes(Enum):
-    EULER = 1
-    EULERLOG = 2
-    QUADEXP = 3
-
-class CIRNumericalSchemeTypes(Enum):
-    EULER = 1
-    LOGNORMAL = 2
-    MILSTEIN = 3
-    KAHLJACKEL = 4
-    EXACT = 5
+class CliquetTypes(Enum):
+    PRICE = 1
+    RETURN = 2
 
 
-class GBMNumericalSchemeTypes(Enum):
-    NORMAL = 1
-    ANTITHETIC = 2
+class PaymentTimingTypes(Enum):
+    PERIODIC = 1
+    MATURITY = 2
+
 
 class VolFuncTypes(Enum):
 
@@ -50,76 +38,11 @@ class VolFuncTypes(Enum):
     SSVI = 7
 
 
-class YTMCalcType(Enum):
-    ZERO = 0
-    UK_DMO = 1
-    US_STREET = 2
-    US_TREASURY = 3
-    CFETS = 4  # China Foreign Exchange Trade System
-    CALCULUS = 5  # Using Calculus for duration
-
-
-class InterpTypes(Enum):
-    FLAT_FWD_RATES = 1
-    LINEAR_DISCOUNT = 2
-    LINEAR_ZERO_RATES = 3
-    LINEAR_ONFWD_RATES = 4
-    FINCUBIC_ZERO_RATES = 5
-    NATCUBIC_LOG_DISCOUNT = 6
-    NATCUBIC_ZERO_RATES = 7
-    PCHIP_ZERO_RATES = 8
-    PCHIP_LOG_DISCOUNT = 9
-    TENSION_ZERO_RATES = 10
-
-
-class BlackScholesTypes(Enum):
-
-    DEFAULT = 0
-    ANALYTICAL = 1
-    CRR_TREE = 2
-    BARONE_ADESI = 3
-    LSMC = 4
-    BJERKSUND_STENSLAND = 5
-    FINITE_DIFFERENCE = 6
-    PSOR = 7
-
-
-class ProcessTypes(Enum):
-
-    GBM_PROCESS = 1
-    CIR_PROCESS = 2
-    HESTON_PROCESS = 3
-    VASICEK_PROCESS = 4
-    CEV_PROCESS = 5
-    JUMP_DIFFUSION_PROCESS = 6
-    
-class VasicekNumericalSchemeTypes(Enum):
-    NORMAL = 1
-    ANTITHETIC = 2
-
-class FXBarrierTypes(Enum):
-    DOWN_AND_OUT_CALL = 1
-    DOWN_AND_IN_CALL = 2
-    UP_AND_OUT_CALL = 3
-    UP_AND_IN_CALL = 4
-    UP_AND_OUT_PUT = 5
-    UP_AND_IN_PUT = 6
-    DOWN_AND_OUT_PUT = 7
-    DOWN_AND_IN_PUT = 8
-
-
 class OISCompoundingTypes(Enum):
     COMPOUNDED = 1
     OVERNIGHT_COMPOUNDED_ANNUAL_RATE = 2
     AVERAGED = 3
     AVERAGED_DAILY = 4
-
-
-class HWEuropeanCalcTypes(Enum):
-
-    JAMSHIDIAN = 1
-    EXPIRY_ONLY = 2
-    EXPIRY_TREE = 3
 
 
 class FXATMMethodTypes(Enum):
@@ -155,6 +78,7 @@ class DoubleBarrierTypes(Enum):
 
 ########################################################################################
 
+
 class DigitalOptionTypes(Enum):
     CASH_OR_NOTHING = 1
     ASSET_OR_NOTHING = 2
@@ -182,7 +106,7 @@ class OptionTypes(Enum):
 
 
 class BarrierTypes(Enum):
-    """Enumeration of equity barrier types."""
+    """Enumeration of barrier types."""
 
     DOWN_AND_OUT_CALL = 1
     DOWN_AND_IN_CALL = 2
@@ -192,7 +116,6 @@ class BarrierTypes(Enum):
     UP_AND_IN_PUT = 6
     DOWN_AND_OUT_PUT = 7
     DOWN_AND_IN_PUT = 8
-
 
 ########################################################################################
 
@@ -252,15 +175,44 @@ class SolverTypes(Enum):
 class TouchOptionTypes(Enum):
     """Enumeration of touch option types."""
 
-    DOWN_AND_IN_CASH_AT_HIT = 1  # s0>H pays $1 at hit time from above
-    UP_AND_IN_CASH_AT_HIT = 2  # s0<H pays $1 at hit time from below
-    DOWN_AND_IN_CASH_AT_EXPIRY = 3  # s0>H pays $1 at T if hit from below
-    UP_AND_IN_CASH_AT_EXPIRY = 4  # s0<H pays $1 at T if hit from below
-    DOWN_AND_OUT_CASH_OR_NOTHING = 5  # s0>H pays $1 at T if S>H for all t<T
-    UP_AND_OUT_CASH_OR_NOTHING = 6  # s0<H pays $1 at T if S<H for all t<T
-    DOWN_AND_IN_ASSET_AT_HIT = 7  # s0>H pays H at hit time from above
-    UP_AND_IN_ASSET_AT_HIT = 8  # s0>H pays H at hit time from below
-    DOWN_AND_IN_ASSET_AT_EXPIRY = 9  # s0>H pays S(T) at T if S<H for t < T
-    UP_AND_IN_ASSET_AT_EXPIRY = 10  # s0<H pays S(T) at T if S>H for t < T
-    DOWN_AND_OUT_ASSET_OR_NOTHING = 11  # s0>H pays S(T) at T if S>H for t < T
-    UP_AND_OUT_ASSET_OR_NOTHING = 12  # s0<H pays S(T) at T if S<H for t < T
+    # Cash one-touch: pays $1 when the barrier is hit
+    DOWN_AND_IN_CASH_AT_HIT = 1
+    # s0 > H; pays $1 at the first time S(t) <= H
+
+    UP_AND_IN_CASH_AT_HIT = 2
+    # s0 < H; pays $1 at the first time S(t) >= H
+
+    # Cash one-touch: pays $1 at expiry if the barrier has been hit
+    DOWN_AND_IN_CASH_AT_EXPIRY = 3
+    # s0 > H; pays $1 at T if min S(t) <= H
+
+    UP_AND_IN_CASH_AT_EXPIRY = 4
+    # s0 < H; pays $1 at T if max S(t) >= H
+
+    # Cash no-touch: pays $1 at expiry if the barrier is never hit
+    DOWN_AND_OUT_CASH_OR_NOTHING = 5
+    # s0 > H; pays $1 at T if min S(t) > H
+
+    UP_AND_OUT_CASH_OR_NOTHING = 6
+    # s0 < H; pays $1 at T if max S(t) < H
+
+    # Asset one-touch: pays the asset/barrier value when the barrier is hit
+    DOWN_AND_IN_ASSET_AT_HIT = 7
+    # s0 > H; pays H at the first time S(t) <= H
+
+    UP_AND_IN_ASSET_AT_HIT = 8
+    # s0 < H; pays H at the first time S(t) >= H
+
+    # Asset-or-nothing knock-in: pays S(T) at expiry if barrier is hit
+    DOWN_AND_IN_ASSET_AT_EXPIRY = 9
+    # s0 > H; pays S(T) at T if min S(t) <= H
+
+    UP_AND_IN_ASSET_AT_EXPIRY = 10
+    # s0 < H; pays S(T) at T if max S(t) >= H
+
+    # Asset-or-nothing knock-out: pays S(T) if barrier is never hit
+    DOWN_AND_OUT_ASSET_OR_NOTHING = 11
+    # s0 > H; pays S(T) at T if min S(t) > H
+
+    UP_AND_OUT_ASSET_OR_NOTHING = 12
+    # s0 < H; pays S(T) at T if max S(t) < H

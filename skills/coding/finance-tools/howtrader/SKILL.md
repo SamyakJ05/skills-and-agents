@@ -1,6 +1,7 @@
 ---
 name: howtrader
-description: Crypto quant trading framework (forked from VNPY) for developing, backtesting, and live-executing trading strategies on Binance and OKX. Use when writing a CTA-style crypto strategy, building a backtesting/optimization pipeline over historical kline data, wiring TradingView webhook signals into automated order execution, or working with the event-driven engine/gateway architecture. Covers strategy templates, the backtesting engine, exchange gateways, and the TradingView signal app. IMPORTANT: this is not just an analysis library — its gateways place real orders against real exchange accounts when run live with API keys, so treat any code path that reaches BinanceUsdtGateway/BinanceSpotGateway/BinanceInverseGateway/OkxGateway or MainEngine.send_order as capable of executing real trades with real money.
+description: >-
+  Crypto quant trading framework (forked from VNPY) for developing, backtesting, and live-executing trading strategies on Binance and OKX. Use when writing a CTA-style crypto strategy, building a backtesting/optimization pipeline over historical kline data, wiring TradingView webhook signals into automated order execution, or working with the event-driven engine/gateway architecture. Covers strategy templates, the backtesting engine, exchange gateways, and the TradingView signal app. IMPORTANT: this is not just an analysis library — its gateways place real orders against real exchange accounts when run live with API keys, so treat any code path that reaches BinanceUsdtGateway/BinanceSpotGateway/BinanceInverseGateway/OkxGateway or MainEngine.send_order as capable of executing real trades with real money.
 license: MIT
 ---
 

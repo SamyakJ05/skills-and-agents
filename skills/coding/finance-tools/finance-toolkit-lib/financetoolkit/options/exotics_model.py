@@ -122,6 +122,7 @@ def _barrier_term(
     )
 
 
+@np.errstate(divide="ignore", invalid="ignore")
 def get_barrier_option(
     stock_price: float,
     strike_price: float,
@@ -153,8 +154,8 @@ def get_barrier_option(
     - Up barrier: the barrier is above the current stock price.
 
     A useful identity that this function satisfies (and that is used to validate the
-    implementation) is in-out parity: for identical parameters, a knock-in option plus
-    its corresponding knock-out option (same direction) always equals the price of the
+    implementation) is in-out parity: for identical parameters and no rebate, a knock-in
+    option plus its corresponding knock-out option (same direction) equals the price of the
     equivalent vanilla European option, since the underlying either does or does not
     touch the barrier:
 
@@ -212,8 +213,6 @@ def get_barrier_option(
 
     if knock_type not in ("in", "out"):
         raise ValueError(f"knock_type must be 'in' or 'out', received {knock_type!r}.")
-
-    np.seterr(divide="ignore", invalid="ignore")
 
     cost_of_carry = risk_free_rate - dividend_yield
     volatility_time = volatility * np.sqrt(time_to_expiration)
@@ -280,9 +279,36 @@ def get_barrier_option(
     else:  # up-and-out
         value = (B - D + F) if in_the_money_barrier_side else (A - C + F)
 
+    # The formulas assume the barrier has not been reached yet. Once it has, a knock-out
+    # option is gone and pays its rebate, and a knock-in option is a regular option;
+    # the formulas would otherwise give e.g. a negative knock-out price.
+    breached = (
+        stock_price <= barrier
+        if barrier_direction == "down"
+        else stock_price >= barrier
+    )
+
+    if breached and knock_type == "out":
+        value = rebate
+    elif breached:
+        d1 = (
+            np.log(stock_price / strike_price)
+            + (cost_of_carry + volatility**2 / 2) * time_to_expiration
+        ) / volatility_time
+        d2 = d1 - volatility_time
+        value = phi * (
+            stock_price
+            * np.exp((cost_of_carry - risk_free_rate) * time_to_expiration)
+            * norm.cdf(phi * d1)
+            - strike_price
+            * np.exp(-risk_free_rate * time_to_expiration)
+            * norm.cdf(phi * d2)
+        )
+
     return value
 
 
+@np.errstate(divide="ignore", invalid="ignore")
 def get_asian_option(
     stock_price: float,
     strike_price: float,
@@ -301,9 +327,14 @@ def get_asian_option(
     An Asian option's payoff depends on the average price of the underlying stock over
     the option's life, rather than the price at a single point in time, which typically
     makes it cheaper than the equivalent vanilla option (the averaging reduces
-    variance). While the arithmetic-average Asian option has no closed-form solution
-    (it requires simulation, see `options_model.get_monte_carlo_option_price`), the
-    geometric-average version has an elegant closed form: since the geometric average
+    variance). The package prices the continuously sampled geometric-average Asian
+    option only. The arithmetic-average Asian option has no closed-form solution and
+    needs a path simulation that averages the price along each path, which
+    `options_model.get_monte_carlo_option_price` does not do: it prices European
+    options from the terminal price. The geometric-average version has an elegant
+    closed form instead and, since the geometric mean never exceeds the arithmetic mean,
+    is a lower bound for the arithmetic-average call and an upper bound for the
+    arithmetic-average put. Since the geometric average
     of a Geometric Brownian Motion is itself lognormally distributed, the Asian option
     can be priced with a Black-Scholes-style formula using an adjusted volatility and
     an adjusted cost of carry:
@@ -348,8 +379,6 @@ def get_asian_option(
         time_to_expiration=time_to_expiration,
         dividend_yield=dividend_yield,
     )
-
-    np.seterr(divide="ignore", invalid="ignore")
 
     cost_of_carry = risk_free_rate - dividend_yield
 

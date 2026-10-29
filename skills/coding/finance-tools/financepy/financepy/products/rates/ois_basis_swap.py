@@ -11,9 +11,10 @@ from ...utils.frequency import FrequencyTypes
 from ...utils.calendar import CalendarTypes, DateGenRuleTypes
 from ...utils.calendar import Calendar, BusDayAdjustTypes
 from ...utils.helpers import check_argument_types, label_to_string
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.global_types import SwapTypes
 from ...market.curves.discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
 
 from .swap_float_leg import SwapFloatLeg
 
@@ -47,7 +48,7 @@ class OISBasisSwap:
         cal_type: CalendarTypes = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
         """Create a Ibor basis swap contract giving the contract start
         date, its maturity, frequency and day counts on the two floating
         legs and notional. The floating leg parameters have default
@@ -114,8 +115,8 @@ class OISBasisSwap:
         discount_curve: DiscountCurve,
         index_ibor_curve: DiscountCurve = None,
         index_ois_curve: DiscountCurve = None,
-        first_fixing_rate_leg_1=None,
-        first_fixing_rate_leg_2=None,
+        first_fixing_rate_leg_1: float=None,
+        first_fixing_rate_leg_2: float=None,
     ):
         """Value the interest rate swap on a value date given a single Ibor
         discount curve and an index curve for the Ibors on each swap leg."""
@@ -125,6 +126,10 @@ class OISBasisSwap:
 
         if index_ois_curve is None:
             index_ois_curve = discount_curve
+
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, index_ibor_curve)
+        check_curve_dt(value_dt, index_ois_curve)
 
         float_ibor_leg_value = self.float_ibor_leg.value(
             value_dt, discount_curve, index_ibor_curve, first_fixing_rate_leg_1

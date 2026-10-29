@@ -3,23 +3,18 @@
 ##############################################################################
 
 
-import numpy as np
-
-from ...utils.frequency import FrequencyTypes
-from ...utils.global_vars import G_DAYS_IN_YEAR
 from ...utils.error import FinError
 from ...utils.global_types import OptionTypes
 
 from ...utils.helpers import label_to_string, check_argument_types
 from ...utils.date import Date
-from ...utils.day_count import DayCountTypes
-from ...utils.calendar import BusDayAdjustTypes
-from ...utils.calendar import CalendarTypes, DateGenRuleTypes
-from ...utils.schedule import Schedule
 from ...products.equity.equity_option import EquityOption
 from ...market.curves.flat_discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
+from ...utils.check_values import check_stock_price
+from ...utils.helpers import option_years
 
-from ...models.black_scholes_analytic import european_value
+from ...models.bs_european_analytic import european_value
 from ...models.black_scholes import BlackScholes
 from ...models.model import Model
 
@@ -30,43 +25,37 @@ from ...models.model import Model
 
 
 class EquityForwardStartOption(EquityOption):
-    """A EquityCliquetOption is an option which starts on t_F and sets the strike to
-    S(T_F). It expires at time T. This is also known as a reset option."""
+    """European forward-start equity option.
 
-    def __init__(self, start_dt: Date, final_expiry_dt: Date, opt_type: OptionTypes, freq_type: FrequencyTypes):
-        """Create the EquityCliquetOption by passing in the start date
-        and the end date and whether it is a call or a put. Some additional
-        data is needed in order to calculate the individual payments."""
+    The strike is set equal to the stock price on start_dt.
+    The option expires on final_expiry_dt.
+
+    The option is valued under Black-Scholes using forward interest
+    and dividend rates between the strike-setting and expiry dates.
+    """
+
+    def __init__(
+        self,
+        start_dt: Date,
+        final_expiry_dt: Date,
+        opt_type: OptionTypes,
+    ):
+        """Create the EquityForwardStartOption by passing in the start date on
+        which the first strike is set, the final expiry date and whether it is a
+        call or a put. The frequency determines the reset dates between the two
+        dates; the calendar and business day conventions adjust those dates."""
 
         check_argument_types(self.__init__, locals())
 
-        if opt_type != OptionTypes.EUROPEAN_CALL and opt_type != OptionTypes.EUROPEAN_PUT:
-            raise FinError("Unknown OPTION_TYPE" + str(opt_type))
+        if opt_type not in (OptionTypes.EUROPEAN_CALL, OptionTypes.EUROPEAN_PUT):
+            raise FinError("Unknown option type")
 
-        if final_expiry_dt < start_dt:
-            raise FinError("Expiry date precedes start date")
+        if final_expiry_dt <= start_dt:
+            raise FinError("Expiry date must be after start date")
 
         self.start_dt = start_dt
         self.final_expiry_dt = final_expiry_dt
         self.opt_type = opt_type
-        self.freq_type = freq_type
-        self.accrual_dc_type = accrual_dc_type
-        self.cal_type = cal_type
-        self.bd_type = bd_type
-        self.dg_type = dg_type
-
-        self.v_options = None
-        self._dfs = None
-        self.actual_dts = None
-
-        self.expiry_dts = Schedule(
-            self.start_dt,
-            self.final_expiry_dt,
-            self.freq_type,
-            self.cal_type,
-            self.bd_type,
-            self.dg_type,
-        ).generate()
 
     ###########################################################################
 
@@ -78,84 +67,47 @@ class EquityForwardStartOption(EquityOption):
         dividend_curve: DiscountCurve,
         model: Model,
     ):
-        """Value the cliquet option as a sequence of options using the Black-
-        Scholes model."""
-
-        if isinstance(value_dt, Date) is False:
+        if not isinstance(value_dt, Date):
             raise FinError("Valuation date is not a Date")
 
-        if discount_curve.value_dt != value_dt:
-            raise FinError("Discount Curve valuation date not same as option value date")
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
 
-        if dividend_curve.value_dt != value_dt:
-            raise FinError("Dividend Curve valuation date not same as option value date")
+        if value_dt > self.start_dt:
+            raise FinError(
+                "Value date after strike-setting date"
+            )
 
-        if value_dt > self.final_expiry_dt:
-            raise FinError("Value date after final expiry date.")
+        if not isinstance(model, BlackScholes):
+            raise FinError("Unknown model type")
 
-        s = stock_price
-        v_cliquet = 0.0
+        check_stock_price(stock_price)
 
-        self.v_options = []
-        self._dfs = []
-        self.actual_dts = []
+        t = option_years(self.start_dt, self.final_expiry_dt)
 
-        call_type = OptionTypes.EUROPEAN_CALL
-        put_type = OptionTypes.EUROPEAN_PUT
+        fwd_r = discount_curve.fwd_zero_rate_cc(
+            self.start_dt, self.final_expiry_dt
+        )
 
-        if isinstance(model, BlackScholes):
+        fwd_q = dividend_curve.fwd_zero_rate_cc(
+            self.start_dt, self.final_expiry_dt
+        )
 
-            v = model.volatility
-            v = max(v, 1e-6)
-            t_prev = 0.0
+        dq_start = dividend_curve.df(self.start_dt)
 
-            for dt in self.expiry_dts:
+        volatility = max(model.volatility, 1e-6)
 
-                if dt > value_dt:
+        v = european_value(
+            1.0,
+            t,
+            1.0,
+            fwd_r,
+            fwd_q,
+            volatility,
+            self.opt_type.value,
+        )
 
-                    df = discount_curve.df(dt)
-                    t_exp = (dt - value_dt) / G_DAYS_IN_YEAR
-                    r = -np.log(df) / t_exp
-
-                    # option life
-                    tau = t_exp - t_prev
-
-                    # The deflator is out to the option reset time
-                    dq = dividend_curve.df_t(t_prev)
-
-                    # The option dividend is over the option life
-                    dq_mat = dividend_curve.df_t(t_exp)
-
-                    q = -np.log(dq_mat / dq) / tau
-
-                    if self.opt_type == call_type:
-                        v_call = european_value(1.0, tau, 1.0, r, q, v, call_type.value)
-                        v_fwd_opt = s * dq * v_call
-                        v_cliquet += v_fwd_opt
-                    elif self.opt_type == put_type:
-                        v_put = european_value(1.0, tau, 1.0, r, q, v, put_type.value)
-                        v_fwd_opt = s * dq * v_put
-                        v_cliquet += v_fwd_opt
-                    else:
-                        raise FinError("Unknown OPTION_TYPE")
-
-                    #  print(dt, r, df, q, v_fwd_opt, v_cliquet)
-
-                    self._dfs.append(df)
-                    self.v_options.append(v)
-                    self.actual_dts.append(dt)
-                    t_prev = t_exp
-        else:
-            raise FinError("Unknown Model Type")
-
-        return v_cliquet
-
-    ###########################################################################
-
-    def print_payments(self):
-        num_options = len(self.v_options)
-        for i in range(0, num_options):
-            print(self.actual_dts[i], self._dfs[i], self.v_options[i])
+        return stock_price * dq_start * v
 
     ###########################################################################
 
@@ -164,11 +116,6 @@ class EquityForwardStartOption(EquityOption):
         s += label_to_string("START_DATE", self.start_dt)
         s += label_to_string("FINAL EXPIRY DATE", self.final_expiry_dt)
         s += label_to_string("OPTION_TYPE", self.opt_type)
-        s += label_to_string("FREQUENCY TYPE", self.freq_type)
-        s += label_to_string("DC_TYPE", self.accrual_dc_type)
-        s += label_to_string("CALENDAR TYPE", self.cal_type)
-        s += label_to_string("BUS_DAY_ADJUST", self.bd_type)
-        s += label_to_string("DATE GEN RULE TYPE", self.dg_type, "")
         return s
 
     ###########################################################################
@@ -176,6 +123,3 @@ class EquityForwardStartOption(EquityOption):
     def _print(self):
         """Simple print function for backward compatibility."""
         print(self)
-
-
-########################################################################################

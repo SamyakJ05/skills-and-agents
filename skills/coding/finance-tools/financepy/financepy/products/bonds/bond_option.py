@@ -13,6 +13,8 @@ from ...utils.helpers import label_to_string, check_argument_types
 from ...market.curves.discount_curve import DiscountCurve
 from ...utils.global_types import OptionTypes, ExerciseTypes
 from ...products.bonds.bond import Bond
+from ...models.model import Model
+from ...utils.helpers import option_years
 
 ########################################################################################
 # TODO: Add BDT model to valuation
@@ -44,7 +46,7 @@ class BondOption:
         expiry_dt: Date,
         strike_price: float,
         opt_type: OptionTypes,
-    ):
+    ) -> None:
 
         check_argument_types(self.__init__, locals())
 
@@ -56,13 +58,13 @@ class BondOption:
 
     ####################################################################################
 
-    def value(self, value_dt: Date, discount_curve: DiscountCurve, model):
+    def value(self, value_dt: Date, discount_curve: DiscountCurve, model: Model):
         """Value a bond option (option on a bond) using a specified model
         which include the Hull-White, Black-Karasinski and Black-Derman-Toy
         model which are all implemented as short rate tree models."""
 
-        t_exp = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        t_mat = (self.bond.maturity_dt - value_dt) / G_DAYS_IN_YEAR
+        t_exp = option_years(value_dt, self.expiry_dt)
+        t_mat = option_years(value_dt, self.bond.maturity_dt)
 
         df_times = discount_curve._times
         df_values = discount_curve._dfs

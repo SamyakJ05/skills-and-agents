@@ -1,0 +1,2489 @@
+{
+  "schema_version": 1,
+  "scope": "Upstream sources refreshed by scripts/sync-upstreams.py. commit is the last synced upstream revision; null means it was vendored before revisions were recorded.",
+  "sources": [
+    {
+      "id": "anti-slop",
+      "repository": "https://github.com/miqdadbadjuber/anti-slop",
+      "license": "MIT",
+      "commit": "3005235d030b4793146ad9afe8d01045efd90e1d",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/miqdadbadjuber-anti-slop.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/*",
+          "to": "skills/design/anti-slop/*"
+        }
+      ]
+    },
+    {
+      "id": "baoyu-design",
+      "repository": "https://github.com/JimLiu/baoyu-design",
+      "license": "MIT",
+      "commit": "6530033592bf7fa58bc1a5a2a2ad278da45213a9",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/JimLiu-baoyu-design.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/baoyu-design",
+          "to": "skills/design/baoyu-design"
+        }
+      ]
+    },
+    {
+      "id": "claudedesignskills",
+      "repository": "https://github.com/freshtechbro/claudedesignskills",
+      "license": "MIT",
+      "commit": "1da73febff0c3e1dfefc07f8a5ef8f7d1dfdb6cd",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/freshtechbro-claudedesignskills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": ".claude/skills",
+          "to": "skills/design/claudedesignskills"
+        }
+      ]
+    },
+    {
+      "id": "emilkowalski",
+      "repository": "https://github.com/emilkowalski/skills",
+      "license": "MIT",
+      "commit": "a81dbca07f2217b7103e510c0f13f8d5b017afc9",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/emilkowalski-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills",
+          "to": "skills/design/emilkowalski"
+        }
+      ]
+    },
+    {
+      "id": "hue",
+      "repository": "https://github.com/dominikmartn/hue",
+      "license": "MIT",
+      "commit": "a910e31cd24b45b9455c0c3502150413aa5a3b32",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/dominikmartn-hue.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": ".",
+          "to": "skills/design/hue",
+          "exclude": [
+            ".git*",
+            "LICENSE",
+            "README.md",
+            "examples/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "impeccable",
+      "repository": "https://github.com/pbakaus/impeccable",
+      "license": "Apache-2.0",
+      "commit": "7510e233b228864606888d252abacf5e7148bf87",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/pbakaus-impeccable.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "plugin/skills/impeccable",
+          "to": "skills/design/impeccable",
+          "keep": [
+            "agents/*"
+          ]
+        },
+        {
+          "from": "plugin/agents",
+          "to": "skills/design/impeccable/agents"
+        }
+      ]
+    },
+    {
+      "id": "motion-primitives",
+      "repository": "https://github.com/ibelick/motion-primitives",
+      "license": "MIT",
+      "commit": "120f64f6ca60348e251f929e9c81f11ccbe45eda",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENCE.md",
+          "file": "LICENSES/ibelick-motion-primitives.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "components/core",
+          "to": "skills/design/motion-primitives/components"
+        }
+      ]
+    },
+    {
+      "id": "nothing-design",
+      "repository": "https://github.com/dominikmartn/nothing-design-skill",
+      "license": "MIT",
+      "commit": "74affbb786af098b18503467b205c10a7df30126",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/dominikmartn-nothing-design-skill.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "nothing-design",
+          "to": "skills/design/nothing-design"
+        }
+      ]
+    },
+    {
+      "id": "styleseed",
+      "repository": "https://github.com/bitjaru/styleseed",
+      "license": "MIT",
+      "commit": "ce66f1dc1d14609ec43bc48eed1d97abb51489c8",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/bitjaru-styleseed.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills",
+          "to": "skills/design/styleseed"
+        }
+      ]
+    },
+    {
+      "id": "superdesign",
+      "repository": "https://github.com/superdesigndev/superdesign-skill",
+      "license": "MIT",
+      "commit": "f9f05cd988c247dce6c072eaf9ac6b162f2ffc4b",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/superdesigndev-superdesign-skill.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/superdesign",
+          "to": "skills/design/superdesign"
+        }
+      ]
+    },
+    {
+      "id": "taste-skill",
+      "repository": "https://github.com/Leonxlnx/taste-skill",
+      "license": "MIT",
+      "commit": "12af471f627f866411b4bd785b19646d3672784c",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/Leonxlnx-taste-skill.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/taste-skill",
+          "to": "skills/design/taste-skill/taste-skill"
+        }
+      ]
+    },
+    {
+      "id": "taste-skill-classics",
+      "repository": "https://github.com/Leonxlnx/taste-skill-classics",
+      "license": "MIT",
+      "commit": "5e08c9383dc4ad7fc0df70e1ac8cfa09ec356305",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/Leonxlnx-taste-skill-classics.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/*",
+          "to": "skills/design/taste-skill/*",
+          "skip": [
+            "taste-skill-v2-experimental"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "imagegen-skills",
+      "repository": "https://github.com/Leonxlnx/imagegen-skills",
+      "license": "MIT",
+      "commit": "beb16b0d0f4dae9a6f5cb04ea41e97b93a54ab8e",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/Leonxlnx-imagegen-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/brandkit",
+          "to": "skills/design/taste-skill/brandkit"
+        },
+        {
+          "from": "skills/image-to-code",
+          "to": "skills/design/taste-skill/image-to-code-skill"
+        },
+        {
+          "from": "skills/imagegen-frontend-mobile",
+          "to": "skills/design/taste-skill/imagegen-frontend-mobile"
+        },
+        {
+          "from": "skills/imagegen-frontend-web",
+          "to": "skills/design/taste-skill/imagegen-frontend-web"
+        }
+      ]
+    },
+    {
+      "id": "ui-ux-pro-max",
+      "repository": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+      "license": "MIT",
+      "commit": "28b3b8dee8c976df4fa3e94aed4e092ad43fcb03",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/nextlevelbuilder-ui-ux-pro-max-skill.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": ".claude/skills",
+          "to": "skills/design/ui-ux-pro-max",
+          "exclude": [
+            "*/.coverage"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cc-blender-skill",
+      "repository": "https://github.com/RobLe3/cc-blender-skill",
+      "license": "MIT",
+      "commit": "a2634b588e80265e796aa53f8ab178d75105c2af",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/RobLe3-cc-blender-skill.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "plugin/skills",
+          "to": "skills/3d/blender"
+        }
+      ]
+    },
+    {
+      "id": "video-shotcraft",
+      "repository": "https://github.com/Vincentwei1021/video-shotcraft",
+      "license": "Apache-2.0",
+      "commit": "5a2e98daade313c4f376120f38427eb19a108e8c",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/Vincentwei1021-video-shotcraft.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "SKILL.md",
+          "to": "skills/video/video-shotcraft/SKILL.md"
+        },
+        {
+          "from": "agents",
+          "to": "skills/video/video-shotcraft/agents",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        },
+        {
+          "from": "jianying-export",
+          "to": "skills/video/video-shotcraft/jianying-export",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        },
+        {
+          "from": "references",
+          "to": "skills/video/video-shotcraft/references",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        },
+        {
+          "from": "workbench",
+          "to": "skills/video/video-shotcraft/workbench",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        },
+        {
+          "from": "template",
+          "to": "skills/video/video-shotcraft/template",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        },
+        {
+          "from": "publish",
+          "to": "skills/video/video-shotcraft/publish",
+          "exclude": [
+            "node_modules/*",
+            "*/node_modules/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "anthropic-skills",
+      "repository": "https://github.com/anthropics/skills",
+      "license": "Apache-2.0",
+      "commit": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "skills/mcp-builder/LICENSE.txt",
+          "file": "LICENSES/anthropics-skills-mcp-builder.LICENSE"
+        },
+        {
+          "upstream": "skills/webapp-testing/LICENSE.txt",
+          "file": "LICENSES/anthropics-skills-webapp-testing.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/mcp-builder",
+          "to": "skills/coding/anthropic/mcp-builder"
+        },
+        {
+          "from": "skills/webapp-testing",
+          "to": "skills/coding/anthropic/webapp-testing"
+        }
+      ]
+    },
+    {
+      "id": "mattpocock-skills",
+      "repository": "https://github.com/mattpocock/skills",
+      "license": "MIT",
+      "commit": "59db609eb1e18aaf59b63284d0e52255aff0c63c",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/mattpocock-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/engineering/domain-modeling",
+          "to": "skills/coding/mattpocock/domain-modeling",
+          "keep": [
+            "LICENSE.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "playwright-cli",
+      "repository": "https://github.com/microsoft/playwright-cli",
+      "license": "Apache-2.0",
+      "commit": "b1a5903c5b633b8c9f843ad7b629c2a78437040c",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/microsoft-playwright-cli.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/playwright-cli",
+          "to": "skills/coding/microsoft/playwright-cli",
+          "keep": [
+            "LICENSE.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "supabase-agent-skills",
+      "repository": "https://github.com/supabase/agent-skills",
+      "license": "MIT",
+      "commit": "c9be0e931b7930f7d02126d04774d904c381e7d7",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/supabase-agent-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/supabase-postgres-best-practices",
+          "to": "skills/coding/supabase/supabase-postgres-best-practices",
+          "keep": [
+            "LICENSE.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vercel-agent-skills",
+      "repository": "https://github.com/vercel-labs/agent-skills",
+      "license": "MIT",
+      "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "README.md",
+          "file": "LICENSES/vercel-labs-agent-skills.README.md"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/react-best-practices",
+          "to": "skills/coding/vercel/react-best-practices",
+          "keep": [
+            "UPSTREAM-LICENSE-DECLARATION.md"
+          ]
+        },
+        {
+          "from": "skills/composition-patterns",
+          "to": "skills/coding/vercel/composition-patterns",
+          "keep": [
+            "UPSTREAM-LICENSE-DECLARATION.md"
+          ]
+        },
+        {
+          "from": "skills/react-native-skills",
+          "to": "skills/coding/vercel/react-native-skills",
+          "keep": [
+            "UPSTREAM-LICENSE-DECLARATION.md"
+          ]
+        },
+        {
+          "from": "skills/react-view-transitions",
+          "to": "skills/coding/vercel/react-view-transitions",
+          "keep": [
+            "UPSTREAM-LICENSE-DECLARATION.md"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vercel-skills",
+      "repository": "https://github.com/vercel-labs/skills",
+      "license": "MIT",
+      "commit": "699d35b21bd3c97dbc0edeae062b2698898bb2e5",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/vercel-labs-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/find-skills",
+          "to": "skills/coding/vercel/find-skills",
+          "keep": [
+            "LICENSE.txt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ponytail",
+      "repository": "https://github.com/dietrichgebert/ponytail",
+      "license": "MIT",
+      "commit": "09c434ab73ca43761c5d8b0c5d341926c2fba710",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/dietrichgebert-ponytail.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills",
+          "to": "skills/coding/ponytail",
+          "keep": [
+            "LICENSE",
+            "README.md"
+          ]
+        },
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/ponytail/LICENSE"
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/ponytail/README.md"
+        }
+      ]
+    },
+    {
+      "id": "wshobson-agents",
+      "repository": "https://github.com/wshobson/agents",
+      "license": "MIT",
+      "commit": "0874a27b17a22e2b7c2e2bcd725768e0803cad06",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/wshobson-agents.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "plugins/*/agents",
+          "to": "agents/coding/wshobson/*/agents"
+        },
+        {
+          "from": "plugins/*/skills",
+          "to": "agents/coding/wshobson/*/skills"
+        },
+        {
+          "from": "plugins/*/commands",
+          "to": "agents/coding/wshobson/*/commands",
+          "existing_only": true
+        }
+      ]
+    },
+    {
+      "id": "voltagent-subagents",
+      "repository": "https://github.com/VoltAgent/awesome-claude-code-subagents",
+      "license": "MIT",
+      "commit": "408d3c9eee2d0c75c12a3abb5de29e53c2ca6b9e",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/VoltAgent-awesome-claude-code-subagents.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "categories/*",
+          "to": "agents/coding/voltagent/*",
+          "quote_descriptions": true
+        }
+      ]
+    },
+    {
+      "id": "trailofbits-skills",
+      "repository": "https://github.com/trailofbits/skills",
+      "license": "CC-BY-SA-4.0",
+      "commit": "2be6433b39e009cd2b6fd3be1895f6b1faa5af9a",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/trailofbits-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "plugins/static-analysis",
+          "to": "agents/coding/trailofbits/static-analysis",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/semgrep-rule-creator",
+          "to": "agents/coding/trailofbits/semgrep-rule-creator",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/semgrep-rule-variant-creator",
+          "to": "agents/coding/trailofbits/semgrep-rule-variant-creator",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/variant-analysis",
+          "to": "agents/coding/trailofbits/variant-analysis",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/fp-check",
+          "to": "agents/coding/trailofbits/fp-check",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/differential-review",
+          "to": "agents/coding/trailofbits/differential-review",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/sharp-edges",
+          "to": "agents/coding/trailofbits/sharp-edges",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/insecure-defaults",
+          "to": "agents/coding/trailofbits/insecure-defaults",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/entry-point-analyzer",
+          "to": "agents/coding/trailofbits/entry-point-analyzer",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/audit-context-building",
+          "to": "agents/coding/trailofbits/audit-context-building",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/supply-chain-risk-auditor",
+          "to": "agents/coding/trailofbits/supply-chain-risk-auditor",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/agentic-actions-auditor",
+          "to": "agents/coding/trailofbits/agentic-actions-auditor",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        },
+        {
+          "from": "plugins/testing-handbook-skills",
+          "to": "agents/coding/trailofbits/testing-handbook-skills",
+          "exclude": [
+            "tests/*",
+            "evals/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentry-skills",
+      "repository": "https://github.com/getsentry/skills",
+      "license": "Apache-2.0",
+      "commit": "d12f250460ffd961f549dbebf7eeb0cf4afd4c2e",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/getsentry-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/security-review",
+          "to": "skills/security/sentry/security-review"
+        },
+        {
+          "from": "skills/gha-security-review",
+          "to": "skills/security/sentry/gha-security-review"
+        },
+        {
+          "from": "skills/security-model",
+          "to": "skills/security/sentry/security-model"
+        },
+        {
+          "from": "skills/secret-serialization",
+          "to": "skills/security/sentry/secret-serialization"
+        },
+        {
+          "from": "skills/skill-scanner",
+          "to": "skills/security/sentry/skill-scanner"
+        },
+        {
+          "from": "skills/django-access-review",
+          "to": "skills/security/sentry/django-access-review"
+        }
+      ]
+    },
+    {
+      "id": "grcskills",
+      "repository": "https://github.com/better-isms/grcskills",
+      "license": "MIT",
+      "commit": "43c473abab17d1e6b050d9dfc3f97e5f3062d423",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/better-isms-grcskills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/tristan-roth",
+          "to": "skills/security/grcskills"
+        }
+      ]
+    },
+    {
+      "id": "cybersecurity-skills",
+      "repository": "https://github.com/mukul975/Anthropic-Cybersecurity-Skills",
+      "license": "Apache-2.0",
+      "commit": "54a798831d2266a3ca61ce68a7acb80b81160d57",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/mukul975-Anthropic-Cybersecurity-Skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/verifying-build-provenance-with-slsa-sigstore",
+          "to": "skills/security/cybersecurity-skills/verifying-build-provenance-with-slsa-sigstore"
+        },
+        {
+          "from": "skills/implementing-sigstore-for-software-signing",
+          "to": "skills/security/cybersecurity-skills/implementing-sigstore-for-software-signing"
+        },
+        {
+          "from": "skills/generating-and-analyzing-sboms",
+          "to": "skills/security/cybersecurity-skills/generating-and-analyzing-sboms"
+        },
+        {
+          "from": "skills/implementing-supply-chain-security-with-in-toto",
+          "to": "skills/security/cybersecurity-skills/implementing-supply-chain-security-with-in-toto"
+        },
+        {
+          "from": "skills/auditing-mcp-servers-for-tool-poisoning",
+          "to": "skills/security/cybersecurity-skills/auditing-mcp-servers-for-tool-poisoning"
+        },
+        {
+          "from": "skills/testing-prompt-injection-in-rag-pipelines",
+          "to": "skills/security/cybersecurity-skills/testing-prompt-injection-in-rag-pipelines"
+        },
+        {
+          "from": "skills/red-teaming-llms-with-garak",
+          "to": "skills/security/cybersecurity-skills/red-teaming-llms-with-garak"
+        },
+        {
+          "from": "skills/continuous-llm-red-teaming-with-promptfoo",
+          "to": "skills/security/cybersecurity-skills/continuous-llm-red-teaming-with-promptfoo"
+        },
+        {
+          "from": "skills/auditing-terraform-infrastructure-for-security",
+          "to": "skills/security/cybersecurity-skills/auditing-terraform-infrastructure-for-security"
+        },
+        {
+          "from": "skills/scanning-iac-and-images-with-trivy",
+          "to": "skills/security/cybersecurity-skills/scanning-iac-and-images-with-trivy"
+        },
+        {
+          "from": "skills/auditing-cloud-with-cis-benchmarks",
+          "to": "skills/security/cybersecurity-skills/auditing-cloud-with-cis-benchmarks"
+        },
+        {
+          "from": "skills/performing-soc2-type2-audit-preparation",
+          "to": "skills/security/cybersecurity-skills/performing-soc2-type2-audit-preparation"
+        },
+        {
+          "from": "skills/performing-nist-csf-maturity-assessment",
+          "to": "skills/security/cybersecurity-skills/performing-nist-csf-maturity-assessment"
+        }
+      ]
+    },
+    {
+      "id": "gsap-skills",
+      "repository": "https://github.com/greensock/gsap-skills",
+      "license": "MIT",
+      "commit": "aed9cfd3277740755f6bfc1155c7aa645403b760",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/greensock-gsap-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills",
+          "to": "skills/design/gsap-skills"
+        }
+      ]
+    },
+    {
+      "id": "mengto-skills",
+      "repository": "https://github.com/MengTo/Skills",
+      "license": "MIT",
+      "commit": "a45892d2fdadab75b31fb16abecc02f101b31c43",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/MengTo-Skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "agent-skills/web-design/build-threejs-scroll-worlds",
+          "to": "skills/design/mengto/build-threejs-scroll-worlds",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        },
+        {
+          "from": "agent-skills/web-design/scroll-world-storytelling",
+          "to": "skills/design/mengto/scroll-world-storytelling",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        },
+        {
+          "from": "agent-skills/web-design/scroll-scrubbed-visual-sequence",
+          "to": "skills/design/mengto/scroll-scrubbed-visual-sequence",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        },
+        {
+          "from": "agent-skills/web-design/cinematic-scroll-storytelling",
+          "to": "skills/design/mengto/cinematic-scroll-storytelling",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        },
+        {
+          "from": "agent-skills/web-design/horizontal-scroll-scenes",
+          "to": "skills/design/mengto/horizontal-scroll-scenes",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        },
+        {
+          "from": "agent-skills/web-design/cinematic-gsap-lenis-motion-system",
+          "to": "skills/design/mengto/cinematic-gsap-lenis-motion-system",
+          "exclude": [
+            "demo/*.jpg",
+            "demo/*.jpeg",
+            "demo/*.png",
+            "demo/*.webp",
+            "demo/*.gif",
+            "demo/*.mp4",
+            "demo/*.webm",
+            "demo/*.glb",
+            "demo/*.gltf",
+            "demo/*.hdr",
+            "demo/*.ktx2",
+            "demo/*.min.js"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "modern-web-guidance",
+      "repository": "https://github.com/GoogleChrome/modern-web-guidance",
+      "license": "Apache-2.0",
+      "commit": "4f2b13e25c5815b3f080ca0d983e828d96561a0f",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/GoogleChrome-modern-web-guidance.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills/modern-web-guidance",
+          "to": "skills/design/modern-web-guidance"
+        }
+      ]
+    },
+    {
+      "id": "threejs-skills",
+      "repository": "https://github.com/CloudAI-X/threejs-skills",
+      "license": "MIT",
+      "commit": "0e181866f095b5f06d005133876e926515390d95",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/CloudAI-X-threejs-skills.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "skills",
+          "to": "skills/design/threejs-skills"
+        }
+      ]
+    },
+    {
+      "id": "finance-database",
+      "repository": "https://github.com/JerBouma/FinanceDatabase",
+      "license": "MIT",
+      "commit": "3815eb341c7aa7bfae4a720744093e75528b6099",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/JerBouma-FinanceDatabase.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/finance-database/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/finance-database/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        },
+        {
+          "from": "financedatabase",
+          "to": "skills/coding/finance-tools/finance-database/financedatabase",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "finance-toolkit",
+      "repository": "https://github.com/JerBouma/FinanceToolkit",
+      "license": "MIT",
+      "commit": "10ead1aa4949d5b30780b12f93442a54380b6697",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE.txt",
+          "file": "LICENSES/JerBouma-FinanceToolkit.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE.txt",
+          "to": "skills/coding/finance-tools/finance-toolkit-lib/LICENSE.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/finance-toolkit-lib/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        },
+        {
+          "from": "financetoolkit",
+          "to": "skills/coding/finance-tools/finance-toolkit-lib/financetoolkit",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "mcp_server/*",
+            "*/mcp_server/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "financepy",
+      "repository": "https://github.com/domokane/FinancePy",
+      "license": "GPL-3.0",
+      "commit": "dd9b9de194ba301362f900507213434a48bb408b",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/domokane-FinancePy.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/financepy/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/financepy/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "financepy",
+          "to": "skills/coding/finance-tools/financepy/financepy",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "yfinance",
+      "repository": "https://github.com/ranaroussi/yfinance",
+      "license": "Apache-2.0",
+      "commit": "d9f72aa4214167ced6bd5b7ba9a0c02a2209db9b",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE.txt",
+          "file": "LICENSES/ranaroussi-yfinance.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE.txt",
+          "to": "skills/coding/finance-tools/yfinance/LICENSE.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/yfinance/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "yfinance",
+          "to": "skills/coding/finance-tools/yfinance/yfinance",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gs-quant",
+      "repository": "https://github.com/goldmansachs/gs-quant",
+      "license": "Apache-2.0",
+      "commit": "ae7eb6b3fd1f50ce3f5128a4c935e9adf885a74f",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/goldmansachs-gs-quant.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/gs-quant/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        },
+        {
+          "from": "NOTICE.txt",
+          "to": "skills/coding/finance-tools/gs-quant/NOTICE.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/gs-quant/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        },
+        {
+          "from": "requirements.txt",
+          "to": "skills/coding/finance-tools/gs-quant/requirements.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        },
+        {
+          "from": "setup.py",
+          "to": "skills/coding/finance-tools/gs-quant/setup.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        },
+        {
+          "from": "gs_quant",
+          "to": "skills/coding/finance-tools/gs-quant/src/gs_quant",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "content/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "trading-agents",
+      "repository": "https://github.com/TauricResearch/TradingAgents",
+      "license": "Apache-2.0",
+      "commit": "c4544913a14ed3df5f1ed7b9e8483270ce20682a",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/TauricResearch-TradingAgents.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": ".env.example",
+          "to": "skills/coding/finance-tools/trading-agents/.env.example",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": ".env.enterprise.example",
+          "to": "skills/coding/finance-tools/trading-agents/.env.enterprise.example",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "CHANGELOG.md",
+          "to": "skills/coding/finance-tools/trading-agents/CHANGELOG.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/trading-agents/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/trading-agents/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "cli",
+          "to": "skills/coding/finance-tools/trading-agents/cli",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "main.py",
+          "to": "skills/coding/finance-tools/trading-agents/main.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "pyproject.toml",
+          "to": "skills/coding/finance-tools/trading-agents/pyproject.toml",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "requirements.txt",
+          "to": "skills/coding/finance-tools/trading-agents/requirements.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "tradingagents",
+          "to": "skills/coding/finance-tools/trading-agents/tradingagents",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "finance-shashankvemuri",
+      "repository": "https://github.com/shashankvemuri/Finance",
+      "license": "MIT",
+      "commit": "20799035c34de202818afdefd13600d2594dbcd8",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/shashankvemuri-Finance.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "apps",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/apps",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "docs",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/docs",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "examples",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/examples",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "pyproject.toml",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/pyproject.toml",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        },
+        {
+          "from": "src",
+          "to": "skills/coding/finance-tools/finance-shashankvemuri/src",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "howtrader",
+      "repository": "https://github.com/51bitquant/howtrader",
+      "license": "MIT",
+      "commit": "fcad8e2d86825506b9d33441ab78be853c2c3bdd",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/51bitquant-howtrader.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/howtrader/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/howtrader/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "cta_okx_script.py",
+          "to": "skills/coding/finance-tools/howtrader/cta_okx_script.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "cta_script.py",
+          "to": "skills/coding/finance-tools/howtrader/cta_script.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "examples",
+          "to": "skills/coding/finance-tools/howtrader/examples",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "howtrader",
+          "to": "skills/coding/finance-tools/howtrader/howtrader",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "main_window.py",
+          "to": "skills/coding/finance-tools/howtrader/main_window.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "other_codes.md",
+          "to": "skills/coding/finance-tools/howtrader/other_codes.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "requirements.txt",
+          "to": "skills/coding/finance-tools/howtrader/requirements.txt",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "setup.py",
+          "to": "skills/coding/finance-tools/howtrader/setup.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        },
+        {
+          "from": "tv_script.py",
+          "to": "skills/coding/finance-tools/howtrader/tv_script.py",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf"
+          ],
+          "keep": [
+            "data_analysis/data_analysis.ipynb"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tf-quant-finance",
+      "repository": "https://github.com/google/tf-quant-finance",
+      "license": "Apache-2.0",
+      "commit": "003229c11852349ce1f95efd6e4d8d8199da04e6",
+      "synced_on": "2026-10-29",
+      "licenses": [
+        {
+          "upstream": "LICENSE",
+          "file": "LICENSES/google-tf-quant-finance.LICENSE"
+        }
+      ],
+      "mappings": [
+        {
+          "from": "LICENSE",
+          "to": "skills/coding/finance-tools/tf-quant-finance/LICENSE",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "examples/demos/*",
+            "*/examples/demos/*",
+            "examples/jupyter_notebooks/*",
+            "*/examples/jupyter_notebooks/*",
+            "experimental/dev/*",
+            "*/experimental/dev/*",
+            "experimental/notebooks/*",
+            "*/experimental/notebooks/*"
+          ],
+          "keep": [
+            "datetime/test_data.py"
+          ]
+        },
+        {
+          "from": "README.md",
+          "to": "skills/coding/finance-tools/tf-quant-finance/README.md",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "examples/demos/*",
+            "*/examples/demos/*",
+            "examples/jupyter_notebooks/*",
+            "*/examples/jupyter_notebooks/*",
+            "experimental/dev/*",
+            "*/experimental/dev/*",
+            "experimental/notebooks/*",
+            "*/experimental/notebooks/*"
+          ],
+          "keep": [
+            "datetime/test_data.py"
+          ]
+        },
+        {
+          "from": "tf_quant_finance",
+          "to": "skills/coding/finance-tools/tf-quant-finance/tf_quant_finance",
+          "exclude": [
+            "test/*",
+            "tests/*",
+            "*_test.py",
+            "conftest.py",
+            "*/conftest.py",
+            "BUILD",
+            "*/BUILD",
+            "BUILD.bazel",
+            "*/BUILD.bazel",
+            "Dockerfile",
+            "*/Dockerfile",
+            "test_*.py",
+            "*/test_*.py",
+            "*.ipynb",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.ico",
+            "*.pdf",
+            "examples/demos/*",
+            "*/examples/demos/*",
+            "examples/jupyter_notebooks/*",
+            "*/examples/jupyter_notebooks/*",
+            "experimental/dev/*",
+            "*/experimental/dev/*",
+            "experimental/notebooks/*",
+            "*/experimental/notebooks/*"
+          ],
+          "keep": [
+            "datetime/test_data.py"
+          ]
+        }
+      ]
+    }
+  ]
+}

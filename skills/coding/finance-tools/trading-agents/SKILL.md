@@ -1,6 +1,6 @@
 ---
 name: trading-agents
-description: Multi-agent LLM-driven trading analysis and decision framework (TauricResearch/TradingAgents, Apache-2.0). Simulates a trading firm — fundamentals/sentiment/news/technical analysts, bull-vs-bear researcher debate, a trader, a risk-management team (aggressive/conservative/neutral debators), and a portfolio manager — to research a ticker and produce a BUY/SELL/HOLD decision with reasoning. Use when asked to do multi-agent stock/crypto analysis, simulate an investment committee or trading-desk debate, build an LLM trading pipeline, or evaluate a ticker with structured analyst reports and risk review.
+description: Multi-agent LLM-driven trading analysis and decision framework (TauricResearch/TradingAgents, Apache-2.0). Simulates a trading firm — fundamentals/sentiment/news/technical analysts, bull-vs-bear researcher debate, a trader, a risk-management team (aggressive/conservative/neutral debators), and a portfolio manager — to research a ticker and produce a Buy/Overweight/Hold/Underweight/Sell rating with reasoning. Use when asked to do multi-agent stock/crypto analysis, simulate an investment committee or trading-desk debate, build an LLM trading pipeline, or evaluate a ticker with structured analyst reports and risk review.
 license: Apache-2.0
 ---
 
@@ -21,13 +21,14 @@ write into a shared state, culminating in a final trade decision:
 
 1. **Analyst team** (parallel, tool-using agents that pull real market data):
    - `fundamentals_analyst` — company financials, balance sheet, income
-     statement, cash flow, insider transactions; flags intrinsic value and red flags.
+     statement, cash flow (SEC EDGAR as filed for US filers, then Yahoo),
+     insider transactions; flags intrinsic value and red flags.
    - `market_analyst` — technical indicators (MACD, RSI, moving averages, etc.)
      via `stockstats`, grounded in a verified OHLCV snapshot.
    - `news_analyst` — global/macro news and event impact (also pulls FRED
      macro indicators and Polymarket prediction-market data).
-   - `sentiment_analyst` / `social_media_analyst` — aggregates StockTwits,
-     Reddit, and news headlines into a short-term sentiment read.
+   - `sentiment_analyst` (selected as `"social"` in `selected_analysts`) —
+     aggregates StockTwits, Reddit, and news headlines into a short-term sentiment read.
 2. **Researcher team** — `bull_researcher` vs `bear_researcher` debate the
    analyst reports for `max_debate_rounds` rounds, arguing opposing theses;
    a `research_manager` synthesizes the debate into an investment plan.
@@ -37,13 +38,16 @@ write into a shared state, culminating in a final trade decision:
    and `neutral_debator` critique the trade proposal from different risk
    postures over `max_risk_discuss_rounds` rounds.
 5. **Portfolio manager** (`agents/managers/portfolio_manager.py`) — approves
-   or rejects the final proposal; on approval this becomes the returned
-   decision (BUY/SELL/HOLD plus reasoning).
+   or rejects the final proposal; its rating becomes the returned signal
+   (one of Buy / Overweight / Hold / Underweight / Sell, or `"REVIEW"` when no
+   rating could be parsed — check with `tradingagents.agents.rating.is_review`).
 
-The graph, conditional routing between debate rounds, and state schema live
-under `tradingagents/graph/` (`setup.py`, `conditional_logic.py`,
-`propagation.py`, `signal_processing.py`, `reflection.py`, `checkpointer.py`,
-`trading_graph.py` — the orchestrating `TradingAgentsGraph` class).
+The graph and conditional routing between debate rounds live under
+`tradingagents/graph/` (`setup.py`, `conditional_logic.py`, `propagation.py`,
+`analyst_execution.py`, `checkpointer.py`, `trading_graph.py` — the
+orchestrating `TradingAgentsGraph` class); the state schema is
+`tradingagents/agents/state.py` and the decision log/reflection code is in
+`tradingagents/memory/`.
 
 ### Persistence
 
@@ -62,15 +66,14 @@ under `tradingagents/graph/` (`setup.py`, `conditional_logic.py`,
 ## Installation
 
 ```bash
-cd tradingagents  # this skill's vendored package root
+# from this skill's root (where pyproject.toml lives)
 pip install .
 # or: pip install -r requirements.txt
 ```
 
-Requires Python >= 3.10. Built on `langgraph`, `langchain-*` provider
-integrations, `yfinance`, `stockstats`, `pandas`, `typer`/`questionary`/`rich`
-(for the CLI), and `redis`/`backtrader` as supporting deps (see
-`pyproject.toml` / `requirements.txt`).
+Requires Python >= 3.11. Built on `langgraph` (+ `langgraph-checkpoint-sqlite`),
+`langchain-*` provider integrations, `yfinance`, `stockstats`, `pandas`, and
+`typer`/`questionary`/`rich` for the CLI (see `pyproject.toml` / `requirements.txt`).
 
 ### API keys — pick an LLM provider (required) and, optionally, data vendors
 
@@ -87,23 +90,28 @@ export DASHSCOPE_API_KEY=...       # Qwen (international)
 export ZHIPU_API_KEY=...           # GLM via Z.AI
 export MINIMAX_API_KEY=...         # MiniMax
 export OPENROUTER_API_KEY=...      # OpenRouter (many models via one key)
+# also: MISTRAL_API_KEY, MOONSHOT_API_KEY (Kimi), GROQ_API_KEY, NVIDIA_API_KEY
 ```
 
 Also supported: **AWS Bedrock** (`pip install ".[bedrock]"`, AWS creds via
 env/`~/.aws/credentials`/IAM role, `llm_provider: "bedrock"`), **Azure
 OpenAI** (`.env.enterprise.example` → `.env.enterprise`), **local models**
 via **Ollama** (`llm_provider: "ollama"`, default `http://localhost:11434/v1`),
-and **any OpenAI-compatible endpoint** (vLLM, LM Studio, llama.cpp) via
-`llm_provider: "openai_compatible"` + `backend_url`.
+**any OpenAI-compatible endpoint** (vLLM, LM Studio, llama.cpp) via
+`llm_provider: "openai_compatible"` + `backend_url`, and a **ChatGPT Plus/Pro
+plan** instead of an API key (`llm_provider: "chatgpt"`, sign in once with
+`tradingagents login chatgpt`).
 
 Data defaults to **Yahoo Finance** (`yfinance`, keyless) for stock/technical/
-fundamental/news data. Optional data vendors, set in `data_vendors` config or
-via key:
+news data, and **SEC EDGAR then Yahoo** for fundamentals
+(`"fundamental_data": "sec_edgar,yfinance"`). Vendors are set per category in
+the `data_vendors` config (or per tool in `tool_vendors`):
 
 ```bash
 export ALPHA_VANTAGE_API_KEY=...   # richer fundamentals/indicators/news (alt. to yfinance)
-# FRED (macro indicators) and Polymarket (prediction markets) need no key
-# beyond FRED_API_KEY for FRED: export FRED_API_KEY=...
+export SEC_EDGAR_USER_AGENT="Your Name you@example.com"  # no key; contact SEC can reach
+export FRED_API_KEY=...            # FRED macro indicators (free key)
+# Polymarket (prediction markets) needs no key
 ```
 
 Markets: any ticker Yahoo Finance covers, with exchange suffix — `AAPL`,
@@ -118,10 +126,14 @@ Seng) is auto-selected per market via `benchmark_map` in `default_config.py`.
 ```bash
 tradingagents          # installed entry point
 python -m cli.main      # or run directly from source (cli/main.py)
+tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7
 ```
 
 Walks through ticker, analysis date, LLM provider/models, and research depth
 (debate rounds) interactively, then streams each agent's output as it runs.
+`--checkpoint` / `--clear-checkpoints` control resume; the `backtest`
+subcommand (or `tradingagents.backtest.run_backtest`) runs the pipeline over a
+ticker/date grid and scores the settled decisions.
 
 ### Python API
 
@@ -130,31 +142,33 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
 ta = TradingAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
-_, decision = ta.propagate("NVDA", "2026-01-15")
-print(decision)
+final_state, signal = ta.propagate("NVDA", "2026-01-15")  # asset_type="crypto" for pairs
+print(signal)  # e.g. "Overweight"; full reasoning is in final_state["final_trade_decision"]
 ```
 
 Custom configuration (provider, models, debate depth, checkpointing):
 
 ```python
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"          # openai, anthropic, google, deepseek,
-                                            # openrouter, ollama, bedrock,
-                                            # openai_compatible, ...
-config["deep_think_llm"] = "gpt-5.6"       # complex reasoning (researchers, PM)
-config["quick_think_llm"] = "gpt-5.6-luna" # fast/cheap tasks (analysts)
+config["llm_provider"] = "openai"          # openai, anthropic, google, azure, bedrock,
+                                            # xai, deepseek, qwen, glm, minimax,
+                                            # openrouter, mistral, kimi, groq, nvidia,
+                                            # ollama, chatgpt, openai_compatible
+config["deep_think_llm"] = "gpt-6-sol"     # deep tier: research manager + portfolio manager
+config["quick_think_llm"] = "gpt-6-luna"   # quick tier: analysts, researchers, debaters, trader
 config["max_debate_rounds"] = 2            # bull/bear researcher rounds
 config["max_risk_discuss_rounds"] = 2       # risk-team rounds
 config["checkpoint_enabled"] = True         # resume interrupted runs
 config["temperature"] = 0.0                 # lower = more reproducible (non-reasoning models only)
 
 ta = TradingAgentsGraph(debug=True, config=config)
-_, decision = ta.propagate("NVDA", "2026-01-15")
+final_state, signal = ta.propagate("NVDA", "2026-01-15")
 ```
 
 See `tradingagents/default_config.py` for every option (news lookback
 windows, data-vendor routing per tool category, memory log rotation,
-per-provider reasoning-effort/thinking-level knobs, etc.).
+per-provider reasoning-effort/thinking-level knobs, per-tier provider/endpoint
+overrides, `TRADINGAGENTS_*` env-var overrides, etc.).
 
 ### Reproducibility caveat
 
@@ -171,31 +185,38 @@ replicable return.
 tradingagents/
   agents/
     analysts/          fundamentals_analyst, market_analyst, news_analyst,
-                        sentiment_analyst, social_media_analyst
+                        sentiment_analyst, turn.py (shared analyst tool loop)
     researchers/        bull_researcher, bear_researcher
     managers/            research_manager (synthesizes debate), portfolio_manager (final call)
     risk_mgmt/          aggressive_debator, conservative_debator, neutral_debator
     trader/trader.py    turns investment plan into a trade proposal
-    utils/               shared tool bindings (stock/fundamental/news/macro/
-                         technical-indicator/prediction-market data tools),
-                         agent_states.py (LangGraph state schema), memory.py
-                         (decision log), schemas.py, structured.py, rating.py
+    state.py            LangGraph state schema
+    tools.py            tool bindings (stock/fundamental/news/macro/technical-
+                        indicator/prediction-market data, verified market snapshot)
+    context.py, rating.py (5-tier rating parse, run_rating/is_review),
+    schemas.py, structured.py, post_screen.py
   graph/
     trading_graph.py    TradingAgentsGraph orchestrator class
     setup.py            builds the LangGraph graph (nodes + edges)
     conditional_logic.py routing between debate/risk rounds
+    analyst_execution.py execution plan for the selected analyst nodes
     propagation.py       Propagator — runs a ticker+date through the graph
-    reflection.py        Reflector — post-hoc alpha/return reflection for memory log
-    signal_processing.py extracts the final BUY/SELL/HOLD signal
     checkpointer.py      SQLite-backed LangGraph checkpoint/resume
-  llm_clients/          per-provider chat clients (openai, anthropic, google,
-                        azure, bedrock) + factory.py, model_catalog.py, capabilities.py
-  dataflows/            data-vendor integrations: y_finance.py, yfinance_news.py,
-                        alpha_vantage*.py, fred.py, polymarket.py, reddit.py,
-                        stocktwits.py, stockstats_utils.py, market_data_validator.py
+  memory/               decision log (log.py), Reflector (reflection.py),
+                        outcome settlement vs. benchmark (settlement.py)
+  llm_clients/          per-provider chat clients (openai + OpenAI-compatible registry,
+                        anthropic, google, azure, bedrock, chatgpt_auth) + factory.py,
+                        model_catalog.py, capabilities.py
+  dataflows/            router.py (vendor routing), config.py, symbols.py, date_window.py,
+                        vendors/: yahoo/, alpha_vantage/, sec_edgar.py, fred.py,
+                        polymarket.py, reddit.py, stocktwits.py
+  backtest.py           run_backtest / iter_grid / summarize over a ticker+date grid
+  portfolio.py          load_portfolio — portfolio-aware runs
   default_config.py     DEFAULT_CONFIG dict + TRADINGAGENTS_* env-var overrides
   reporting.py          writes per-run report tree to results_dir
-cli/                    Typer/questionary/rich interactive CLI (main.py, config.py, models.py)
+  report_html.py        HTML report rendering (reads assets/tauric-logo.svg)
+cli/                    Typer/questionary/rich interactive CLI (main.py, run.py, display.py,
+                        selections.py, prompts.py, prefs.py, updates.py, models.py)
 main.py                 minimal script-style entry point (see README Python Usage)
 pyproject.toml, requirements.txt
 .env.example, .env.enterprise.example

@@ -14,7 +14,6 @@ from ..utils.solver_1d import bisection, newton
 from ..models.equity_crr_tree import crr_tree_val_avg
 
 
-
 class Black:
     """Black model for European and American options on forwards/futures."""
 
@@ -95,7 +94,7 @@ class Black:
                 raise FinError("Implementation not available for this product")
 
             results = crr_tree_val_avg(
-                f, 0.0, 0.0, v, self.num_steps, t, opt_type.value, k
+                f, r, r, v, self.num_steps, t, opt_type.value, k, True
             )
             return results["value"]
 
@@ -129,7 +128,7 @@ class Black:
                 raise FinError("Implementation not available for this product")
 
             results = crr_tree_val_avg(
-                f, 0.0, 0.0, v, self.num_steps, t, opt_type.value, k
+                f, r, r, v, self.num_steps, t, opt_type.value, k, True
             )
             return results["delta"]
 
@@ -163,7 +162,7 @@ class Black:
                 raise FinError("Implementation not available for this product")
 
             results = crr_tree_val_avg(
-                f, 0.0, 0.0, v, self.num_steps, t, opt_type.value, k
+                f, r, r, v, self.num_steps, t, opt_type.value, k, True
             )
             return results["gamma"]
 
@@ -197,7 +196,7 @@ class Black:
                 raise FinError("Implementation not available for this product")
 
             results = crr_tree_val_avg(
-                f, 0.0, 0.0, v, self.num_steps, t, opt_type.value, k
+                f, r, r, v, self.num_steps, t, opt_type.value, k, True
             )
             return results["theta"]
 
@@ -233,11 +232,11 @@ class Black:
             bump_size = 0.01
 
             results = crr_tree_val_avg(
-                f, 0.0, 0.0, v, self.num_steps, t, opt_type.value, k
+                f, r, r, v, self.num_steps, t, opt_type.value, k, True
             )
 
             results_volshift = crr_tree_val_avg(
-                f, 0.0, 0.0, v + bump_size, self.num_steps, t, opt_type.value, k
+                f, r, r, v + bump_size, self.num_steps, t, opt_type.value, k, True
             )
 
             return (results_volshift["value"] - results["value"]) / bump_size
@@ -446,35 +445,34 @@ def implied_volatility(
     if price < 0.0:
         raise FinError("price must be non-negative.")
 
-    def _f_european(sigma, args):
+    def _f_european(sigma, *args):
         fwd, t, k, r, opt_type, price = args
         return black_value(fwd, t, k, r, sigma, opt_type) - price
 
-    def _f_european_vega(sigma, args):
+    def _f_european_vega(sigma, *args):
         fwd, t, k, r, opt_type, _ = args
         return black_vega(fwd, t, k, r, sigma, opt_type)
 
-    def _f_american(sigma, args):
-        fwd, t, k, _, opt_type, price = args
+    def _f_american(sigma, *args):
+        fwd, t, k, r, opt_type, price = args
         num_steps = 200
         results = crr_tree_val_avg(
-            fwd, 0.0, 0.0, sigma, num_steps, t, opt_type.value, k
+            fwd, r, r, sigma, num_steps, t, opt_type.value, k, True
         )
         return results["value"] - price
 
-    def _f_american_vega(sigma, args):
+    def _f_american_vega(sigma, *args):
         fwd, t, k, _, opt_type, _ = args
         bump_size = 0.01
         num_steps = 200
 
         results = crr_tree_val_avg(
-            fwd, 0.0, 0.0, sigma, num_steps, t, opt_type.value, k
+            fwd, r, r, sigma, num_steps, t, opt_type.value, k, True
         )
 
         results_volshift = crr_tree_val_avg(
-            fwd, 0.0, 0.0, sigma + bump_size, num_steps, t, opt_type.value, k
+            fwd, r, r, sigma + bump_size, num_steps, t, opt_type.value, k, True
         )
-
         return (results_volshift["value"] - results["value"]) / bump_size
 
     def _estimate_vol_from_price(fwd, t, k, european_opt_type, european_price):
@@ -514,13 +512,16 @@ def implied_volatility(
     else:
         raise FinError("Option type must be a European/American Call or Put")
 
+    def _bisection_f(sigma, args):
+        return _f(sigma, *args)
+
     args = fwd, t, k, r, opt_type, price
     tol = 1.0e-6
 
     sigma = newton(_f, sigma0, _f_vega, args, tol=tol)
 
     if sigma is None:
-        sigma = bisection(_f, 1.0e-4, 10.0, args, xtol=tol)
+        sigma = bisection(_bisection_f, 1.0e-4, 10.0, args, xtol=tol)
         method = "Failed" if sigma is None else "Bisection"
     else:
         method = "Newton"

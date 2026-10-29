@@ -30,7 +30,7 @@ def initialize_statements_and_normalization(
     Initializes financial statements by applying normalization and date conversion.
     Also loads normalization format files.
 
-    Statements are no longer pre-loaded from cache here. Caching happens per ticker
+    Statements are not pre-loaded from cache here. Caching happens per ticker
     when the statements are actually requested, so that a different ticker list or
     period reuses what overlaps rather than being handed a previously assembled
     frame for a different set of companies.
@@ -172,12 +172,19 @@ def read_normalization_file(statement: str, format_location: str = ""):
     if format_location:
         file_location = f"{format_location}/{statement}.csv"
     else:
-        file_location = resources.files(__package__).joinpath(  # type: ignore
+        file_location = resources.files(__package__).joinpath(
             f"normalization/{statement}.csv"
         )
 
     try:
-        normalization = pd.read_csv(file_location, index_col=[0]).iloc[:, 0]
+        # A user supplied location is a plain path while the packaged default is a
+        # resource that may live inside a zip, so both are handed over as open files.
+        with (
+            open(file_location, encoding="utf-8")
+            if isinstance(file_location, str)
+            else file_location.open(encoding="utf-8")
+        ) as csv_file:
+            normalization = pd.read_csv(csv_file, index_col=[0]).iloc[:, 0]
     except FileNotFoundError:
         return pd.Series()
 
@@ -189,7 +196,7 @@ def read_normalization_file(statement: str, format_location: str = ""):
 
 def convert_financial_statements(
     financial_statements: pd.DataFrame,
-    statement_format: pd.DataFrame = pd.DataFrame(),
+    statement_format: pd.Series | pd.DataFrame = pd.DataFrame(),
     adjust_financial_statements: bool = True,
     reverse_dates: bool = False,
 ):
@@ -199,13 +206,12 @@ def convert_financial_statements(
 
     Args:
         financial_statements (pd.DataFrame): DataFrame containing the financial statement data.
-        statement_format (pd.DataFrame): Optional DataFrame containing the names of the financial statement line
+        statement_format (pd.Series | pd.DataFrame): Optional mapping of the names of the financial statement line
                             items to include in the output. Rows should contain the original name of the line item,
                             and columns should contain the desired name for that line item.
         adjust_financial_statements (bool): Whether to add every line item in the format that the provider did not
                             return, filled with NaN, so that every ticker has the same rows. Defaults to True.
-                            Changed in v2.2.0: these were previously filled with zero, which made an item the
-                            provider never reported indistinguishable from one it reported as genuinely zero.
+                            NaN keeps an item the provider never reported apart from one it reported as zero.
         reverse_dates (bool): Whether to reverse the order of the columns so the oldest period comes first.
                             Defaults to False.
 
@@ -335,7 +341,7 @@ def copy_normalization_files(
     """
     logger.info(
         "Files are being saved to %s. Please see the following: "
-        "https://www.jeroenbouma.com/projects/financetoolkit/external-datasets "
+        "https://www.jeroenbouma.com/projects/financetoolkit/docs/external-datasets "
         "to understand how to work with these files. In essence, all it requires is "
         "to match up the rows in your dataframe with the normalization format.",
         save_location,
@@ -346,13 +352,26 @@ def copy_normalization_files(
         if format_location:
             file_location = f"{format_location}/{statement}.csv"
         else:
-            file_location = resources.files(__package__).joinpath(  # type: ignore
+            file_location = resources.files(__package__).joinpath(
                 f"normalization/{statement}.csv"
             )
 
+        def copy_to(target: Path) -> None:
+            # A user supplied location is a plain path while the packaged default is a
+            # resource that may live inside a zip, so both are copied as open files.
+            with (
+                (
+                    open(file_location, "rb")
+                    if isinstance(file_location, str)
+                    else file_location.open("rb")
+                ) as source,
+                open(target, "wb") as sink,
+            ):
+                shutil.copyfileobj(source, sink)
+
         destination = save_location / f"{statement}.csv"
         try:
-            shutil.copyfile(file_location, destination)
+            copy_to(destination)
         except PermissionError:
             fallback = Path.cwd() / f"{statement}.csv"
             logger.warning(
@@ -360,4 +379,51 @@ def copy_normalization_files(
                 destination,
                 fallback,
             )
-            shutil.copyfile(file_location, fallback)
+            copy_to(fallback)
+
+
+def get_normalization_files(path: str | Path = ""):
+    """
+    Copies the normalization files to a folder of your choice, the 'Downloads' folder by
+    default. These files map the rows of your own financial statements onto the names the
+    Finance Toolkit works with, so that you can supply your own datasets.
+
+    There are four files: balance.csv, income.csv and cash.csv for the balance sheet,
+    income statement and cash flow statement, and statistics.csv for the statistics such as
+    the number of shares outstanding. Each has a column with the Finance Toolkit name of a
+    row and a column to fill in with the matching row name of your own data. Pass the folder
+    with the filled-in files to the Toolkit with `format_location`. See the external
+    datasets guide for a worked example:
+    https://www.jeroenbouma.com/projects/financetoolkit/docs/external-datasets
+
+    No Toolkit instance (and no API key) is needed to get the files.
+
+    Args:
+        path (str | Path, optional): The folder to save the files to. Defaults to "", which
+            saves them to the 'Downloads' folder of your home directory.
+
+    Returns:
+        None: The four csv files are saved to the chosen folder. When that folder cannot be
+        written to, they are saved to the current working directory instead.
+
+    As an example:
+
+    ```python
+    from financetoolkit import Toolkit, get_normalization_files
+
+    get_normalization_files("normalization")
+
+    # Fill in the files, then supply your own statements together with them.
+    companies = Toolkit(
+        tickers=["TSLA"],
+        balance=balance_statement,
+        income=income_statement,
+        cash=cash_flow_statement,
+        format_location="normalization",
+    )
+    ```
+    """
+    if path:
+        copy_normalization_files(save_location=path)
+    else:
+        copy_normalization_files()

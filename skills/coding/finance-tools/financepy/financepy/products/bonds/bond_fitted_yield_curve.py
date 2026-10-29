@@ -2,8 +2,6 @@
 # Copyright (C) 2018, 2019, 2020 Dominic O'Kane
 ##############################################################################
 
-import matplotlib.pyplot as plt
-
 from typing import Union
 
 import numpy as np
@@ -37,14 +35,17 @@ class BondFittedYieldCurve:
         bonds: list,
         ylds: Union[np.ndarray, list],
         curve_fit,
-        time_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
-    ):
+        curve_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
+    ) -> None:
         """Fit the curve to a set of bond yields using the type of curve
         specified. Bounds can be provided if you wish to enforce lower and
         upper limits on the respective model parameters."""
 
         print("Class BondFittedYieldCurve is Deprecated.")
         print("Use BondParametricYieldCurve in market/curves")
+
+        if len(bonds) != len(ylds):
+            raise FinError("Number of bonds must equal number of yields.")
 
         self.settle_dt = settle_dt
         self.bonds = bonds
@@ -53,10 +54,10 @@ class BondFittedYieldCurve:
 
         fit_type = type(self.curve_fit)
 
-        if not isinstance(time_dc_type, DayCountTypes):
+        if not isinstance(curve_dc_type, DayCountTypes):
             raise FinError("Invalid time day count type.")
 
-        self.time_dc_type = time_dc_type
+        self.curve_dc_type = curve_dc_type
 
         years_to_maturities = []
 
@@ -65,13 +66,13 @@ class BondFittedYieldCurve:
             years_to_maturity = times_from_dates(
                 settle_dt,
                 bond.maturity_dt,
-                self.time_dc_type,
+                self.curve_dc_type,
             )
             years_to_maturities.append(years_to_maturity)
 
         self.years_to_maturity = np.array(years_to_maturities)
 
-        if fit_type is CurveFitPolynomial:
+        if isinstance(fit_type, CurveFitPolynomial):
 
             d = curve_fit.power
             # Highest powers are first
@@ -80,28 +81,24 @@ class BondFittedYieldCurve:
             coeffs2 = coeffs1[::-1]
             curve_fit.coeffs = coeffs2
 
-        elif fit_type is CurveFitNelsonSiegel:
+        elif isinstance(fit_type, CurveFitNelsonSiegel):
 
             xdata = self.years_to_maturity
             ydata = self.ylds
 
-            popt, _ = scipy.optimize.curve_fit(
-                curve_fit.interp_rate, xdata, ydata, bounds=curve_fit.bounds
-            )
+            popt, _ = scipy.optimize.curve_fit(curve_fit.interp_rate, xdata, ydata, bounds=curve_fit.bounds)
 
             curve_fit.beta_1 = popt[0]
             curve_fit.beta_2 = popt[1]
             curve_fit.beta_3 = popt[2]
             curve_fit.tau = popt[3]
 
-        elif fit_type is CurveFitNelsonSiegelSvensson:
+        elif isinstance(fit_type, CurveFitNelsonSiegelSvensson):
 
             xdata = self.years_to_maturity
             ydata = self.ylds
 
-            popt, _ = scipy.optimize.curve_fit(
-                curve_fit.interp_rate, xdata, ydata, bounds=curve_fit.bounds
-            )
+            popt, _ = scipy.optimize.curve_fit(curve_fit.interp_rate, xdata, ydata, bounds=curve_fit.bounds)
 
             curve_fit.beta_1 = popt[0]
             curve_fit.beta_2 = popt[1]
@@ -110,7 +107,7 @@ class BondFittedYieldCurve:
             curve_fit.tau_1 = popt[4]
             curve_fit.tau_2 = popt[5]
 
-        elif fit_type is CurveFitBSpline:
+        elif isinstance(fit_type, CurveFitBSpline):
 
             xdata = self.years_to_maturity
             ydata = self.ylds
@@ -127,7 +124,7 @@ class BondFittedYieldCurve:
     def interp_yield(self, maturity_dt: Date):
         """Interpolate yield"""
         if isinstance(maturity_dt, Date):
-            t = times_from_dates(self.settle_dt, maturity_dt, self.time_dc_type)
+            t = times_from_dates(self.settle_dt, maturity_dt, self.curve_dc_type)
         elif isinstance(maturity_dt, list):
             t = maturity_dt
         elif isinstance(maturity_dt, np.ndarray):
@@ -183,7 +180,7 @@ class BondFittedYieldCurve:
             }
         )
 
-        plt.figure(figsize=(12, 6))
+        plt.figure()
 
         title = title + " - " + self.curve_fit.name
         plt.title(title)
@@ -217,7 +214,7 @@ class BondFittedYieldCurve:
 
         plt.xlim(np.min(times), np.max(times))
         plt.grid(True, alpha=0.3)
-#        plt.tight_layout()
+        #        plt.tight_layout()
 
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight", pad_inches=0.02)

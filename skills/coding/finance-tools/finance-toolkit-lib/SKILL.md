@@ -20,11 +20,12 @@ Given one or more tickers, `FinanceToolkit` fetches (or accepts pre-loaded) bala
 - **Risk** (`risk` module, 20+): Value at Risk (historical, Gaussian, Student-t, Cornish-Fisher, EVT/POT), Conditional VaR, Entropic VaR, GARCH/EWMA volatility, maximum drawdown & duration, Hurst exponent, copulas.
 - **Performance** (`performance` module, 20+): Sharpe, Sortino, Calmar, Omega ratios, CAPM/beta, Fama-French factor correlations, correlation matrices, alpha/tracking error.
 - **Options** (`options` module): Black-Scholes, binomial trees, implied volatility, and first/second/third-order Greeks (Delta, Gamma, Theta, Vega, Vanna, Charm, Vomma, Speed, Zomma, Color, Ultima).
-- **Fixed Income** (`fixedincome` module): bond pricing, yield curves, Fed/ECB/Euribor rate series.
-- **Economics** (`economics` module): macro indicators via FRED/OECD/Yahoo Finance.
+- **Fixed Income** (`fixedincome` module): bond pricing, yield curves and short-rate models, Fed/ECB/Euribor plus other central-bank/treasury rate series (BoC, Bundesbank, Riksbank, Norges Bank, RBA, EIOPA, ...).
+- **Economics** (`economics` module): macro indicators via FRED/OECD/Yahoo Finance plus BIS, IMF, ECB, Eurostat, BoE, BoJ, BLS, ONS, NBER and other official sources.
 - **Econometrics** (`econometrics` module): regression, causality, cointegration, panel data, time-series diagnostics.
 - **Discovery** (standalone `Discovery` class): stock/crypto/forex/ETF screeners, sector/industry performance, news feeds — no financial statements needed.
-- **Portfolio** (standalone `Portfolio` class): portfolio-level overview and performance from a holdings dataset.
+- **ETF** (`etf` module): fund holdings, sector/country weightings, premium/discount to NAV, tracking vs. benchmark, overlap/concentration.
+- **Portfolio** (standalone `Portfolio` class): portfolio-level overview and performance from a holdings dataset; `Toolkit.portfolio` (`PortfolioConstruction`) builds portfolios from the Toolkit's assets (minimum variance, max Sharpe, mean-variance, risk parity, HRP); `PortfolioDefinition` reads portfolio definitions incl. the YAML presets in `portfolio/presets/`.
 
 Nearly every `get_*`/`collect_*` method across these modules supports `rolling=<n>` (sliding window), `trailing=<n>` (trailing sum/average, e.g. TTM), `growth=True` with `lag=<n>` (period-over-period or YoY growth), and `standardize=True` (Z-score normalization) — so a single metric call can become a time series, a growth series, or a comparably-scaled score with one extra kwarg.
 
@@ -63,6 +64,8 @@ Each analysis domain is a property on the `Toolkit` instance, backed by a contro
 | `companies.fixedincome` | `FixedIncome` | `financetoolkit/fixedincome/fixedincome_controller.py` |
 | `companies.economics` | `Economics` | `financetoolkit/economics/economics_controller.py` |
 | `companies.econometrics` | `Econometrics` | `financetoolkit/econometrics/econometrics_controller.py` |
+| `companies.etf` | `ETF` | `financetoolkit/etf/etf_controller.py` |
+| `companies.portfolio` | `PortfolioConstruction` | `financetoolkit/portfolio/construction_controller.py` |
 
 Plus two standalone top-level classes that don't need a `Toolkit` instance: `Discovery` (`financetoolkit/discovery/discovery_controller.py`) and `Portfolio` (`financetoolkit/portfolio/portfolio_controller.py`).
 
@@ -137,14 +140,14 @@ discovery.get_stock_screener(
 `financetoolkit/` in this skill directory is the actual upstream package source (copied as-is, minus the `mcp_server/` subpackage, which wraps the toolkit as an MCP server and isn't needed to use the library directly in code). Notable files:
 
 - `toolkit_controller.py` — the `Toolkit` class itself (init, property accessors for each module, financial-statement fetch/normalize logic).
-- `ratios/`, `models/`, `technicals/`, `risk/`, `performance/`, `options/`, `economics/`, `fixedincome/`, `econometrics/` — one `<name>_controller.py` (the public methods) plus one or more `<topic>_model.py` files (the actual formulas, fully readable — e.g. `ratios/valuation_model.py` for every valuation ratio's exact calculation) per module.
-- `discovery/`, `portfolio/` — the standalone `Discovery` and `Portfolio` classes and their model files.
+- `ratios/`, `models/`, `technicals/`, `risk/`, `performance/`, `options/`, `economics/`, `fixedincome/`, `econometrics/`, `etf/` — one `<name>_controller.py` (the public methods) plus one or more `<topic>_model.py` files (the actual formulas, fully readable — e.g. `ratios/valuation_model.py` for every valuation ratio's exact calculation) per module.
+- `discovery/`, `portfolio/` — the standalone `Discovery` and `Portfolio` classes and their model files (`portfolio/` also holds `PortfolioConstruction`, `PortfolioDefinition` and YAML portfolio presets).
 - `normalization/` — CSV mapping tables used to normalize raw FMP/Yahoo Finance statement line items into the toolkit's canonical field names.
 - `cache/` — the incremental on-disk caching layer used by `use_cached_data`.
-- `fmp_model.py`, `yfinance_model.py`, `historical_model.py`, `fundamentals_model.py`, `currencies_model.py`, `helpers.py` — data-fetching and shared utility helpers.
+- `fmp_model.py`, `yfinance_model.py`, `historical_model.py`, `fundamentals_model.py`, `currencies_model.py`, `normalization_model.py`, `helpers.py` — data-fetching and shared utility helpers.
 - `utilities/` — logging, error handling, request retries, dataframe helpers.
 
-Import from the package root exactly as upstream does — `from financetoolkit import Toolkit, Discovery, Portfolio, Economics, FixedIncome` — since `financetoolkit/__init__.py` re-exports these directly; everything else (ratios, models, technicals, risk, performance, options, econometrics) is reached only through a `Toolkit` instance's properties, not imported standalone.
+Import from the package root exactly as upstream does — `from financetoolkit import Toolkit, Discovery, Portfolio, PortfolioDefinition, Economics, Econometrics, FixedIncome` — since `financetoolkit/__init__.py` re-exports these (lazily, on first use); everything else (ratios, models, technicals, risk, performance, options, etf) is reached only through a `Toolkit` instance's properties, not imported standalone.
 
 `README.md` (upstream, kept as-is) has the full walkthrough with more worked examples per module and expected DataFrame output shapes. `LICENSE.txt` is the original MIT license — preserve it in any redistribution.
 

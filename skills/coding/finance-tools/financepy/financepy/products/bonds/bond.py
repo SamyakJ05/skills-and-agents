@@ -30,7 +30,6 @@ from ...utils.date import Date
 from ...utils.error import FinError
 from ...utils.frequency import annual_frequency, FrequencyTypes
 from ...utils.global_vars import G_SMALL, G_DAYS_IN_YEAR
-from ...utils.global_types import YTMCalcType
 from ...utils.day_count import DayCount, DayCountTypes
 from ...utils.schedule import Schedule
 from ...utils.calendar import Calendar
@@ -46,6 +45,7 @@ from ...market.curves.interpolator import InterpTypes
 from ...market.curves.pwf_onf_discount_curve import PWFONFDiscountCurve
 from ...market.curves.composite_discount_curve import CompositeDiscountCurve
 from ...market.curves.bond_bootstrap_discount_curve import BondBootstrapDiscountCurve
+from ...utils.check_values import check_curve_dt
 
 # References https://www.dmo.gov.uk/media/15011/yldeqns_v1.pdf
 # DO TRUE YIELD
@@ -61,7 +61,13 @@ class CouponType(Enum):
 
 ########################################################################################
 
-
+class YTMCalcType(Enum):
+    ZERO = 0
+    UK_DMO = 1
+    US_STREET = 2
+    US_TREASURY = 3
+    CFETS = 4  # China Foreign Exchange Trade System
+    CALCULUS = 5  # Using Calculus for duration
 
 ########################################################################################
 
@@ -94,7 +100,7 @@ def _g(oas, *args):
 ###############################################################################
 
 
-def validate_yield(ytm):
+def _validate_yield(ytm):
 
     ytms = []
 
@@ -111,7 +117,7 @@ def validate_yield(ytm):
 ###############################################################################
 
 
-def validate_price(px):
+def _validate_price(px):
     if px < 0.0 or px > 300.0:
         raise FinError("Price of " + str(px) + " must be between 0 and 300")
 
@@ -119,7 +125,7 @@ def validate_price(px):
 ###############################################################################
 
 
-def vectorise_price(price):
+def _vectorise_price(price: float):
 
     if isinstance(price, int):
         price = float(price)
@@ -154,7 +160,7 @@ class Bond:
         bd_type=BusDayAdjustTypes.FOLLOWING,
         dg_type=DateGenRuleTypes.BACKWARD,
         cpn_type=CouponType.FIXED,
-    ):
+    ) -> None:
         """Create Bond object by providing the issue date, maturity Date,
         coupon frequency, annualised coupon, the accrual convention type, face
         amount and the number of ex-dividend days. A calendar type is used
@@ -266,9 +272,9 @@ class Bond:
 
     ############################################################################
 
-    def times(self, settle_dt, time_dc_type:DayCountTypes = DayCountTypes.ACT_365F):
+    def times(self, settle_dt: Date, curve_dc_type: DayCountTypes = DayCountTypes.ACT_365F):
         """Years from settlement to payments using day count convention"""
-        times = times_from_dates(settle_dt, self.payment_dts, time_dc_type)
+        times = times_from_dates(settle_dt, self.payment_dts, curve_dc_type)
 
         print("TIMES")
         print(times)
@@ -277,7 +283,7 @@ class Bond:
 
     ############################################################################
 
-    def flows(self, settle_dt):
+    def flows(self, settle_dt: Date):
         """Times from settlement to payments"""
         n_flows = len(self.flow_amounts)
         flows = []
@@ -369,7 +375,7 @@ class Bond:
         function is vectorised with respect to the yield input. It implements
         a number of standard conventions for calculating the YTM."""
 
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -426,7 +432,11 @@ class Bond:
                 dp = (v ** (self.alpha)) * (term1 + term2 + term3 + term4)
         elif convention == YTMCalcType.US_TREASURY:
             if n == 0:
-                dp = (v ** (self.alpha)) * (1.0 + pay_first_cpn * c / f)
+                # 31 CFR 356 Appendix B discounts the fractional period at
+                # simple interest, which with no full periods left reduces to
+                # P = (100 + C/f) / (1 + alpha * y / f)
+                vw = 1.0 / (1.0 + self.alpha * ytm / f)
+                dp = vw * (1.0 + pay_first_cpn * c / f)
             else:
                 term1 = (c / f) * pay_first_cpn
                 term2 = (c / f) * v
@@ -526,7 +536,7 @@ class Bond:
         else:
             ytm_list = [ytms]
 
-        validate_yield(ytms)
+        _validate_yield(ytms)
 
         num_dates = len(settle_dt_list)
         num_ytms = len(ytm_list)
@@ -554,9 +564,7 @@ class Bond:
                 ytm_vector.append(ytm_list[i])
 
         else:
-            raise FinError(
-                "Number of dates and yields must match, or one must be a scalar."
-            )
+            raise FinError("Number of dates and yields must match, or one must be a scalar.")
 
         # Execute the loop using the standardized vectors
         dps = []
@@ -617,9 +625,7 @@ class Bond:
 
     ###########################################################################
 
-    def principal(
-        self, settle_dt: Date, ytm: float, face: float, convention: YTMCalcType
-    ):
+    def principal(self, settle_dt: Date, ytm: float, face: float, convention: YTMCalcType):
         """Calculate the principal value of the bond based on the face
         amount from its discount margin and making assumptions about the
         future Ibor rates."""
@@ -628,8 +634,8 @@ class Bond:
             raise FinError("Settlement date falls before issue date")
 
         dirty_price = self.dirty_price_from_ytm(settle_dt, ytm, convention)
-        principal = dirty_price * face / self.par
-        principal = principal - self.accrued_int
+        accrued = self.accrued_interest(settle_dt, face)
+        principal = dirty_price * face / self.par - accrued
         return principal
 
     ###########################################################################
@@ -650,7 +656,7 @@ class Bond:
         where DV01 is the positive dirty-price change for a +1bp yield shift.
         """
 
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -671,8 +677,7 @@ class Bond:
         Bloomberg-style DV01 / PV01 is positive for a long fixed-rate bond.
         """
 
-        # Change in price for a
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         dy = 0.0001  # 1 bp
         p_0 = self.dirty_price_from_ytm(settle_dt, ytm, convention)
@@ -691,7 +696,7 @@ class Bond:
         """Calculate the Macaulay duration of the bond on a settlement date
         given its yield to maturity."""
 
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -766,7 +771,7 @@ class Bond:
     ):
         """Calculate the modified duration of the bond on a settlement
         date given its yield to maturity."""
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -787,7 +792,7 @@ class Bond:
     ):
         """Calculate the change in the dirty price due to moving calendar time
         i.e. the settlement date, forward by day_step days."""
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -804,7 +809,7 @@ class Bond:
     def key_rate_durations_zero_tent(
         self,
         settle_dt: Date,
-        zero_curve,
+        zero_curve: DiscountCurve,
         key_rate_tenors: list = None,
         shift: float = None,
     ):
@@ -921,7 +926,7 @@ class Bond:
         # Helper: build a bumped discount curve wrapper
         # ------------------------------------------------------------------
         class BumpedZeroTentCurve:
-            def __init__(self, base_curve, settle_dt, tenors, node_index, bump):
+            def __init__(self, base_curve: DiscountCurve, settle_dt: Date, tenors, node_index: int, bump: float) -> None:
                 self.base_curve = base_curve
                 self.settle_dt = settle_dt
                 self.tenors = tenors
@@ -947,12 +952,8 @@ class Bond:
         krds = []
 
         for i in range(len(key_rate_tenors)):
-            curve_up = BumpedZeroTentCurve(
-                zero_curve, settle_dt, key_rate_tenors, i, +shift
-            )
-            curve_dn = BumpedZeroTentCurve(
-                zero_curve, settle_dt, key_rate_tenors, i, -shift
-            )
+            curve_up = BumpedZeroTentCurve(zero_curve, settle_dt, key_rate_tenors, i, +shift)
+            curve_dn = BumpedZeroTentCurve(zero_curve, settle_dt, key_rate_tenors, i, -shift)
 
             p_up = self.dirty_price_from_discount_curve(settle_dt, curve_up)
             p_dn = self.dirty_price_from_discount_curve(settle_dt, curve_dn)
@@ -996,7 +997,7 @@ class Bond:
         tuple of (numpy array of float, numpy array of float)
             A tuple containing the key rate tenors and the key rate durations.
         """
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -1027,7 +1028,7 @@ class Bond:
         lin_zero_interp = InterpTypes.LINEAR_ZERO_RATES
         us_street = YTMCalcType.US_STREET
 
-        def build_par_curve(rate_vec):
+        def build_par_curve(rate_vec: float):
             """Construct BondZeroCurve from par bonds implied by rate_vec."""
             par_bonds = []
             clean_prices = []
@@ -1044,14 +1045,10 @@ class Bond:
                 par_bonds.append(par_bond)
 
             for par_bond, par_rate in zip(par_bonds, rate_vec):
-                clean_price = par_bond.clean_price_from_ytm(
-                    settle_dt, par_rate, us_street
-                )
+                clean_price = par_bond.clean_price_from_ytm(settle_dt, par_rate, us_street)
                 clean_prices.append(clean_price)
 
-            return BondBootstrapDiscountCurve(
-                settle_dt, par_bonds, clean_prices, lin_zero_interp
-            )
+            return BondBootstrapDiscountCurve(settle_dt, par_bonds, clean_prices, lin_zero_interp)
 
         # Base curve and base price: compute once
         par_crv = build_par_curve(base_rates)
@@ -1093,7 +1090,7 @@ class Bond:
         """Calculate the bond convexity from the yield to maturity. This
         function is vectorised with respect to the yield input. This is defined
         as 1/P_D partial 2 P_D / partial dy 2"""
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -1115,7 +1112,7 @@ class Bond:
     ):
         """Calculate the bond clean price from the yield to maturity. This
         function is vectorised with respect to the yield input."""
-        validate_yield(ytm)
+        _validate_yield(ytm)
 
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
@@ -1127,9 +1124,7 @@ class Bond:
 
     ###########################################################################
 
-    def clean_price_from_discount_curve(
-        self, settle_dt: Date, discount_curve: DiscountCurve
-    ):
+    def clean_price_from_discount_curve(self, settle_dt: Date, discount_curve: DiscountCurve):
         """Calculate the clean bond value using some discount curve to
         present-value the bond's cash flows back to the curve anchor date and
         not to the settlement date."""
@@ -1146,13 +1141,11 @@ class Bond:
 
     ###########################################################################
 
-    def dirty_price_from_discount_curve(
-        self, settle_dt: Date, discount_curve: DiscountCurve
-    ):
+    def dirty_price_from_discount_curve(self, settle_dt: Date, discount_curve: DiscountCurve):
         # 1. Validation checks
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
-        if settle_dt < discount_curve.value_dt:
+        if settle_dt < discount_curve.anchor_dt:
             raise FinError("Bond settles before Discount curve date")
         if settle_dt > self.maturity_dt:
             raise FinError("Bond settles after it matures.")
@@ -1211,7 +1204,7 @@ class Bond:
         if settle_dt < self.issue_dt:
             raise FinError("Settlement date falls before issue date")
 
-        clean_prices = vectorise_price(clean_price)
+        clean_prices = _vectorise_price(clean_price)
 
         self.accrued_interest(settle_dt, 1.0)
 
@@ -1244,11 +1237,7 @@ class Bond:
 
     ###########################################################################
 
-    def current_yield(
-        self,
-        settle_dt: Date,
-        clean_price: float | list | np.ndarray
-    ):
+    def current_yield(self, settle_dt: Date, clean_price: float | list | np.ndarray):
         """Calculate the bond's simple yield."""
 
         if settle_dt < self.issue_dt:
@@ -1257,7 +1246,7 @@ class Bond:
         self.accrued_interest(settle_dt, 1.0)
         accrued_amount = self.accrued_int * self.par
 
-        clean_prices = vectorise_price(clean_price)
+        clean_prices = _vectorise_price(clean_price)
         dirty_prices = clean_prices + accrued_amount
         simple_ys = []
 
@@ -1310,9 +1299,7 @@ class Bond:
         # Calculation of the ex-dividend date
         self.ex_div_dt = cal.add_business_days(self._ncd, -1 * self.ex_div_days)
 
-        acc_factor, num, _ = dc.year_frac(
-            self._pcd, settle_dt, self._ncd, self.freq_type
-        )
+        acc_factor, num, _ = dc.year_frac(self._pcd, settle_dt, self._ncd, self.freq_type)
 
         self.alpha = 1.0 - acc_factor * self.freq
 
@@ -1342,6 +1329,8 @@ class Bond:
         """Calculate the par asset swap spread of the bond. The discount curve
         is an Ibor curve that is passed in. This function is vectorised with
         respect to the clean price."""
+
+        check_curve_dt(settle_dt, discount_curve)
 
         clean_price = np.array(clean_price)
         self.accrued_interest(settle_dt, 1.0)
@@ -1395,6 +1384,7 @@ class Bond:
     ):
         """Calculate the z-spread of the bond. The discount curve
         is a Ibor curve that is passed in."""
+        check_curve_dt(settle_dt, discount_curve)
 
         self.accrued_int = self.accrued_interest(settle_dt, 1.0)
         accrued_amount = self.accrued_int * self.par
@@ -1403,9 +1393,7 @@ class Bond:
         def _bond_price_diff_from_z_spread(z_spr_try):
             flat_curve = PWFONFDiscountCurve.flat_curve(settle_dt, z_spr_try)
             bumped_curve = CompositeDiscountCurve([discount_curve, flat_curve])
-            curve_bond_price = self.dirty_price_from_discount_curve(
-                settle_dt, bumped_curve
-            )
+            curve_bond_price = self.dirty_price_from_discount_curve(settle_dt, bumped_curve)
             return curve_bond_price - bond_price
 
         z_spread = optimize.newton(
@@ -1454,17 +1442,17 @@ class Bond:
 
     ###########################################################################
 
-    def dirty_price_from_oas(
-        self, settle_dt: Date, discount_curve: DiscountCurve, oas: float
-    ):
+    def dirty_price_from_oas(self, settle_dt: Date, discount_curve: DiscountCurve, oas: float):
         """Calculate the price of the bond by adding a spread (OAS)
         to the curve."""
+
+        check_curve_dt(settle_dt, discount_curve)
 
         self.accrued_interest(settle_dt, 1.0)
         f = self.freq
         cpn_flow = self.cpn / f
         pv = 0.0
-        time_dc_type = discount_curve.time_dc_type
+        curve_dc_type = discount_curve.curve_dc_type
 
         # We need the settle DF to re-base the price to the settlement date
         df_settle = discount_curve.df(settle_dt)
@@ -1477,7 +1465,7 @@ class Bond:
 
             if cpn_dt > settle_dt:
 
-                t = times_from_dates(settle_dt, pmt_dt, time_dc_type)
+                t = times_from_dates(settle_dt, pmt_dt, curve_dc_type)
                 t = np.maximum(t, G_SMALL)
 
                 # Get base discount factor from curve
@@ -1512,6 +1500,8 @@ class Bond:
     ):
         """Return OAS for bullet bond given settlement date, clean bond price
         and the discount relative to which the spread is to be computed."""
+
+        check_curve_dt(settle_dt, discount_curve)
 
         if isinstance(clean_price, float) or isinstance(clean_price, np.float64):
             clean_prices = np.array([clean_price])
@@ -1566,6 +1556,9 @@ class Bond:
         payment times. A finer discretization may handle the time value with
         more accuracy. I reduce any error by averaging period start and period
         end payment present values."""
+
+        check_curve_dt(settle_dt, discount_curve)
+        check_curve_dt(settle_dt, survival_curve)
 
         f = self.freq
         cpn_flow = self.cpn / f
@@ -1631,13 +1624,15 @@ class Bond:
         The survival curve treats the coupons as zero recovery payments while
         the recovery fraction of the par amount is paid at default."""
 
-        self.accrued_interest(settle_dt, 1.0)
+        check_curve_dt(settle_dt, discount_curve)
+        check_curve_dt(settle_dt, survival_curve)
 
         dirty_price = self.dirty_price_from_survival_curve(
-            settle_dt, discount_curve, survival_curve, recovery_rate
-        )
+            settle_dt, discount_curve, survival_curve, recovery_rate)
 
-        clean_price = dirty_price - self.accrued_int
+        accrued = self.accrued_interest(settle_dt, self.par)
+        clean_price = dirty_price - accrued
+        return clean_price
         return clean_price
 
     ###########################################################################
@@ -1664,9 +1659,7 @@ class Bond:
 
         # The coupon or par payments on buying date belong to the buyer. The
         # coupon or par payments on selling date are given to the new buyer.
-        dts_cfs = [
-            (d, c * self.par) for (d, c) in dts_cfs if (d >= begin_dt) and (d < end_dt)
-        ]
+        dts_cfs = [(d, c * self.par) for (d, c) in dts_cfs if (d >= begin_dt) and (d < end_dt)]
 
         dts_cfs.append((begin_dt, -buy_price))
         dts_cfs.append((end_dt, sell_price))
@@ -1913,6 +1906,86 @@ class Bond:
 
         print(flow_str)
         return
+
+    ###########################################################################
+
+    def payments_to_latex(
+        self,
+        settle_dt: Date,
+        filename: str,
+        face: float = 100,
+    ):
+        """Write the bond payment schedule as a LaTeX table."""
+
+        # Update alpha and ex-dividend date
+        self.accrued_interest(settle_dt, 1.0)
+
+        n_flows = len(self.cpn_dts)
+
+        rows = []
+
+        # Settlement row
+        rows.append(
+            f"{settle_dt} & & SETTLEMENT & \\\\"
+        )
+
+        # Find first future coupon
+        n_start = -1
+        for i in range(n_flows):
+            if self.cpn_dts[i] > settle_dt:
+                n_start = i
+                break
+
+        if n_start == -1:
+            rows.append(
+                r"\multicolumn{4}{c}{Bond has matured.} \\"
+            )
+        else:
+            # Ex-dividend payment
+            if settle_dt >= self.ex_div_dt:
+                cpn_dt = self.cpn_dts[n_start]
+                pmt_dt = self.payment_dts[n_start]
+
+                rows.append(
+                    f"{cpn_dt} & {pmt_dt} & EX-DIV & 0.00 \\\\"
+                )
+                n_start += 1
+
+            # Remaining payments
+            for i in range(n_start, n_flows):
+                cpn_dt = self.cpn_dts[i]
+                pmt_dt = self.payment_dts[i]
+
+                flow = self.flow_amounts[i] * face
+
+                status = "UNCHANGED"
+
+                if cpn_dt != pmt_dt:
+                    status = "HOLIDAY ROLL"
+
+                if cpn_dt == self.maturity_dt:
+                    status = "MATURITY"
+
+                if i == n_flows - 1:
+                    flow += face
+
+                rows.append(
+                    f"{cpn_dt} & {pmt_dt} & {status} & {flow:.2f} \\\\"
+                )
+
+        latex = "\n".join([
+            r"\begin{tabular}{llll}",
+            r"\hline",
+            r"Coupon Date & Payment Date & Status & Amount \\",
+            r"\hline",
+            *rows,
+            r"\hline",
+            r"\end{tabular}",
+        ])
+
+        print(latex)
+        # with open(filename, "w", encoding="utf-8") as f:
+        #     f.write(latex + "\n")
 
     ###########################################################################
 

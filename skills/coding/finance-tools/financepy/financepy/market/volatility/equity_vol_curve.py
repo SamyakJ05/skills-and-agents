@@ -14,9 +14,9 @@ from ...utils.error import FinError
 from ...utils.math import test_monotonicity
 from ...models.option_implied_dbn import option_implied_dbn
 
-from ...models.black_scholes_analytic import fwd as bsa_fwd
-from ...models.black_scholes_analytic import delta as bsa_delta
-from ...models.black_scholes_analytic import vega as bsa_vega
+from ...models.bs_european_analytic import fwd as bsa_fwd
+from ...models.bs_european_analytic import delta as bsa_delta
+from ...models.bs_european_analytic import vega as bsa_vega
 
 ########################################################################################
 
@@ -54,23 +54,12 @@ class EquityVolCurveDeltaTypes(Enum):
 
 
 class EquityVolCurve:
-    """Manage a volatility smile/skew to a single maturity."""
 
-    ####################################################################################
-
-    def __init__(
-        self,
-        strikes: np.ndarray,
-        volatilities: np.ndarray,
-        s: float,
-        t_exp: float,
-        r: float,
-        q: float,
-        interp: EquityVolCurveInterpTypes = (EquityVolCurveInterpTypes.CUBIC_SPLINE),
-        extrap: EquityVolCurveExtrapTypes = (EquityVolCurveExtrapTypes.TANGENT),
-        smoothing: float = 1.0e-4,
-        derivative_bump: float = 1.0e-4,
-    ) -> None:
+    def __init__(self, strikes: np.ndarray, volatilities: np.ndarray,
+                 s: float, t_exp: float, r: float, q: float,
+                 interp: EquityVolCurveInterpTypes = (EquityVolCurveInterpTypes.CUBIC_SPLINE),
+                 extrap: EquityVolCurveExtrapTypes = (EquityVolCurveExtrapTypes.TANGENT),
+                 smoothing: float = 1.0e-4, derivative_bump: float = 1.0e-4) -> None:
 
         strikes = np.asarray(
             strikes,
@@ -339,6 +328,7 @@ class EquityVolCurve:
             raise FinError("Invalid interpolated volatility.")
 
         if np.any(vol <= 0.0):
+            print(vol)
             raise FinError("Non-positive volatility. Not permitted.")
 
         if scalar:

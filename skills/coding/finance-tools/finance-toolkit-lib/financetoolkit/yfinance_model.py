@@ -3,21 +3,25 @@
 __docformat__ = "google"
 
 import warnings
-from datetime import datetime, timedelta
-from http.client import RemoteDisconnected
-from urllib.error import HTTPError, URLError
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
+import yfinance.exceptions
 
 from financetoolkit import helpers
 from financetoolkit.cache import policy_model
 from financetoolkit.cache.cache_controller import get_active_cache
-from financetoolkit.utilities import logger_model
+from financetoolkit.currencies_model import to_yahoo_finance_symbol
+from financetoolkit.utilities import error_model, logger_model
 from financetoolkit.utilities.requests_model import get_request
 
 logger = logger_model.get_logger()
+
+# The raw name of the row holding each fiscal period's last day, mapped to Period End Date by statistics_yf.csv as FinancialModelingPrep's periodEndDate is by statistics.csv.  # noqa: E501
+PERIOD_END_DATE_ITEM = "periodEndDate"
 
 # The reporting currency of a company changes almost never, so it is resolved once per ticker per process rather than on every statement request.  # noqa: E501
 REPORTED_CURRENCY_CACHE: dict[str, str] = {}
@@ -62,7 +66,7 @@ def get_financial_statement(
         )
 
     # Create a ticker object from yfinance
-    ticker_info = yf.Ticker(ticker)
+    ticker_info = yf.Ticker(to_yahoo_finance_symbol(ticker))
 
     # Get the requested financial statement
     try:
@@ -80,21 +84,24 @@ def get_financial_statement(
                 "Please choose either 'balance', 'income', or "
                 "cashflow' for the statement parameter."
             )
-    except (
-        HTTPError,
-        URLError,
-        RemoteDisconnected,
-        IndexError,
-        AttributeError,
-    ):
+    except (OSError, IndexError, AttributeError):
+        # OSError covers the network errors of both urllib and curl_cffi, which yfinance
+        # uses in recent versions, such as a timeout or a refused connection.
+        error_model.report_request_failure()
         return pd.DataFrame()
     except yf.exceptions.YFRateLimitError:
+        error_model.report_request_failure()
         error_code = (
             "YFINANCE RATE LIMIT REACHED FALLBACK"
             if fallback
             else "YFINANCE RATE LIMIT REACHED"
         )
         return pd.DataFrame(columns=[error_code])
+
+    if not isinstance(financial_statement, pd.DataFrame):
+        # yfinance only hands back a dict when asked with as_dict=True, which never
+        # happens here; treating anything else as "no data" keeps the fallback path.
+        return pd.DataFrame()
 
     if financial_statement.empty:
         error_code = (
@@ -104,12 +111,19 @@ def get_financial_statement(
         )
         return pd.DataFrame(columns=[error_code])
 
+    period_end_dates = pd.DatetimeIndex(financial_statement.columns)
+
     # yfinance returns dates as columns and items as rows; convert to periods. A fiscal period is labelled with the calendar period holding most of it, at both frequencies and identically to the FinancialModelingPrep path.  # noqa: E501
     financial_statement.columns = helpers.convert_period_end_dates_to_calendar_periods(
-        period_end_dates=pd.DatetimeIndex(financial_statement.columns),
+        period_end_dates=period_end_dates,
         quarter=quarter,
         ticker=ticker,
         fiscal_year_adjustments=fiscal_year_adjustments,
+    )
+
+    # The label above is a calendar period, so the date Yahoo Finance reports, the actual last day of each fiscal period, is kept as a row (picked up as the Period End Date statistic by get_statistics_statement): daily ratios apply a period's figures from that day on and currency translation takes its closing and average rates from the fiscal period it ends. Added before the duplicates are dropped so the date stays with the period that is kept.  # noqa: E501
+    financial_statement.loc[PERIOD_END_DATE_ITEM] = period_end_dates.strftime(
+        "%Y-%m-%d"
     )
 
     if financial_statement.columns.duplicated().any():
@@ -119,7 +133,7 @@ def get_financial_statement(
 
     # Left as NaN, not filled with 0, matching the Toolkit-wide convention for unreported line items.
     if financial_statement.isna().to_numpy().any():
-        financial_statement = financial_statement.infer_objects(copy=False)
+        financial_statement = financial_statement.infer_objects()
 
     return financial_statement
 
@@ -127,42 +141,69 @@ def get_financial_statement(
 def get_statistics_statement(
     ticker: str,
     periods: pd.Index,
+    financial_statement: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Builds the statistics statement for a Yahoo Finance sourced ticker, mirroring the
     statistics that FinancialModelingPrep returns alongside its financial statements.
 
-    The only statistic Yahoo Finance publishes that the Toolkit depends on is the
-    currency the financial statements are reported in, exposed as ``financialCurrency``
-    on the quote summary. Without it a Yahoo sourced ticker has no `Reported Currency`,
-    which is what the currency conversion compares against the currency the instrument
-    trades in, so those tickers were never converted at all and their statements were
-    left in a different currency from their own price history.
+    Two statistics Yahoo Finance publishes are needed by the Toolkit:
 
-    The reporting currency is a property of the company rather than of a period, so the
-    same value is repeated across every period, matching the shape FinancialModelingPrep
-    returns.
+        - The currency the financial statements are reported in, exposed as
+          ``financialCurrency`` on the quote summary. It is what the currency conversion
+          compares against the currency the instrument trades in; without it a Yahoo
+          sourced ticker's statements would stay in a different currency from its own
+          price history. It is a property of the company rather than of a period, so the
+          same value is repeated across every period, matching the shape
+          FinancialModelingPrep returns.
+        - The last day of each fiscal period (``periodEndDate``, the Period End Date), the
+          column date Yahoo Finance reports before get_financial_statement relabels it to a
+          calendar period. Apple's fiscal year labelled 2023 ends on 30 September 2023,
+          which is the day from which daily ratios apply its figures and over which
+          currency translation takes its closing and average rates. It is read from the
+          ``periodEndDate`` row get_financial_statement adds to the statement; when the
+          statement does not hold it (such as a statement cached without it), the row is
+          left out and the Toolkit falls back to the latest date the period can end on.
 
     Args:
         ticker (str): the ticker to retrieve the statistics for.
         periods (pd.Index): the reporting periods to report the statistics against,
             normally the columns of the financial statement of the same ticker.
+        financial_statement (pd.DataFrame | None, optional): the financial statement as
+            returned by get_financial_statement, whose ``periodEndDate`` row holds the
+            fiscal period end dates. Defaults to None, which leaves the Period End Date out.
 
     Returns:
         pd.DataFrame: A DataFrame with the Yahoo Finance statistics names as index and
-        the given periods as columns. Empty when Yahoo Finance does not report a
-        reporting currency for the ticker.
+        the given periods as columns. Empty when Yahoo Finance reports neither a
+        reporting currency nor period end dates for the ticker.
     """
-    reported_currency = get_reported_currency(ticker)
-
-    if not reported_currency or len(periods) == 0:
+    if len(periods) == 0:
         return pd.DataFrame()
 
-    return pd.DataFrame(
-        [[reported_currency] * len(periods)],
-        index=["financialCurrency"],
-        columns=periods,
-    )
+    statistics = {}
+
+    reported_currency = get_reported_currency(ticker)
+
+    if reported_currency:
+        statistics["financialCurrency"] = pd.Series(
+            [reported_currency] * len(periods), index=periods, dtype=object
+        )
+
+    if (
+        financial_statement is not None
+        and PERIOD_END_DATE_ITEM in financial_statement.index
+    ):
+        statistics[PERIOD_END_DATE_ITEM] = (
+            financial_statement.loc[PERIOD_END_DATE_ITEM]
+            .reindex(periods)
+            .astype(object)
+        )
+
+    if not statistics:
+        return pd.DataFrame()
+
+    return pd.DataFrame(statistics).T.reindex(columns=periods)
 
 
 def get_reported_currency(ticker: str) -> str:
@@ -199,18 +240,17 @@ def get_reported_currency(ticker: str) -> str:
             return cached_currency
 
     try:
-        information = yf.Ticker(ticker).get_info() or {}
+        information = yf.Ticker(to_yahoo_finance_symbol(ticker)).get_info() or {}
     except (
-        HTTPError,
-        URLError,
-        RemoteDisconnected,
+        OSError,
         IndexError,
         AttributeError,
         KeyError,
         TypeError,
         ValueError,
-        yf.exceptions.YFRateLimitError,
+        yf.exceptions.YFException,
     ):
+        error_model.report_request_failure()
         return ""
 
     # financialCurrency is the statement currency. currency is the trading currency and is only a fallback, since for most listings the two are in fact the same.  # noqa: E501
@@ -298,7 +338,7 @@ def get_historical_data(
         # auto_adjust=False matches FMP (True made Close disagree by the dividend history, 1.8% median, AAPL 2022-2023); repair is disabled for synthetic instruments since yfinance's split-repair misfires on them (^IRX 100x, CL=F 10,000x after oil went negative).  # noqa: E501
         repair_splits = not (ticker.startswith("^") or "=" in ticker)
 
-        historical_data = yf.Ticker(ticker).history(
+        historical_data = yf.Ticker(to_yahoo_finance_symbol(ticker)).history(
             start=start_date_string,
             end=end_date_string,
             interval=interval,
@@ -315,13 +355,22 @@ def get_historical_data(
                 :, "Close"
             ].to_numpy()
 
-    except (HTTPError, URLError, RemoteDisconnected, IndexError):
+    except (OSError, IndexError):
+        error_model.report_request_failure()
         return pd.DataFrame()
     except yf.exceptions.YFRateLimitError:
+        error_model.report_request_failure()
         error_code = "YFINANCE RATE LIMIT REACHED" + (" FALLBACK" if fallback else "")
         return pd.DataFrame(columns=[error_code])
+    except yf.exceptions.YFException:
+        # Such as a delisted ticker or one without prices in the range.
+        return pd.DataFrame()
 
-    if not historical_data.empty and historical_data.loc[start:end].empty:
+    if historical_data.empty:
+        # No prices in the range, such as before the listing.
+        return pd.DataFrame()
+
+    if historical_data.loc[start:end].empty:
         logger.warning(
             "The given start and end date result in no data found for %s", ticker
         )
@@ -335,9 +384,9 @@ def get_historical_data(
 
     if divide_ohlc_by:
         # NaN divided by divide_ohlc_by is fine, so those warnings are ignored.
-        np.seterr(divide="ignore", invalid="ignore")
         # In case tickers are presented in percentages or similar
-        historical_data = historical_data.div(divide_ohlc_by)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            historical_data = historical_data.div(divide_ohlc_by)
 
     historical_data = historical_data.loc[
         ~historical_data.index.duplicated(keep="first")
@@ -386,9 +435,6 @@ def get_historical_statistics(ticker: str) -> pd.Series:
         - Timezone: The timezone the instrument is traded in.
         - Exchange Timezone Name: The name of the timezone the instrument is traded in.
 
-    Args:
-        ticker (str): the ticker to retrieve statistics for.
-
     These describe the instrument itself (its currency, exchange and listing date)
     rather than its price, so they change very rarely and are cached per ticker.
 
@@ -396,7 +442,7 @@ def get_historical_statistics(ticker: str) -> pd.Series:
         ticker (str): the ticker to retrieve statistics for.
 
     Returns:
-        pd.Series: A Sries containing the statistics for the given ticker.
+        pd.Series: A Series containing the statistics for the given ticker.
     """
     cache = get_active_cache()
 
@@ -410,10 +456,18 @@ def get_historical_statistics(ticker: str) -> pd.Series:
         if cached_statistics is not None:
             return cached_statistics
 
-    response = get_request(
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=None",
-        timeout=60,
-    )
+    try:
+        response = get_request(
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{to_yahoo_finance_symbol(ticker)}?interval=1d&range=None",
+            timeout=60,
+        )
+    except requests.exceptions.RequestException:
+        # Yahoo Finance answers 404 for a symbol it does not know, such as the
+        # "Portfolio" a Portfolio's Toolkit includes, which has no statistics. A
+        # timeout is reported the same way, so one slow ticker does not fail the rest.
+        error_model.report_request_failure()
+        return pd.Series()
 
     if response.status_code == 200:  # noqa
         data = response.json()
@@ -421,16 +475,20 @@ def get_historical_statistics(ticker: str) -> pd.Series:
         try:
             statistics = data["chart"]["result"][0]["meta"]
 
+            # The dates are the exchange's calendar dates: a timestamp read in the
+            # machine's own timezone would move a day for users east or west of it.
+            exchange_offset = timedelta(seconds=statistics.get("gmtoffset") or 0)
+
             for timestamp_data in ["firstTradeDate", "regularMarketTime"]:
                 if timestamp_data in statistics and statistics[timestamp_data]:
                     timestamp = (
-                        datetime.fromtimestamp(0)
-                        + timedelta(seconds=statistics[timestamp_data])
+                        datetime.fromtimestamp(statistics[timestamp_data], tz=UTC)
+                        + exchange_offset
                     ).strftime("%Y-%m-%d")
                     statistics[timestamp_data] = timestamp
 
         except (KeyError, ValueError):
-            return pd.DataFrame()
+            return pd.Series()
 
         columns = {
             "currency": "Currency",
@@ -460,4 +518,4 @@ def get_historical_statistics(ticker: str) -> pd.Series:
 
         return stats_df
 
-    return pd.DataFrame()
+    return pd.Series()

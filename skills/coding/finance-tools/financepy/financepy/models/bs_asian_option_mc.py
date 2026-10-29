@@ -1,0 +1,597 @@
+# Copyright (C) 2018, 2019, 2020 Dominic O'Kane
+
+import numpy as np
+from numba import njit
+
+from ..utils.error import FinError
+from ..utils.math import covar
+from ..utils.stats import std_err
+from ..utils.global_types import OptionTypes
+
+
+error_str = "In averaging period so need to enter accrued average."
+
+
+@njit(cache=True)
+def _validate_asian_mc_inputs(
+    t_avg: float,
+    t_exp: float,
+    k: float,
+    num_obs_per_year: int,
+    stock_price: float,
+    volatility: float,
+    num_path_pairs: int,
+) -> None:
+
+    if t_exp < 0.0:
+        raise FinError("Time to expiry must be positive.")
+
+    if t_avg >= t_exp:
+        raise FinError("Averaging start time t0 must be less than expiry t.")
+
+    if k < 0.0:
+        raise FinError("Strike must be non-negative.")
+
+    if num_obs_per_year <= 0:
+        raise FinError("Number of observations per year must be positive.")
+
+    if stock_price <= 0.0:
+        raise FinError("Stock price must be positive.")
+
+    if volatility < 0.0:
+        raise FinError("Volatility must be non-negative.")
+
+    if num_path_pairs < 2:
+        raise FinError("Number of path pairs must be 2 or more.")
+
+
+################################################################################
+
+@njit
+def _asian_payoff(
+    average,
+    k,
+    opt_type_value,
+):
+    """Return the payoff of an Asian option."""
+
+    if opt_type_value == OptionTypes.EUROPEAN_CALL.value:
+        return max(average - k, 0.0)
+
+    elif opt_type_value == OptionTypes.EUROPEAN_PUT.value:
+        return max(k - average, 0.0)
+
+    else:
+        raise FinError(
+            "Unknown OPTION_TYPE " + str(opt_type_value)
+        )
+
+################################################################################
+
+
+@njit(cache=True, fastmath=True, parallel=False)
+def asian_value_mc_numba(
+    t_avg: float,
+    t_exp: float,
+    k: float,
+    num_obs_per_year: int,
+    opt_type_value: int,
+    stock_price: float,
+    interest_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    num_paths_over_two: int,
+    seed: int,
+    accrued_average: float,
+) -> tuple[float, float]:
+
+    if opt_type_value not in [
+        OptionTypes.EUROPEAN_CALL.value,
+        OptionTypes.EUROPEAN_PUT.value,
+    ]:
+        raise FinError("Invalid Option Type: Must be EUROPEAN call or put")
+
+    tau = t_exp - t_avg
+
+    _validate_asian_mc_inputs(
+        t_avg,
+        t_exp,
+        k,
+        num_obs_per_year,
+        stock_price,
+        volatility,
+        num_paths_over_two,
+    )
+
+    if t_exp == 0.0:
+
+        if accrued_average is None:
+            raise FinError(
+                "Accrued average must be supplied at expiry."
+            )
+
+        v = _asian_payoff(
+            accrued_average,
+            k,
+            opt_type_value,
+        )
+
+        e = 0.0
+        return v, e
+
+    # Start pricing here
+    np.random.seed(seed)
+    multiplier = 1.0
+
+    if t_avg < 0.0:
+
+        if accrued_average is None:
+            raise FinError(error_str)
+
+        if accrued_average <= 0.0:
+            raise FinError("Accrued average must be positive.")
+
+        k = (k * tau + accrued_average * t_avg) / t_exp
+        multiplier = t_exp / tau
+        t_avg = 0.0
+
+    averaging_time = t_exp - t_avg
+
+    n = max(
+        1,
+        int(averaging_time * num_obs_per_year + 0.5),
+    )
+
+    dt = averaging_time / n
+
+    r = interest_rate
+    q = dividend_yield
+    mu = r - q
+    v2 = volatility**2
+
+    payoffs = np.empty(num_paths_over_two)
+
+    for ip in range(num_paths_over_two):
+
+        # evolve stock price to start of averaging period
+        g = np.random.normal()
+
+        s_1 = stock_price * np.exp((mu - v2 / 2.0) * t_avg + g * np.sqrt(t_avg) * volatility)
+        s_2 = stock_price * np.exp((mu - v2 / 2.0) * t_avg - g * np.sqrt(t_avg) * volatility)
+
+        # enter averaging period
+        s_1_arithmetic = 0.0
+        s_2_arithmetic = 0.0
+
+        g = np.random.normal(0.0, 1.0, size=n)
+
+        exp_drift = np.exp((mu - v2 / 2.0) * dt)
+
+        for obs in range(0, n):
+
+            s_1 = s_1 * exp_drift * np.exp(+g[obs] * np.sqrt(dt) * volatility)
+            s_2 = s_2 * exp_drift * np.exp(-g[obs] * np.sqrt(dt) * volatility)
+
+            s_1_arithmetic += s_1
+            s_2_arithmetic += s_2
+
+        s_1_arithmetic /= n
+        s_2_arithmetic /= n
+
+        if opt_type_value == OptionTypes.EUROPEAN_CALL.value:
+            payoff_1 = max(s_1_arithmetic - k, 0.0)
+            payoff_2 = max(s_2_arithmetic - k, 0.0)
+        else:
+            payoff_1 = max(k - s_1_arithmetic, 0.0)
+            payoff_2 = max(k - s_2_arithmetic, 0.0)
+
+        payoffs[ip] = (payoff_1 + payoff_2) / 2.0
+
+    discount = multiplier * np.exp(-r * t_exp)
+    value = discount * np.mean(payoffs)
+    error = discount * std_err(payoffs)
+
+    return value, error
+
+
+########################################################################################
+
+
+@njit(cache=True, parallel=False, fastmath=True)
+def asian_value_mc_fast_numba(
+    t_avg: float,
+    t_exp: float,
+    k: float,
+    num_obs_per_year: int,
+    opt_type_value: int,
+    stock_price: float,
+    interest_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    num_paths_over_two: int,
+    seed: int,
+    accrued_average: float,
+) -> tuple[float, float]:
+
+    _validate_asian_mc_inputs(
+        t_avg,
+        t_exp,
+        k,
+        num_obs_per_year,
+        stock_price,
+        volatility,
+        num_paths_over_two,
+    )
+
+    if t_exp == 0.0:
+
+        if accrued_average is None:
+            raise FinError(
+                "Accrued average must be supplied at expiry."
+            )
+
+        v = _asian_payoff(accrued_average, k, opt_type_value,)
+        e = 0.0
+
+        return v, e
+
+    r = interest_rate
+    q = dividend_yield
+    np.random.seed(seed)
+    mu = r - q
+    s0 = stock_price
+
+    v2 = volatility**2
+    num_paths_over_two = int(num_paths_over_two)
+
+    multiplier = 1.0
+    tau = t_exp - t_avg
+
+    if t_avg < 0.0:
+
+        if accrued_average is None:
+            raise FinError(error_str)
+
+        if accrued_average <= 0.0:
+            raise FinError("Accrued average must be positive.")
+
+        # Adjust strike for observations already accrued.
+        k = (k * tau + accrued_average * t_avg) / t_exp
+
+        # Rescale the option value.
+        multiplier = t_exp / tau
+
+        # Remaining averaging period starts now.
+        t_avg = 0.0
+
+    # Number of future observations.
+    averaging_time = t_exp - t_avg
+
+    n = max(
+        1,
+        int(averaging_time * num_obs_per_year + 0.5),
+    )
+
+    # Ensure the final observation is at expiry.
+    dt = averaging_time / n
+
+    gg = np.empty(num_paths_over_two, np.float64)
+
+    for ip in range(0, num_paths_over_two):
+        rv = np.random.normal()
+        gg[ip] = rv
+
+    s_1 = np.empty(num_paths_over_two)
+    s_2 = np.empty(num_paths_over_two)
+
+    exp_drift_t_avg = np.exp((mu - v2 / 2.0) * t_avg)
+
+    for ip in range(0, num_paths_over_two):
+        s_1[ip] = s0 * exp_drift_t_avg * np.exp(+gg[ip] * np.sqrt(t_avg) * volatility)
+        s_2[ip] = s0 * exp_drift_t_avg * np.exp(-gg[ip] * np.sqrt(t_avg) * volatility)
+
+    s_1_arithmetic = np.zeros(num_paths_over_two)
+    s_2_arithmetic = np.zeros(num_paths_over_two)
+    sigma_root_dt = volatility * np.sqrt(dt)
+
+    exp_drift_dt = np.exp((mu - v2 / 2.0) * dt)
+
+    for _ in range(0, n):
+
+        g = np.random.normal(0.0, 1.0, size=num_paths_over_two)
+
+        for ip in range(0, num_paths_over_two):
+            s_1[ip] = s_1[ip] * exp_drift_dt * np.exp(+g[ip] * sigma_root_dt)
+            s_2[ip] = s_2[ip] * exp_drift_dt * np.exp(-g[ip] * sigma_root_dt)
+
+        for ip in range(0, num_paths_over_two):
+            s_1_arithmetic[ip] += s_1[ip] / n
+            s_2_arithmetic[ip] += s_2[ip] / n
+
+    if opt_type_value == OptionTypes.EUROPEAN_CALL.value:
+        payoff_a_1 = np.maximum(s_1_arithmetic - k, 0.0)
+        payoff_a_2 = np.maximum(s_2_arithmetic - k, 0.0)
+    else:
+        payoff_a_1 = np.maximum(k - s_1_arithmetic, 0.0)
+        payoff_a_2 = np.maximum(k - s_2_arithmetic, 0.0)
+
+    payoff = (payoff_a_1 + payoff_a_2) / 2.0
+    discount = multiplier * np.exp(-r * t_exp)
+    value = discount * np.mean(payoff)
+    error = discount * std_err(payoff)
+
+    return value, error
+
+########################################################################################
+
+
+@njit(cache=True, parallel=False, fastmath=True)
+def asian_value_mc_fast_cv_numba(
+    t_avg: float,
+    t_exp: float,
+    k: float,
+    num_obs_per_year: int,
+    opt_type_value: int,
+    stock_price: float,
+    interest_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    num_paths_over_two: int,
+    seed: int,
+    accrued_average: float,
+    v_g_exact: float,
+) -> tuple[float, float]:
+
+    _validate_asian_mc_inputs(
+        t_avg,
+        t_exp,
+        k,
+        num_obs_per_year,
+        stock_price,
+        volatility,
+        num_paths_over_two,
+    )
+
+    if t_exp == 0.0:
+
+        if accrued_average is None:
+            raise FinError(
+                "Accrued average must be supplied at expiry."
+            )
+
+        v = _asian_payoff(accrued_average, k, opt_type_value,)
+        e = 0.0
+
+        return v, e
+
+    np.random.seed(seed)
+
+    mu = interest_rate - dividend_yield
+    v2 = volatility**2
+    r = interest_rate
+    tau = t_exp - t_avg
+
+    multiplier = 1.0
+
+    if t_avg < 0.0:  # we are in the averaging period
+
+        if accrued_average is None:
+            raise FinError(error_str)
+
+        if accrued_average <= 0.0:
+            raise FinError("Accrued average must be positive.")
+
+        # Adjust strike for the accrued part of the average.
+        k = (k * tau + accrued_average * t_avg) / t_exp
+
+        # Rescale the number of options.
+        multiplier = t_exp / tau
+
+        # Remaining averaging period starts now.
+        t_avg = 0.0
+
+    # Number of future observations over the remaining averaging period.
+    averaging_time = t_exp - t_avg
+
+    n = max(
+        1,
+        int(averaging_time * num_obs_per_year + 0.5),
+    )
+
+    # Make the final observation fall exactly at expiry.
+    dt = averaging_time / n
+
+    # evolve stock price to start of averaging period
+    g = np.random.normal(0.0, 1.0, size=num_paths_over_two)
+
+    s_1 = np.empty(num_paths_over_two)
+    s_2 = np.empty(num_paths_over_two)
+
+    sigma_root_t0 = np.sqrt(t_avg) * volatility
+    s_exp_drift_t0 = stock_price * np.exp((mu - v2 / 2.0) * t_avg)
+
+    for ip in range(0, num_paths_over_two):
+        s_1[ip] = s_exp_drift_t0 * np.exp(+g[ip] * sigma_root_t0)
+        s_2[ip] = s_exp_drift_t0 * np.exp(-g[ip] * sigma_root_t0)
+
+    s_1_arithmetic = np.zeros(num_paths_over_two)
+    s_2_arithmetic = np.zeros(num_paths_over_two)
+    ln_s_1_geometric = np.zeros(num_paths_over_two)
+    ln_s_2_geometric = np.zeros(num_paths_over_two)
+
+    sigma_root_dt = np.sqrt(dt) * volatility
+    exp_drift_dt = np.exp((mu - v2 / 2.0) * dt)
+
+    for _ in range(0, n):
+
+        g = np.random.normal(0.0, 1.0, size=num_paths_over_two)
+
+        for ip in range(0, num_paths_over_two):
+            s_1[ip] = s_1[ip] * exp_drift_dt * np.exp(+g[ip] * sigma_root_dt)
+            s_2[ip] = s_2[ip] * exp_drift_dt * np.exp(-g[ip] * sigma_root_dt)
+
+        for ip in range(num_paths_over_two):
+            s_1_arithmetic[ip] += s_1[ip]
+            s_2_arithmetic[ip] += s_2[ip]
+            ln_s_1_geometric[ip] += np.log(s_1[ip])
+            ln_s_2_geometric[ip] += np.log(s_2[ip])
+
+    s_1_geometric = np.empty(num_paths_over_two)
+    s_2_geometric = np.empty(num_paths_over_two)
+
+    for ip in range(num_paths_over_two):
+        s_1_arithmetic[ip] /= n
+        s_1_geometric[ip] = np.exp(ln_s_1_geometric[ip] / n)
+        s_2_arithmetic[ip] /= n
+        s_2_geometric[ip] = np.exp(ln_s_2_geometric[ip] / n)
+
+    if opt_type_value == OptionTypes.EUROPEAN_CALL.value:
+        payoff_a_1 = np.maximum(s_1_arithmetic - k, 0.0)
+        payoff_g_1 = np.maximum(s_1_geometric - k, 0.0)
+        payoff_a_2 = np.maximum(s_2_arithmetic - k, 0.0)
+        payoff_g_2 = np.maximum(s_2_geometric - k, 0.0)
+    else:
+        payoff_a_1 = np.maximum(k - s_1_arithmetic, 0.0)
+        payoff_g_1 = np.maximum(k - s_1_geometric, 0.0)
+        payoff_a_2 = np.maximum(k - s_2_arithmetic, 0.0)
+        payoff_g_2 = np.maximum(k - s_2_geometric, 0.0)
+
+    payoff_a_pair = (payoff_a_1 + payoff_a_2) / 2.0
+    payoff_g_pair = (payoff_g_1 + payoff_g_2) / 2.0
+
+    # Now we do the control variate adjustment
+    m = covar(payoff_a_pair, payoff_g_pair)
+
+    if np.abs(m[1][1]) < 1e-10:
+        lam = 0.0
+    else:
+        lam = m[0][1] / m[1][1]
+
+    discount = multiplier * np.exp(-r * t_exp)
+
+    payoff_g_exact = v_g_exact / discount
+
+    payoff_cv = (
+        payoff_a_pair
+        + lam * (payoff_g_exact - payoff_g_pair)
+    )
+
+    value = discount * np.mean(payoff_cv)
+    error = discount * std_err(payoff_cv)
+
+    return value, error
+
+########################################################################################
+
+
+def asian_value_mc_sobol(
+    t_avg: float,
+    t_exp: float,
+    k: float,
+    num_obs_per_year: int,
+    opt_type_value: int,
+    stock_price: float,
+    interest_rate: float,
+    dividend_yield: float,
+    volatility: float,
+    num_paths: int,
+    seed: int,
+    accrued_average: float = None,
+    num_scrambles: int = 8,
+) -> tuple[float, float]:
+    """Price an arithmetic Asian option using scrambled Sobol paths.
+
+    num_paths counts *all* simulated paths, including the antithetic paths
+    and all independent scrambles. The number of Sobol path pairs within
+    each scramble must be a power of two. The reported error is the
+    standard error across independent randomized-QMC replicate prices,
+    not an IID standard error calculated from individual Sobol paths.
+    """
+    from scipy.special import ndtri
+    from scipy.stats import qmc
+
+    if opt_type_value not in (
+        OptionTypes.EUROPEAN_CALL.value,
+        OptionTypes.EUROPEAN_PUT.value,
+    ):
+        raise FinError("Invalid Option Type: Must be EUROPEAN call or put")
+
+    if t_exp < 0.0 or t_avg >= t_exp:
+        raise FinError("Averaging start must be before a positive expiry.")
+    if k < 0.0 or stock_price <= 0.0 or volatility < 0.0:
+        raise FinError("Invalid strike, spot or volatility.")
+    if num_obs_per_year <= 0:
+        raise FinError("Number of observations per year must be positive.")
+    if not isinstance(num_scrambles, (int, np.integer)) or num_scrambles < 2:
+        raise FinError("At least two independent Sobol scrambles are required.")
+    if not isinstance(num_paths, (int, np.integer)):
+        raise FinError("Number of paths must be an integer.")
+
+    divisor = 2 * num_scrambles
+    if num_paths % divisor != 0:
+        raise FinError("num_paths must be 2 * num_scrambles * a power of two.")
+    pairs_per_scramble = num_paths // divisor
+    if pairs_per_scramble < 2 or pairs_per_scramble & (pairs_per_scramble - 1):
+        raise FinError("Sobol path pairs per scramble must be a power of two.")
+
+    tau = t_exp - t_avg
+    multiplier = 1.0
+    if t_avg < 0.0:
+        if accrued_average is None or accrued_average <= 0.0:
+            raise FinError(error_str)
+        k = (k * tau + accrued_average * t_avg) / t_exp
+        multiplier = t_exp / tau
+        t_avg = 0.0
+
+    averaging_time = t_exp - t_avg
+    n = max(1, int(averaging_time * num_obs_per_year + 0.5))
+    dt = averaging_time / n
+    drift = interest_rate - dividend_yield - 0.5 * volatility**2
+    step_drift = drift * dt
+    step_vol = volatility * np.sqrt(dt)
+    start_drift = drift * t_avg
+    start_vol = volatility * np.sqrt(t_avg)
+    first_step = 1 if t_avg > 0.0 else 0
+    dimension = n + first_step
+
+    # Each independent scramble produces one replicated QMC price.
+    replicate_prices = np.empty(num_scrambles)
+    seeds = np.random.SeedSequence(seed).spawn(num_scrambles)
+    m = pairs_per_scramble.bit_length() - 1
+
+    for rep in range(num_scrambles):
+        points = qmc.Sobol(d=dimension, scramble=True, seed=np.random.default_rng(seeds[rep])).random_base2(m)
+        # Avoid +/-inf in the Gaussian inverse transform at exact endpoints.
+        points = np.clip(points, np.finfo(float).tiny, 1.0 - np.finfo(float).eps)
+        normal = ndtri(points)
+
+        if first_step:
+            spot = stock_price * np.exp(start_drift)
+            stock_plus = spot * np.exp(start_vol * normal[:, 0])
+            stock_minus = spot * np.exp(-start_vol * normal[:, 0])
+        else:
+            stock_plus = np.full(pairs_per_scramble, stock_price, dtype=float)
+            stock_minus = stock_plus.copy()
+
+        average_plus = np.zeros(pairs_per_scramble)
+        average_minus = np.zeros(pairs_per_scramble)
+        for obs in range(n):
+            z = normal[:, obs + first_step]
+            stock_plus *= np.exp(step_drift + step_vol * z)
+            stock_minus *= np.exp(step_drift - step_vol * z)
+            average_plus += stock_plus / n
+            average_minus += stock_minus / n
+
+        if opt_type_value == OptionTypes.EUROPEAN_CALL.value:
+            payoff_plus = np.maximum(average_plus - k, 0.0)
+            payoff_minus = np.maximum(average_minus - k, 0.0)
+        else:
+            payoff_plus = np.maximum(k - average_plus, 0.0)
+            payoff_minus = np.maximum(k - average_minus, 0.0)
+
+        replicate_prices[rep] = 0.5 * np.mean(payoff_plus + payoff_minus)
+
+    discount = multiplier * np.exp(-interest_rate * t_exp)
+    value = discount * np.mean(replicate_prices)
+    error = discount * np.std(replicate_prices, ddof=1) / np.sqrt(num_scrambles)
+    return value, error

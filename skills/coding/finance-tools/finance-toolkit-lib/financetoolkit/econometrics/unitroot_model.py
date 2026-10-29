@@ -7,16 +7,33 @@ import warnings
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from statsmodels.tsa.adfvalues import mackinnoncrit, mackinnonp
 from statsmodels.tsa.stattools import adfuller, kpss, zivot_andrews
 
 # The conventional 5% significance level used for the boolean "reject" flags.
 SIGNIFICANCE_LEVEL = 0.05
 
-# MacKinnon (1996) asymptotic DF tau values, needed only by Phillips-Perron.
-ADF_CRITICAL_VALUES: dict[str, dict[float, float]] = {
-    "c": {0.01: -3.43, 0.05: -2.86, 0.10: -2.57},
-    "ct": {0.01: -3.96, 0.05: -3.41, 0.10: -3.13},
-}
+
+def default_max_lag(observations: int) -> int:
+    """
+    The largest lag the automatic lag search of a unit root or cointegration test may try.
+
+    statsmodels' default, 12 * (n / 100) ** (1 / 4) (Schwert, 1989), leaves a short sample
+    with more lagged differences than it can estimate: 16 quarterly observations allow 8
+    lags, which leaves the test regression nearly without degrees of freedom and can return
+    a statistic of 0 with a p-value near 1. The search is therefore capped at (n - 5) // 3,
+    which leaves 16 observations 3 lags; from about 35 observations on the cap no longer
+    binds and statsmodels' default applies.
+
+    Args:
+        observations (int): The number of observations in the series.
+
+    Returns:
+        int: The maximum lag.
+    """
+    schwert = int(np.ceil(12 * (observations / 100) ** (1 / 4)))
+
+    return max(0, min(schwert, (observations - 5) // 3))
 
 
 def _newey_west_long_run_variance(residuals: np.ndarray, lags: int) -> float:
@@ -82,7 +99,8 @@ def get_augmented_dickey_fuller(
     Args:
         series (pd.Series): A Series of values (e.g. prices, or a spread between two prices).
         max_lag (int, optional): The maximum number of lagged differences to consider. Defaults to the
-        Schwert (1989) rule of thumb, ceil(12 * (n / 100) ** 0.25).
+        Schwert (1989) rule of thumb, ceil(12 * (n / 100) ** 0.25), capped at (n - 5) // 3 so that
+        short samples keep enough degrees of freedom.
         regression (str, optional): Which deterministic terms to include, one of "n" (none), "c"
         (constant) or "ct" (constant and trend). Defaults to "c".
 
@@ -102,9 +120,21 @@ def get_augmented_dickey_fuller(
     values = series.dropna().to_numpy()
 
     try:
-        adf_statistic, p_value, used_lag, n_observations, critical_values, _ = adfuller(
-            values, maxlag=max_lag, regression=regression, autolag="AIC"
-        )
+        # statsmodels 0.15 announces a switch to a result object in 0.16; the tuple layout used here is still returned until then and passing result_object would fail on 0.14.  # noqa: E501
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="adfuller currently returns", category=FutureWarning
+            )
+            adf_statistic, p_value, used_lag, n_observations, critical_values, _ = (
+                adfuller(
+                    values,
+                    maxlag=(
+                        max_lag if max_lag is not None else default_max_lag(len(values))
+                    ),
+                    regression=regression,
+                    autolag="AIC",
+                )
+            )
     except (ValueError, np.linalg.LinAlgError):
         return pd.Series(
             {
@@ -274,8 +304,9 @@ def get_phillips_perron_test(
     This "Z_t" variant (as opposed to the "Z_rho" variant, which corrects `n * (rho_hat
     - 1)` directly rather than the t-statistic) is implemented here because it is
     asymptotically pivotal to the same Dickey-Fuller tau distribution as the ADF
-    t-statistic, so the same MacKinnon (1996) critical value table `statsmodels`
-    returns for `get_augmented_dickey_fuller` applies directly.
+    t-statistic, so the same MacKinnon response surfaces apply: the finite-sample
+    critical values for `n` observations of MacKinnon (2010) and the approximate p-value
+    of MacKinnon (1994), via `statsmodels.tsa.adfvalues.mackinnoncrit` and `mackinnonp`.
 
     This implementation was cross-checked (matching to 5+ decimal places) against the
     independent `arch.unitroot.PhillipsPerron` reference implementation (with the same
@@ -288,6 +319,10 @@ def get_phillips_perron_test(
 
     - Phillips, P.C.B., & Perron, P. (1988). "Testing for a Unit Root in Time Series
     Regression." Biometrika, 75(2), 335-346.
+    - MacKinnon, J.G. (1994). "Approximate Asymptotic Distribution Functions for Unit-Root
+    and Cointegration Tests." Journal of Business & Economic Statistics, 12(2), 167-176.
+    - MacKinnon, J.G. (2010). "Critical Values for Cointegration Tests." Queen's Economics
+    Department Working Paper No. 1227.
 
     Also known as: PP test, Z_t test.
 
@@ -297,12 +332,14 @@ def get_phillips_perron_test(
         or "ct" (constant and trend). Defaults to "c". "n" (no constant) is not supported, see
         Notes above.
         lags (int, optional): The truncation lag for the Newey-West long-run variance estimate.
-        Defaults to the Schwert (1989) rule of thumb, int(12 * (n / 100) ** 0.25).
+        Defaults to None, meaning the Schwert (1989) rule ceil(12 * (n / 100) ** 0.25) with `n`
+        the length of the series, capped for short samples exactly as the ADF lag search is
+        (see `default_max_lag`).
 
     Returns:
-        pd.Series: The Phillips-Perron Z_t statistic, the truncation lag used, the number of
-        observations used, the 1%/5%/10% critical values, and whether the unit root is rejected
-        at the 5% level.
+        pd.Series: The Phillips-Perron Z_t statistic, its MacKinnon p-value, the truncation lag
+        used, the number of observations used, the finite-sample 1%/5%/10% critical values, and
+        whether the unit root is rejected at the 5% level.
 
     Raises:
         ValueError: If `regression` is not one of "c" or "ct".
@@ -319,7 +356,8 @@ def get_phillips_perron_test(
     n = len(y)
 
     if lags is None:
-        lags = int(12 * (n / 100) ** 0.25)
+        # The same rule as the ADF lag search, so both tests use the same window by default.
+        lags = default_max_lag(len(values))
 
     number_of_parameters = 3 if regression == "ct" else 2
     minimum_usable = lags + number_of_parameters + 3
@@ -328,6 +366,7 @@ def get_phillips_perron_test(
         return pd.Series(
             {
                 "Phillips-Perron Statistic": np.nan,
+                "P-Value": np.nan,
                 "Lags Used": lags,
                 "Observations": n,
                 "Critical Value 1%": np.nan,
@@ -359,17 +398,22 @@ def get_phillips_perron_test(
         n * standard_error_rho
     )
 
-    critical_values = ADF_CRITICAL_VALUES[regression]
+    # Finite-sample critical values for the n regression observations, as arch reports them.
+    critical_value_1, critical_value_5, critical_value_10 = mackinnoncrit(
+        N=1, regression=regression, nobs=n
+    )
+    p_value = float(mackinnonp(z_t_statistic, regression=regression, N=1))
 
     return pd.Series(
         {
             "Phillips-Perron Statistic": z_t_statistic,
+            "P-Value": p_value,
             "Lags Used": lags,
             "Observations": n,
-            "Critical Value 1%": critical_values[0.01],
-            "Critical Value 5%": critical_values[0.05],
-            "Critical Value 10%": critical_values[0.10],
-            "Reject Unit Root (5%)": bool(z_t_statistic < critical_values[0.05]),
+            "Critical Value 1%": critical_value_1,
+            "Critical Value 5%": critical_value_5,
+            "Critical Value 10%": critical_value_10,
+            "Reject Unit Root (5%)": bool(z_t_statistic < critical_value_5),
         }
     )
 
@@ -410,7 +454,7 @@ def get_zivot_andrews_test(
     Args:
         series (pd.Series): A Series of values (e.g. prices, or a spread between two prices).
         max_lag (int, optional): The maximum number of lagged differences to consider. Defaults
-        to `statsmodels`' Schwert (1989) rule of thumb.
+        to the Schwert (1989) rule of thumb, capped at (n - 5) // 3 for short samples.
         regression (str, optional): Which break to allow for, one of "c" (a break in the level/
         intercept), "t" (a break in the trend slope) or "ct" (both). Defaults to "c".
         trim (float, optional): The fraction of observations excluded from the candidate break
@@ -441,7 +485,11 @@ def get_zivot_andrews_test(
 
     try:
         za_statistic, p_value, critical_values, used_lag, break_index = zivot_andrews(
-            values, trim=trim, maxlag=max_lag, regression=regression, autolag="AIC"
+            values,
+            trim=trim,
+            maxlag=max_lag if max_lag is not None else default_max_lag(len(values)),
+            regression=regression,
+            autolag="AIC",
         )
     except (ValueError, IndexError, np.linalg.LinAlgError):
         return pd.Series(

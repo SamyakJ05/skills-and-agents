@@ -13,7 +13,7 @@ from ...utils.frequency import FrequencyTypes
 from ...utils.calendar import CalendarTypes
 from ...utils.calendar import BusDayAdjustTypes, DateGenRuleTypes
 from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.helpers import check_argument_types
 from ...utils.date import Date
 from ...utils.helpers import label_to_string
@@ -23,12 +23,12 @@ from ...models.gauss_copula import default_times_gc
 from ...models.student_t_copula import StudentTCopula
 
 from ...market.curves.interpolator import interpolate, InterpTypes
-
+from ...market.curves.discount_curve import DiscountCurve
 from ...market.curves.cds_curve import CDSCurve
 from ...products.credit.cds import CDS
 
-DIRTY = 0
-CLEAN = 1
+from ...utils.check_values import check_curve_dt
+from ...utils.global_vars import CLEAN
 
 ########################################################################################
 # TODO: Convert functions to use NUMBA!!
@@ -50,7 +50,7 @@ class CDSBasket:
         cal_type: CalendarTypes | list | tuple = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
 
         check_argument_types(self.__init__, locals())
 
@@ -80,9 +80,11 @@ class CDSBasket:
 
     ###########################################################################
 
-    def value_legs_mc_old(
-        self, value_dt, n_to_default, default_times, issuer_curves, libor_curve
-    ):
+    def value_legs_mc_old(self, value_dt: Date,
+                          n_to_default: int,
+                          default_times: np.ndarray,
+                          issuer_curves: list[DiscountCurve],
+                          libor_curve: DiscountCurve):
         """Value the legs of the default basket using Monte Carlo. The default
         times are an input so this valuation is not model dependent."""
 
@@ -103,9 +105,7 @@ class CDSBasket:
             dt1 = payment_dts[i_time]
             accrual_factor = day_count.year_frac(dt0, dt1)[0]
             avg_acc_factor += accrual_factor
-            rpv01_to_times[i_time] = rpv01_to_times[
-                i_time - 1
-            ] + accrual_factor * libor_curve.df_t(t)
+            rpv01_to_times[i_time] = rpv01_to_times[i_time - 1] + accrual_factor * libor_curve.df_t(t)
 
         avg_acc_factor /= num_payments
 
@@ -137,9 +137,7 @@ class CDSBasket:
 
                 num_payment_amounts_index = int(min_tau / avg_acc_factor)
                 rpv01_trial = rpv01_to_times[num_payment_amounts_index]
-                rpv01_trial += (
-                    min_tau - num_payment_amounts_index * avg_acc_factor
-                )
+                rpv01_trial += min_tau - num_payment_amounts_index * avg_acc_factor
 
                 # DETERMINE IDENTITY OF N-TO-DEFAULT CREDIT IF BASKET NOT HOMO
                 asset_index = 0
@@ -161,14 +159,18 @@ class CDSBasket:
             prot += prot_trial
 
         rpv01 = rpv01 / num_trials
+
         prot = prot / num_trials
         return (rpv01, prot)
 
     ####################################################################################
 
-    def value_legs_mc(
-        self, value_dt, n_to_default, default_times, issuer_curves, libor_curve
-    ):
+    def value_legs_mc(self,
+                      value_dt: Date,
+                      n_to_default: int,
+                      default_times: np.ndarray,
+                      issuer_curves: list[DiscountCurve],
+                      libor_curve: DiscountCurve):
         """
         Value the premium PV01 and protection legs of an n-to-default basket via
         Monte Carlo `default_times` is (num_credits x num_trials) of default times
@@ -178,7 +180,7 @@ class CDSBasket:
 
         # TODO: You can do it much faster by vectorizing on trials
 
-        def to_years(dt, value_dt, days_in_year=365.0):
+        def to_years(dt, value_dt: Date, days_in_year=365.0):
             """Convert date difference into year fraction."""
             delta = dt - value_dt
             if hasattr(delta, "days"):  # datetime.timedelta
@@ -196,33 +198,24 @@ class CDSBasket:
         num_payments = len(payment_dts)
         day_count = DayCount(self.accrual_dc_type)
 
-        # First accrual start date (stub handling)
-        accrual_start_dt = getattr(
-            self.cds_contract, "accrual_start_dt", payment_dts[0]
-        )
+        # CDS stores one accrual start per payment period. Use its first date
+        # so the initial stub is included in both scheduled and default accrual.
+        accrual_start_dt = self.cds_contract.accrual_start_dts[0]
 
         # Times in years from value_dt
         pay_times = np.array(
             [to_years(dt, value_dt, G_DAYS_IN_YEAR) for dt in payment_dts],
             dtype=float,
         )
-        accrual_start_time = to_years(
-            accrual_start_dt, value_dt, G_DAYS_IN_YEAR
-        )
+        accrual_start_time = to_years(accrual_start_dt, value_dt, G_DAYS_IN_YEAR)
 
         # Period year-fractions and discount factors
         accrual_factors = np.zeros(num_payments, dtype=float)
-        accrual_factors[0] = day_count.year_frac(
-            accrual_start_dt, payment_dts[0]
-        )[0]
+        accrual_factors[0] = day_count.year_frac(accrual_start_dt, payment_dts[0])[0]
         for i in range(1, num_payments):
-            accrual_factors[i] = day_count.year_frac(
-                payment_dts[i - 1], payment_dts[i]
-            )[0]
+            accrual_factors[i] = day_count.year_frac(payment_dts[i - 1], payment_dts[i])[0]
 
-        df_pay = np.array(
-            [libor_curve.df_t(t) for t in pay_times], dtype=float
-        )
+        df_pay = np.array([libor_curve.df_t(t) for t in pay_times], dtype=float)
 
         # Cumulative PV01 to each payment date
         rpv01_to_times = np.cumsum(accrual_factors * df_pay)
@@ -256,7 +249,8 @@ class CDSBasket:
                     last_start_time = pay_times[pos - 1]
 
                 # partial accrual from last coupon date to default
-                partial_accrual = max(0.0, min_tau - last_start_time)
+                partial_accrual = max(0.0, (min_tau - last_start_time) * G_DAYS_IN_YEAR / 360.0)
+
                 rpv01_trial += partial_accrual * libor_curve.df_t(min_tau)
 
                 # nth defaulter identity
@@ -279,30 +273,36 @@ class CDSBasket:
 
     def value_gaussian_mc(
         self,
-        value_dt,
-        n_to_default,
-        issuer_curves,
-        corr_matrix,
-        libor_curve,
-        num_trials,
-        seed,
+        value_dt: Date,
+        n_to_default: int,
+        issuer_curves: list[DiscountCurve],
+        corr_matrix: np.ndarray,
+        libor_curve: DiscountCurve,
+        num_trials: int,
+        seed: int,
     ):
         """Value the default basket using a Gaussian copula model. This
         depends on the issuer discount and correlation matrix."""
+
+        check_curve_dt(value_dt, libor_curve)
+        check_curve_dt(value_dt, *issuer_curves)
 
         num_credits = len(issuer_curves)
 
         if n_to_default > num_credits or n_to_default < 1:
             raise FinError("n_to_default must be 1 to num_credits")
 
-        default_times = default_times_gc(
-            issuer_curves, corr_matrix, num_trials, seed
-        )
+        default_times = default_times_gc(issuer_curves, corr_matrix, num_trials, seed)
 
-        rpv01, prot_pv = self.value_legs_mc(
-            value_dt, n_to_default, default_times, issuer_curves, libor_curve
-        )
+        rpv01, prot_pv = self.value_legs_mc(value_dt,
+                                            n_to_default,
+                                            default_times,
+                                            issuer_curves,
+                                            libor_curve)
 
+        if rpv01 <= 0.0:
+            raise FinError("Cannot compute basket spread: risky PV01 is non-positive."
+                           )
         spd = prot_pv / rpv01
         value = self.notional * (prot_pv - self.running_cpn * rpv01)
 
@@ -315,16 +315,18 @@ class CDSBasket:
 
     def value_student_t_mc(
         self,
-        value_dt,
-        n_to_default,
-        issuer_curves,
-        corr_matrix,
+        value_dt: Date,
+        n_to_default: int,
+        issuer_curves: list[DiscountCurve],
+        corr_matrix: np.ndarray,
         degrees_of_freedom,
-        libor_curve,
-        num_trials,
-        seed,
+        libor_curve: DiscountCurve,
+        num_trials: int,
+        seed: int,
     ):
         """Value the default basket using the Student-T copula."""
+        check_curve_dt(value_dt, libor_curve)
+        check_curve_dt(value_dt, *issuer_curves)
 
         num_credits = len(issuer_curves)
 
@@ -333,13 +335,19 @@ class CDSBasket:
 
         model = StudentTCopula()
 
-        default_times = model.default_times(
-            issuer_curves, corr_matrix, degrees_of_freedom, num_trials, seed
-        )
+        default_times = model.default_times(issuer_curves,
+                                            corr_matrix,
+                                            degrees_of_freedom,
+                                            num_trials, seed)
 
-        rpv01, prot_pv = self.value_legs_mc(
-            value_dt, n_to_default, default_times, issuer_curves, libor_curve
-        )
+        rpv01, prot_pv = self.value_legs_mc(value_dt,
+                                            n_to_default,
+                                            default_times,
+                                            issuer_curves,
+                                            libor_curve)
+
+        if rpv01 <= 0.0:
+            raise FinError("Cannot compute basket spread: risky PV01 is non-positive.")
 
         spd = prot_pv / rpv01
         value = self.notional * (prot_pv - self.running_cpn * rpv01)
@@ -353,15 +361,18 @@ class CDSBasket:
 
     def value_1f_gaussian_homo(
         self,
-        value_dt,
-        n_to_default,
-        issuer_curves,
-        beta_vector,
-        libor_curve,
-        num_points=50,
+        value_dt: Date,
+        n_to_default: int,
+        issuer_curves: list[DiscountCurve],
+        beta_vector: np.ndarray,
+        libor_curve: DiscountCurve,
+        num_points: int = 50,
     ):
         """Value default basket using 1 factor Gaussian copula and analytical
         approach which is only exact when all recovery rates are the same."""
+
+        check_curve_dt(value_dt, libor_curve)
+        check_curve_dt(value_dt, *issuer_curves)
 
         num_credits = len(issuer_curves)
 
@@ -387,13 +398,27 @@ class CDSBasket:
         basket_times[0] = 0.0
         basket_surv_curve[0] = 1.0
 
+        for i_credit in range(0, num_credits):
+            issuer_curve = issuer_curves[i_credit]
+            recovery_rates[i_credit] = issuer_curve.recovery_rate
+
+        if not np.allclose(
+            recovery_rates,
+            recovery_rates[0],
+            atol=1e-10,
+            rtol=0.0
+        ):
+            raise FinError(
+                "Analytical basket valuation requires "
+                "homogeneous recovery rates."
+            )
+
         for i_time in range(0, num_times):
 
             t = (payment_dts[i_time] - value_dt) / G_DAYS_IN_YEAR
 
             for i_credit in range(0, num_credits):
                 issuer_curve = issuer_curves[i_credit]
-                recovery_rates[i_credit] = issuer_curve.recovery_rate
                 issuer_surv_probs[i_credit] = interpolate(
                     t,
                     issuer_curve._times,
@@ -401,9 +426,7 @@ class CDSBasket:
                     InterpTypes.FLAT_FWD_RATES.value,
                 )
 
-            loss_dbn = homog_basket_loss_dbn(
-                issuer_surv_probs, recovery_rates, beta_vector, num_points
-            )
+            loss_dbn = homog_basket_loss_dbn(issuer_surv_probs, recovery_rates, beta_vector, num_points)
 
             basket_surv_curve[i_time] = 1.0
             for i_to_default in range(n_to_default, num_credits + 1):
@@ -417,10 +440,14 @@ class CDSBasket:
         basket_curve._times = basket_times
         basket_curve._qs = basket_surv_curve
 
-        prot_leg_pv = self.cds_contract.prot_leg_pv(
-            value_dt, basket_curve, curve_recovery
-        )
+        prot_leg_pv = self.cds_contract.prot_leg_pv(value_dt, basket_curve, curve_recovery)
         risky_pv01 = self.cds_contract.rpv01(value_dt, basket_curve)[CLEAN]
+
+        if risky_pv01 <= 0.0:
+            raise FinError(
+                "Cannot compute basket spread: "
+                "risky PV01 is non-positive."
+            )
 
         # Long protection
         mtm = self.notional * (prot_leg_pv - risky_pv01 * self.running_cpn)
@@ -445,9 +472,7 @@ class CDSBasket:
         s += label_to_string("STEP-IN DATE", self.step_in_dt)
         s += label_to_string("MATURITY", self.maturity_dt)
         s += label_to_string("NOTIONAL", self.notional)
-        s += label_to_string(
-            "RUNNING COUPON", self.running_cpn * 10000, "bp\n"
-        )
+        s += label_to_string("RUNNING COUPON", self.running_cpn * 10000, "bp\n")
         s += label_to_string("DAY_COUNT", self.accrual_dc_type)
         s += label_to_string("FREQUENCY", self.freq_type)
         s += label_to_string("CALENDAR", self.cal_type)

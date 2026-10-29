@@ -11,12 +11,24 @@ from scipy.interpolate import CubicSpline, PchipInterpolator
 
 from ...utils.error import FinError
 from ...utils.global_vars import G_SMALL
-from ...utils.global_types import InterpTypes
 from ...utils.tension_spline import TensionSpline
+from .hagan_west_monotone_convex import HaganWestMonotoneConvex
+
+from enum import Enum
 
 
-
-#    LINEAR_AVG_FWD_RATES = 11
+class InterpTypes(Enum):
+    FLAT_FWD_RATES = 1
+    LINEAR_DISCOUNT = 2
+    LINEAR_ZERO_RATES = 3
+    LINEAR_ONFWD_RATES = 4
+    FINCUBIC_ZERO_RATES = 5
+    NATCUBIC_LOG_DISCOUNT = 6
+    NATCUBIC_ZERO_RATES = 7
+    PCHIP_ZERO_RATES = 8
+    PCHIP_LOG_DISCOUNT = 9
+    TENSION_ZERO_RATES = 10
+    MONOTONE_CONVEX = 11
 
 
 # Groups used to make dispatch readable and cheap.
@@ -96,7 +108,7 @@ def _find_interval(t: float, times: np.ndarray) -> int:
 )
 def _uinterpolate(t: float, times: np.ndarray, dfs: np.ndarray, method: int) -> float:
     if t < 0.0:
-        print(t, times, dfs, method)
+        #        print(t, times, dfs, method)
         raise ValueError("Interpolation times must be non-negative.")
     if np.abs(t) < G_SMALL:
         return 1.0
@@ -113,17 +125,22 @@ def _uinterpolate(t: float, times: np.ndarray, dfs: np.ndarray, method: int) -> 
     i = _find_interval(t, times)
 
     if method == InterpTypes.LINEAR_ZERO_RATES.value:
-        if i == 1:
+        if i == 1 and times[0] == 0.0:
             r1 = -np.log(dfs[1]) / times[1]
             r2 = r1
             dt = times[1] - times[0]
             r = ((times[1] - t) * r1 + (t - times[0]) * r2) / dt
             return np.exp(-r * t)
         if i < n:
-            r1 = -np.log(dfs[i - 1]) / times[i - 1]
-            r2 = -np.log(dfs[i]) / times[i]
-            dt = times[i] - times[i - 1]
-            r = ((times[i] - t) * r1 + (t - times[i - 1]) * r2) / dt
+            left = i - 1
+            right = i
+            if left < 0:
+                left = 0
+                right = 1
+            r1 = -np.log(dfs[left]) / times[left]
+            r2 = -np.log(dfs[right]) / times[right]
+            dt = times[right] - times[left]
+            r = ((times[right] - t) * r1 + (t - times[left]) * r2) / dt
             return np.exp(-r * t)
         r1 = -np.log(dfs[n - 1]) / times[n - 1]
         r2 = r1
@@ -159,10 +176,7 @@ def _uinterpolate(t: float, times: np.ndarray, dfs: np.ndarray, method: int) -> 
 
         dt = times[right] - times[left]
 
-        df = (
-            (times[right] - t) * dfs[left]
-            + (t - times[left]) * dfs[right]
-        ) / dt
+        df = ((times[right] - t) * dfs[left] + (t - times[left]) * dfs[right]) / dt
 
         return df
 
@@ -212,9 +226,7 @@ def _uinterpolate(t: float, times: np.ndarray, dfs: np.ndarray, method: int) -> 
     fastmath=True,
     nogil=True,
 )
-def _vinterpolate(
-    tvec: np.ndarray, times: np.ndarray, dfs: np.ndarray, method: int
-) -> np.ndarray:
+def _vinterpolate(tvec: np.ndarray, times: np.ndarray, dfs: np.ndarray, method: int) -> np.ndarray:
     out = np.empty(tvec.size, dtype=np.float64)
     for j in range(tvec.size):
         out[j] = _uinterpolate(tvec[j], times, dfs, method)
@@ -264,9 +276,7 @@ def _build_linear_onf_curve(times: np.ndarray, dfs: np.ndarray):
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _linear_onf_cumulative_integrals(
-    onf_times: np.ndarray, onf_rates: np.ndarray
-) -> np.ndarray:
+def _linear_onf_cumulative_integrals(onf_times: np.ndarray, onf_rates: np.ndarray) -> np.ndarray:
     n = onf_times.size
     cum = np.zeros(n, dtype=np.float64)
     for i in range(1, n):
@@ -279,9 +289,7 @@ def _linear_onf_cumulative_integrals(
 
 
 @njit(cache=True, fastmath=True, nogil=True)
-def _linear_onf_integral(
-    t: float, onf_times: np.ndarray, onf_rates: np.ndarray, cum: np.ndarray
-) -> float:
+def _linear_onf_integral(t: float, onf_times: np.ndarray, onf_rates: np.ndarray, cum: np.ndarray) -> float:
     if t <= 0.0:
         return 0.0
     n = onf_times.size
@@ -336,9 +344,14 @@ def interpolate(
     times = np.asarray(times, dtype=np.float64)
     dfs = np.asarray(dfs, dtype=np.float64)
     if isinstance(t, (float, np.float64)):
+        if not np.isfinite(t):
+            raise FinError("Interpolation times must be finite.")
         return _uinterpolate(float(t), times, dfs, int(method))
     if isinstance(t, np.ndarray):
-        return _vinterpolate(np.asarray(t, dtype=np.float64), times, dfs, int(method))
+        t = np.asarray(t, dtype=np.float64)
+        if not np.all(np.isfinite(t)):
+            raise FinError("Interpolation times must be finite.")
+        return _vinterpolate(t, times, dfs, int(method))
     raise FinError(f"Unknown input type {type(t)}")
 
 
@@ -356,7 +369,7 @@ class Interpolator:
       selected interpolation type.
     """
 
-    def __init__(self, interpolator_type: InterpTypes, **kwargs: dict):
+    def __init__(self, interpolator_type: InterpTypes, **kwargs: dict) -> None:
         self._interp_type = interpolator_type
         self._method = interpolator_type.value
         self._times: Optional[np.ndarray] = None
@@ -375,6 +388,10 @@ class Interpolator:
             raise FinError("times and dfs must be one-dimensional arrays.")
         if times.size != dfs.size:
             raise FinError("times and dfs must have the same length.")
+        if not np.all(np.isfinite(times)):
+            raise FinError("Curve times must be finite.")
+        if not np.all(np.isfinite(dfs)):
+            raise FinError("Discount factors must be finite.")
         if np.any(times < 0.0):
             raise FinError("Curve times must be non-negative.")
         if np.any(dfs <= 0.0):
@@ -389,6 +406,18 @@ class Interpolator:
         self._onf_rates = None
         self._onf_integrals = None
 
+        if self._interp_type == InterpTypes.MONOTONE_CONVEX:
+            if times[0] > 0.0:
+                # Interpolator also supports datasets without an explicit
+                # valuation-date knot; DF(0)=1 anchors the forward curve.
+                hw_times = np.concatenate(([0.0], times))
+                hw_dfs = np.concatenate(([1.0], dfs))
+            else:
+                hw_times, hw_dfs = times, dfs
+            if hw_times.size > 1:
+                self._interp_fn = HaganWestMonotoneConvex(hw_times, hw_dfs)
+            return
+
         if times.size <= 1 or self._interp_type in _FAST_NUMBA_TYPES:
             return
 
@@ -397,9 +426,7 @@ class Interpolator:
             return
 
         if self._interp_type == InterpTypes.PCHIP_ZERO_RATES:
-            self._interp_fn = PchipInterpolator(
-                times, _zero_rates_from_dfs(times, dfs), extrapolate=True
-            )
+            self._interp_fn = PchipInterpolator(times, _zero_rates_from_dfs(times, dfs), extrapolate=True)
             return
 
         if self._interp_type == InterpTypes.FINCUBIC_ZERO_RATES:
@@ -412,9 +439,7 @@ class Interpolator:
             return
 
         if self._interp_type == InterpTypes.NATCUBIC_LOG_DISCOUNT:
-            self._interp_fn = CubicSpline(
-                times, np.log(dfs), bc_type="natural", extrapolate=True
-            )
+            self._interp_fn = CubicSpline(times, np.log(dfs), bc_type="natural", extrapolate=True)
             return
 
         if self._interp_type == InterpTypes.NATCUBIC_ZERO_RATES:
@@ -428,16 +453,12 @@ class Interpolator:
 
         if self._interp_type == InterpTypes.LINEAR_ONFWD_RATES:
             self._onf_times, self._onf_rates = _build_linear_onf_curve(times, dfs)
-            self._onf_integrals = _linear_onf_cumulative_integrals(
-                self._onf_times, self._onf_rates
-            )
+            self._onf_integrals = _linear_onf_cumulative_integrals(self._onf_times, self._onf_rates)
             return
 
         if self._interp_type == InterpTypes.TENSION_ZERO_RATES:
             sigma = self._optional_interp_params.get("sigma", 1.0)
-            self._interp_fn = TensionSpline(
-                times, _zero_rates_from_dfs(times, dfs), sigma=sigma
-            )
+            self._interp_fn = TensionSpline(times, _zero_rates_from_dfs(times, dfs), sigma=sigma)
             return
 
         raise FinError(f"Unknown interpolation type {self._interp_type}")
@@ -454,10 +475,15 @@ class Interpolator:
         else:
             raise FinError(f"t is not a recognized type: {type(t)}")
 
+        if not np.all(np.isfinite(tvec)):
+            raise FinError("Interpolation times must be finite.")
         if np.any(tvec < 0.0):
             raise FinError("Interpolation times must be non-negative.")
 
-        if self._times.size <= 1:
+        if self._interp_type == InterpTypes.MONOTONE_CONVEX:
+            out = (np.ones_like(tvec) if self._interp_fn is None
+                   else self._interp_fn.discount_factor(tvec))
+        elif self._times.size <= 1:
             out = _vinterpolate(tvec, self._times, self._dfs, self._method)
         elif self._interp_type in _FAST_NUMBA_TYPES:
             out = _vinterpolate(tvec, self._times, self._dfs, self._method)
@@ -466,9 +492,7 @@ class Interpolator:
         elif self._interp_type in _ZERO_RATE_SPLINE_TYPES:
             out = np.exp(-tvec * self._interp_fn(tvec))
         elif self._interp_type == InterpTypes.LINEAR_ONFWD_RATES:
-            out = _linear_onf_dfs(
-                tvec, self._onf_times, self._onf_rates, self._onf_integrals
-            )
+            out = _linear_onf_dfs(tvec, self._onf_times, self._onf_rates, self._onf_integrals)
         else:
             raise FinError(f"Unknown interpolation type {self._interp_type}")
 

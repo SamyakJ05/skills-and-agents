@@ -28,29 +28,29 @@ class PolyDiscountCurve(DiscountCurve):
 
     def __init__(
         self,
-        value_dt: Date,
+        anchor_dt: Date,
         coefficients: Union[list, np.ndarray],
-        time_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
-    ):
+        curve_dc_type: DayCountTypes = DayCountTypes.ACT_365F,
+    ) -> None:
         """Create zero rate curve parametrised using a cubic curve from
         coefficients and specifying a compounding frequency type and day count
         convention."""
 
         check_argument_types(self.__init__, locals())
 
-        self.value_dt = value_dt
+        self.anchor_dt = anchor_dt
         self._coefficients = np.asarray(coefficients, dtype=float)
 
-        if not isinstance(time_dc_type, DayCountTypes):
+        if not isinstance(curve_dc_type, DayCountTypes):
             raise FinError("Invalid time day count type.")
 
-        self.time_dc_type = time_dc_type
+        self.curve_dc_type = curve_dc_type
         self._interp_type = None
 
         # Set up an annual grid of times and discount factors for insight
         years = np.linspace(0.0, 10.0, 11)
-        self._df_dates = self.value_dt.add_years(years)
-        self._times = times_from_dates(self.value_dt, self._df_dates, self.time_dc_type)
+        self._df_dates = self.anchor_dt.add_years(years)
+        self._times = times_from_dates(self.anchor_dt, self._df_dates, self.curve_dc_type)
         self._dfs = self.df_t(self._times)
 
     ###########################################################################
@@ -96,9 +96,9 @@ class PolyDiscountCurve(DiscountCurve):
         bumped_coefficients[0] += bump_size
 
         discount_curve = PolyDiscountCurve(
-            self.value_dt,
+            self.anchor_dt,
             bumped_coefficients,
-            time_dc_type=self.time_dc_type,
+            curve_dc_type=self.curve_dc_type,
         )
 
         return discount_curve

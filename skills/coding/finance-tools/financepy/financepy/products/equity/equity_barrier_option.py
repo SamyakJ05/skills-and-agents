@@ -10,15 +10,17 @@ from ...utils.date import Date
 from ...utils.error import FinError
 from ...utils.global_types import BarrierTypes
 from ...utils.helpers import label_to_string, check_argument_types
-from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.frequency import FrequencyTypes
-from ...utils.global_types import GBMNumericalSchemeTypes
+from ...models.process_simulator import GBMNumericalSchemeTypes
+from ...models.process_simulator import ProcessTypes
 from ...market.curves.discount_curve import DiscountCurve
 from ...products.equity.equity_option import EquityOption
-from ...models.equity_barrier_option_bs import value_equity_barrier_option_bs
-from ...models.equity_barrier_option_mc import value_equity_barrier_option_mc
-from ...models.process_simulator import ProcessTypes
-
+from ...models.bs_barrier_option import barrier_option_value
+from ...models.bs_barrier_option_mc import value_barrier_option_mc
+from ...utils.check_values import check_curve_dt
+from ...utils.check_values import check_stock_price
+from ...utils.check_values import check_strike_price
+from ...utils.helpers import option_years
+from ...models.model import Model
 
 # TODO: SOME REDESIGN ON THE MONTE CARLO PROCESS IS PROBABLY NEEDED
 
@@ -34,26 +36,28 @@ class EquityBarrierOption(EquityOption):
         self,
         expiry_dt: Date,
         strike_price: float,
-        opt_type: BarrierTypes,
+        barrier_type: BarrierTypes,
         barrier_level: float,
         num_obs_per_year: Union[int, float] = 252,
         notional: float = 1.0,
-    ):
+    ) -> None:
         """Create the EquityBarrierOption by specifying the expiry date,
         strike price, OPTION_TYPE, barrier level, the number of observations
         per year and the notional."""
 
         check_argument_types(self.__init__, locals())
 
+        check_strike_price(strike_price)
+
         self.expiry_dt = expiry_dt
         self.strike_price = float(strike_price)
         self.barrier_level = float(barrier_level)
         self.num_obs_per_year = int(num_obs_per_year)
 
-        if opt_type not in BarrierTypes:
-            raise FinError("OPTION_TYPE " + str(opt_type) + " unknown.")
+        if barrier_type not in BarrierTypes:
+            raise FinError("OPTION_TYPE " + str(barrier_type) + " unknown.")
 
-        self.opt_type = opt_type
+        self.barrier_type = barrier_type
         self.notional = notional
 
     ###########################################################################
@@ -64,7 +68,7 @@ class EquityBarrierOption(EquityOption):
         stock_price: Union[float, np.ndarray],
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
     ):
         """This prices an Equity Barrier option using the formulae given in
         the paper by Clewlow, Llanos and Strickland December 1994 which can be
@@ -73,57 +77,32 @@ class EquityBarrierOption(EquityOption):
         https://warwick.ac.uk/fac/soc/wbs/subjects/finance/research/wpaperseries/1994/94-54.pdf
         """
 
-        if isinstance(value_dt, Date) is False:
-            raise FinError("Valuation date is not a Date")
-
-        if value_dt > self.expiry_dt:
-            raise FinError("Valuation date after expiry date.")
-
-        if discount_curve.value_dt != value_dt:
-            raise FinError(
-                "Discount Curve valuation date not same as option value date"
-            )
-
-        if dividend_curve.value_dt != value_dt:
-            raise FinError(
-                "Dividend Curve valuation date not same as option value date"
-            )
-
-        if isinstance(stock_price, int):
-            stock_price = float(stock_price)
-
-        if isinstance(stock_price, float):
-            stock_prices = [stock_price]
-        else:
-            stock_prices = stock_price
+        t_exp = option_years(value_dt, self.expiry_dt)
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
+        check_stock_price(stock_price)
 
         values = []
 
-        t_exp = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
+        df = discount_curve.df(self.expiry_dt)
+        dq = dividend_curve.df(self.expiry_dt)
 
-        if t_exp < 0:
-            raise FinError("Option expires before value date.")
-
-        cc_freq = FrequencyTypes.CONTINUOUS
-        r = discount_curve.zero_rate_t(t_exp, cc_freq)
-        q = dividend_curve.zero_rate_t(t_exp, cc_freq)
-
-        values = value_equity_barrier_option_bs(
-            t_exp,
+        values = barrier_option_value(
             self.strike_price,
             self.barrier_level,
-            stock_prices,
-            r,
-            q,
+            t_exp,
+            stock_price,
+            df,
+            dq,
             model.volatility,
-            self.opt_type.value,
+            self.barrier_type.value,
             self.num_obs_per_year,
         )
 
         values = values * self.notional
 
         if isinstance(stock_price, float):
-            return values[0]
+            return values
         else:
             return np.array(values)
 
@@ -132,52 +111,41 @@ class EquityBarrierOption(EquityOption):
     def value_mc(
         self,
         value_dt: Date,
-        stock_price: Union[float, np.ndarray],
+        stock_price: float | np.ndarray,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
-        num_obs_per_year=252,
+        model: Model,
+        num_obs_per_year: int = 252,
         num_paths: int = 10000,
         seed: int = 42,
     ):
-        """This prices an Equity Barrier option using the formulae given in
-        the paper by Clewlow, Llanos and Strickland December 1994 which can be
-        found at
-
-        https://warwick.ac.uk/fac/soc/wbs/subjects/finance/research/wpaperseries/1994/94-54.pdf
-        """
+        """Value the Equity Barrier Option using Monte Carlo."""
 
         if isinstance(value_dt, Date) is False:
             raise FinError("Valuation date is not a Date")
 
-        if value_dt > self.expiry_dt:
-            raise FinError("Valuation date after expiry date.")
+        t_exp = option_years(value_dt, self.expiry_dt)
 
-        if isinstance(stock_price, int):
-            stock_price = float(stock_price)
+        check_stock_price(stock_price)
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
 
-        t_exp = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
+        r = discount_curve.zero_rate_cc(self.expiry_dt)
+        q = dividend_curve.zero_rate_cc(self.expiry_dt)
 
-        if t_exp < 0:
-            raise FinError("Option expires before value date.")
+        mu = r - q
 
-        freq_cc = FrequencyTypes.CONTINUOUS
-        r = discount_curve.zero_rate_t(t_exp, freq_cc)
-        q = dividend_curve.zero_rate_t(t_exp, freq_cc)
-        drift = r - q
+        scheme = GBMNumericalSchemeTypes.ANTITHETIC
 
-        scheme = GBMNumericalSchemeTypes.NORMAL
-
-        model_params = (stock_price, drift, model.volatility, scheme)
+        model_params = (stock_price, mu, model.volatility, scheme)
 
         process_type = ProcessTypes.GBM_PROCESS
 
-        value = value_equity_barrier_option_mc(
+        value = value_barrier_option_mc(
             t_exp,
             self.strike_price,
-            self.opt_type,
+            self.barrier_type,
             self.barrier_level,
-            self.notional,
             stock_price,
             r,
             process_type,
@@ -188,12 +156,6 @@ class EquityBarrierOption(EquityOption):
         )
 
         value = value * self.notional
-
-        #        if isinstance(stock_price, float):
-        #            return values[0]
-        #        else:
-        #            return np.array(values)
-
         return value
 
     ###########################################################################
@@ -202,7 +164,7 @@ class EquityBarrierOption(EquityOption):
         s = label_to_string("OBJECT_TYPE", type(self).__name__)
         s += label_to_string("EXPIRY DATE", self.expiry_dt)
         s += label_to_string("STRIKE PRICE", self.strike_price)
-        s += label_to_string("OPTION_TYPE", self.opt_type)
+        s += label_to_string("BARRIER TYPE", self.barrier_type)
         s += label_to_string("BARRIER LEVEL", self.barrier_level)
         s += label_to_string("NUM OBSERVATIONS", self.num_obs_per_year)
         s += label_to_string("NOTIONAL", self.notional, "")

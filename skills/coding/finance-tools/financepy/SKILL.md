@@ -1,6 +1,6 @@
 ---
 name: financepy
-description: Price and risk-manage financial derivatives with the FinancePy Python library — fixed-income (bonds, bond options, mortgages, convertibles), interest rate products (swaps, swaptions, caps/floors, FRAs, IBOR/OIS curves), equity derivatives (vanilla/American/Asian/barrier/variance options), FX derivatives (vanilla/barrier/digital FX options), and credit derivatives (CDS, CDS indices, CDS baskets/tranches). Use when a task needs to build discount/credit curves, value or risk a derivative, compute Greeks, or price a bond/swap/option analytically or via trees/Monte Carlo. License: GPL-3.0 (copyleft) — see the License section below before using this in code you plan to distribute.
+description: "Price and risk-manage financial derivatives with the FinancePy Python library — fixed-income (bonds, bond options, mortgages, convertibles), interest rate products (swaps, swaptions, caps/floors, FRAs, IBOR/OIS curves), equity derivatives (vanilla/American/Asian/barrier/variance options), FX derivatives (vanilla/barrier/digital FX options), and credit derivatives (CDS, CDS indices, CDS baskets/tranches). Use when a task needs to build discount/credit curves, value or risk a derivative, compute Greeks, or price a bond/swap/option analytically or via trees/Monte Carlo. License: GPL-3.0 (copyleft) — see the License section below before using this in code you plan to distribute."
 license: GPL-3.0
 ---
 
@@ -53,16 +53,23 @@ spans:
 - **Credit derivatives** — single-name CDS, CDS curves (survival-probability
   bootstrapping), CDS index products, CDS baskets/tranches, CDS options
 - **Market objects** — discount curve construction (flat, Nelson-Siegel, NS-Svensson,
-  piecewise flat/linear forward, polynomial, zero-rate), volatility curves/surfaces
+  piecewise flat/linear forward, polynomial, zero-rate, Hagan-West monotone convex,
+  bond bootstrap/parametric), inflation index/swap curves, volatility curves/surfaces
 - **Models** — Black, Black-Scholes (analytic, MC, trees), Bachelier, BDT/BK/HW/Vasicek
-  short-rate trees, Heston, SABR, local vol, and Monte Carlo engines (with Sobol
-  quasi-random sequences)
+  short-rate trees, Heston, SABR (lognormal/normal/shifted), CEV, Merton jump-diffusion,
+  Dupire local vol, SVI/SSVI and lognormal-mixture vol surfaces, and Monte Carlo engines
+  (with Sobol quasi-random sequences)
 - **Utils** — `Date` (with day-count conventions, business-day calendars, holiday
   schedules), schedule generation, currency/frequency/day-count enums, financial math
   helpers
 
 The design principle is **VALUATION = PRODUCT + MODEL + MARKET**: a product object's
 `.value()` method takes a model and a market (curve/vol surface) to produce a price.
+
+Only `financepy.utils` re-exports names; the `products/*` and `market/curves` subpackages
+are lazy (`EAGER_IMPORTS = False`) and `models`/`market` export nothing at package level,
+so import classes from their defining modules, e.g.
+`from financepy.products.bonds.bond import Bond`.
 
 ## Installation
 
@@ -90,7 +97,7 @@ Date(19, 2, 2026).add_days(2)
 
 ```python
 from financepy.utils import *
-from financepy.products.bonds import *
+from financepy.products.bonds.bond import Bond
 
 issue_dt = Date(13, 5, 2010)
 maturity_dt = Date(13, 5, 2022)
@@ -102,7 +109,7 @@ bond = Bond(issue_dt, maturity_dt, coupon, freq_type, dc_type)
 
 settle_dt = Date(21, 7, 2017)
 bond.print_payments(settle_dt)
-print("Accrued =", bond.accrued_int)
+print("Accrued =", bond.accrued_interest(settle_dt))
 
 # yield/price conversion
 clean_price = bond.clean_price_from_ytm(settle_dt, ytm=0.0345)
@@ -113,8 +120,9 @@ ytm = bond.yield_to_maturity(settle_dt, clean_price=99.5)
 
 ```python
 from financepy.utils import *
-from financepy.products.equity import *
+from financepy.products.equity.equity_vanilla_option import EquityVanillaOption
 from financepy.models.black_scholes import BlackScholes
+from financepy.market.curves.flat_discount_curve import FlatDiscountCurve
 
 expiry_dt = Date(1, 6, 2026)
 strike_price = 50.0
@@ -126,8 +134,8 @@ volatility = 0.20
 risk_free_rate = 0.03
 dividend_yield = 0.01
 
-discount_curve = DiscountCurveFlat(value_dt, risk_free_rate)
-dividend_curve = DiscountCurveFlat(value_dt, dividend_yield)
+discount_curve = FlatDiscountCurve(value_dt, risk_free_rate)
+dividend_curve = FlatDiscountCurve(value_dt, dividend_yield)
 model = BlackScholes(volatility)
 
 price = call_option.value(value_dt, stock_price, discount_curve, dividend_curve, model)
@@ -138,8 +146,8 @@ delta = call_option.delta(value_dt, stock_price, discount_curve, dividend_curve,
 
 ```python
 from financepy.utils import *
-from financepy.products.rates import *
-from financepy.products.credit import *
+from financepy.products.credit.cds import CDS
+from financepy.market.curves.cds_curve import CDSCurve
 
 value_dt = Date(10, 1, 2026)
 effective_dt = Date(1, 12, 2024)
@@ -150,21 +158,22 @@ long_protection = True
 
 cds_contract = CDS(effective_dt, maturity_dt, cds_coupon, notional, long_protection)
 
-# build an IBOR discount curve from market deposits/swaps, then a CDS/hazard curve
-# from a set of market CDS quotes, then:
-# cds_contract.value(value_dt, issuer_curve, discount_curve, recovery_rate)
+# build an IBOR discount curve from market deposits/swaps
+# (financepy.market.curves.ibor_single_curve.IborSingleCurve), then a CDSCurve
+# (issuer/hazard curve, which carries the discount curve) from market CDS quotes, then:
+# cds_contract.value(value_dt, issuer_curve, contract_recovery_rate)
 ```
 
 ### Building a discount curve
 
 ```python
 from financepy.utils import Date
-from financepy.market.curves.discount_curve_flat import DiscountCurveFlat
-from financepy.market.curves.discount_curve_zeros import DiscountCurveZeros
-from financepy.market.curves.discount_curve_ns import DiscountCurveNS   # Nelson-Siegel
+from financepy.market.curves.flat_discount_curve import FlatDiscountCurve
+from financepy.market.curves.zero_rates_discount_curve import ZeroRatesDiscountCurve
+from financepy.market.curves.ns_discount_curve import NSDiscountCurve   # Nelson-Siegel
 
 value_dt = Date(1, 1, 2026)
-flat_curve = DiscountCurveFlat(value_dt, 0.04)
+flat_curve = FlatDiscountCurve(value_dt, 0.04)
 df = flat_curve.df(Date(1, 1, 2031))       # discount factor
 zero_rate = flat_curve.zero_rate(Date(1, 1, 2031))
 ```
@@ -175,24 +184,24 @@ zero_rate = flat_curve.zero_rate(Date(1, 1, 2031))
 financepy/
 ├── utils/          # Date, calendars, day-count/frequency/currency enums, schedules, math helpers
 ├── market/
-│   ├── curves/     # discount curve construction: flat, zero-rate, NS, NSS, poly, pwf, pwl, IBOR/OIS bootstrapping, CDS curves
+│   ├── curves/     # *_discount_curve.py: flat, zero_rates, ns, nss, poly, pwf, pwl, bond bootstrap/parametric; IBOR/OIS bootstrapping, CDS and inflation curves
 │   ├── prices/     # price/quote container objects
 │   └── volatility/ # equity/FX/IBOR-cap/swaption vol curves and surfaces
-├── models/         # pricing models: Black, Black-Scholes, Bachelier, BDT/BK/HW/Vasicek trees, Heston, SABR, local vol, Monte Carlo (Sobol)
+├── models/         # pricing models: Black, Black-Scholes (bs_*.py analytic/MC), Bachelier, BDT/BK/HW/Vasicek trees, Heston, SABR, CEV, Dupire, SVI/SSVI, Monte Carlo (Sobol)
+├── trades/         # Trade wrapper
 └── products/
-    ├── bonds/      # Bond, BondFRN, BondConvertible, BondMortgage, BondFuture, BondOption, BondPortfolio, ...
-    ├── rates/      # IborDeposit, IborFRA, IborSwap, OIS, caps/floors, swaptions (European/Bermudan), curve risk/smoothing tools
-    ├── equity/     # EquityVanillaOption, American/Asian/Barrier/Variance-swap options
-    ├── fx/         # FX vanilla/barrier/digital/variance-swap options, FX vol surfaces
-    ├── credit/     # CDS, CDSCurve, CDSBasket, CDSTranche, CDSIndexOption, CDSIndexPortfolio
-    └── inflation/  # inflation-linked bond products
+    ├── bonds/      # Bond, BondFRN, BondConvertible, BondMortgage, BondFuture, BondOption, BondPortfolio, inflation bond, ...
+    ├── rates/      # IborDeposit, IborFRA, IborSwap, OIS, caps/floors, swaptions (European/Bermudan), inflation swap, swaps/ (IBOR basis, x-ccy), curve risk/smoothing tools
+    ├── equity/     # EquityVanillaOption, American/Asian/Barrier/Power/Gap/Quanto/Variance-swap options
+    ├── fx/         # FX spot/rate/forward, vanilla/barrier/digital/variance-swap options
+    └── credit/     # CDS, CDSCurve, CDSBasket, CDSTranche, CDSIndexOption, CDSIndexPortfolio
 ```
 
 Every module above is vendored under `financepy/` in this skill directory (mirrors the
 upstream package 1:1, ~3MB of pure Python source, no notebooks/tests/docs binaries).
 `README.md` in this folder is the upstream project README (installation notes and package
-structure overview); `docs/QUICKSTART*.md` guides referenced above are on the upstream repo
-(not vendored here, since this SKILL.md already extracts their key examples).
+structure overview); the upstream `docs/` (generated HTML API docs), `examples/` notebooks
+and `tests/` are not vendored.
 
 ## Notes
 
@@ -200,7 +209,8 @@ structure overview); `docs/QUICKSTART*.md` guides referenced above are on the up
   compilation; this is expected and only happens once (cached afterward).
 - The library favors explicit, readable Python over clever abstractions — expect one class
   per product/model rather than heavy inheritance hierarchies.
-- `financepy/market/curves/legacy/` contains older curve implementations kept for backward
-  compatibility; prefer the non-legacy equivalents (e.g. `discount_curve_ns.py` over
-  `legacy/discount_curve_ns.py`) for new code.
+- Curve modules were renamed upstream (e.g. `discount_curve_flat.DiscountCurveFlat` is now
+  `flat_discount_curve.FlatDiscountCurve`, `DiscountCurveZeros` → `ZeroRatesDiscountCurve`,
+  `DiscountCurveNS` → `NSDiscountCurve`) and the old `legacy/` curves were removed; code
+  written against older FinancePy releases needs those imports updated.
 - Full author contact and contribution guidelines are in the vendored `README.md`.

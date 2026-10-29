@@ -1,6 +1,7 @@
 ---
 name: finance-database
-description: Query the FinanceDatabase Python package to look up ticker/symbol metadata or screen Equities, ETFs, Funds, Indices, Currencies, Cryptocurrencies, and Money Markets by sector, industry, country, exchange, category, or free-text search. Use when a task needs to find symbols matching criteria (e.g. "insurance companies in the Netherlands", "fixed-income ETFs", "pension funds"), enumerate valid filter values for an asset class, or map a company/fund/index to its classification metadata. License: MIT.
+description: >-
+  Query the FinanceDatabase Python package to look up ticker/symbol metadata or screen Equities, ETFs, Funds, Indices, Currencies, Cryptocurrencies, and Money Markets by sector, industry, country, exchange, category, or free-text search. Use when a task needs to find symbols matching criteria (e.g. "insurance companies in the Netherlands", "fixed-income ETFs", "pension funds"), enumerate valid filter values for an asset class, or map a company/fund/index to its classification metadata. License: MIT.
 ---
 
 # finance-database
@@ -16,11 +17,14 @@ pip — it downloads/loads its own data at runtime — rather than importing fro
 
 FinanceDatabase provides categorization metadata (not live prices/fundamentals) for:
 
-- **Equities** (~112k) — sector, industry_group, industry, country, exchange, market, market_cap, isin, cusip, figi, etc.
-- **ETFs** (~36k) — category_group, category, family (issuer), exchange
+- **Equities** (~122k) — sector, industry_group, industry, country, exchange, mic, market, market_cap, isin, cusip, figi, etc.
+- **ETFs** (~32k) — category_group, category, family (issuer), exchange
 - **Funds** (~58k) — category_group, category, family, exchange
-- **Indices** (~91k) — category_group, category, exchange
-- **Currencies** (~2.5k), **Cryptocurrencies** (~3.4k), **Money Markets** (~1.4k)
+- **Indices** (~82k) — category_group, category, exchange
+- **Currencies** (~2.5k), **Cryptocurrencies** (~5.7k), **Money Markets** (~1.2k)
+
+Since October 2026 upstream no longer maintains **Funds** and **Money Markets**: `fd.Funds()` and
+`fd.Moneymarkets()` still load, but emit a `FutureWarning` and the data may be outdated.
 
 The aim is to find *which* symbols exist matching some criteria — not to fetch OHLCV or
 fundamentals (pair with `financetoolkit`/`yfinance` etc. for that, see `to_toolkit` below).
@@ -35,8 +39,10 @@ pip install financedatabase -U
 import financedatabase as fd
 ```
 
-Data is fetched/loaded lazily by the package itself when you instantiate a class — nothing
-is bundled in this skill. First use of each asset class may take a moment to load its CSVs.
+Data is downloaded by the package itself when you instantiate a class — nothing is bundled
+in this skill. Each asset class is downloaded once and cached in the user cache folder (or
+`FINANCEDATABASE_CACHE_DIR`), re-checked daily, and queried lazily with Polars. Results are
+pandas DataFrames by default; pass `as_pandas=False` to get Polars instead.
 
 ## Core API
 
@@ -82,7 +88,8 @@ equities.select(
     market="Euronext Amsterdam",
 )
 
-# only_primary_listing avoids duplicate cross-exchange listings (useful for US tickers):
+# only_primary_listing avoids duplicate cross-exchange listings (delisted symbols are
+# excluded by default; pass exclude_delisted=False to include them):
 equities.select(country="United States", industry="Insurance", only_primary_listing=True)
 
 # Any parameter accepts a list for OR-matching:
@@ -105,7 +112,7 @@ Cryptos use asset-specific params like `cryptocurrency`:
 cryptos.select(cryptocurrency="ETH")
 ```
 
-### `search` — free-text substring search across any column
+### `search` — free-text (regex) search across any column
 
 ```python
 equities.search(
@@ -143,8 +150,10 @@ toolkit.ratios.collect_all_ratios()
 - No data is vendored in this skill — everything above assumes `pip install financedatabase`
   and the package's own data loading at runtime. The `.py` files under `financedatabase/`
   here are for reference on the exact method signatures/behavior, not for import.
-- Package source vendored: `Cryptos.py`, `Currencies.py`, `ETFs.py`, `Equities.py`,
-  `Funds.py`, `Indices.py`, `Moneymarkets.py`, `helpers.py` (defines module-level
-  `show_options`), `__init__.py`, and `validation/validate_identifiers.py`.
+- Package source vendored: the whole `financedatabase/` package — one controller per asset
+  class (`equities/equities_controller.py`, `etfs/`, `funds/`, `indices/`, `currencies/`,
+  `cryptos/`, `moneymarkets/`), the shared base class and module-level `show_options` in
+  `database_controller.py`, `frame_model.py` (`FinanceFrame.to_toolkit`), the query/cache/
+  listing helpers. The upstream `mcp_server/` subpackage (MCP server wrapper) is not vendored.
 - Full README (with more examples and a Q&A section on data sourcing/freshness) is at
   `README.md` in this folder; `LICENSE` is the upstream MIT license.

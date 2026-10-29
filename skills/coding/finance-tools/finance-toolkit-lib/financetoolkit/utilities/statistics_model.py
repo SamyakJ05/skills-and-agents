@@ -2,7 +2,9 @@
 
 __docformat__ = "google"
 
-import warnings
+
+import difflib
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -37,6 +39,104 @@ PERIODS_PER_YEAR = {
     "quarterly": 4,
     "yearly": 1,
 }
+
+
+# Short forms of country names, matched in lowercase, and the names the sources use.
+COUNTRY_ALIASES = {
+    "us": "United States",
+    "u.s.": "United States",
+    "usa": "United States",
+    "u.s.a.": "United States",
+    "america": "United States",
+    "united states of america": "United States",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "britain": "United Kingdom",
+    "great britain": "United Kingdom",
+    "england": "United Kingdom",
+    "eurozone": "Euro Area",
+    "euro zone": "Euro Area",
+    "euro-zone": "Euro Area",
+    "ea": "Euro Area",
+    "eu": "European Union",
+    "korea": "South Korea",
+    "republic of korea": "South Korea",
+    "holland": "Netherlands",
+    "the netherlands": "Netherlands",
+    "uae": "United Arab Emirates",
+    "czechia": "Czech Republic",
+    "turkiye": "Turkey",
+    "türkiye": "Turkey",
+}
+
+
+# The members of the euro area, whose monetary statistics are published for the area.
+EURO_AREA_MEMBERS = frozenset(
+    {
+        "Austria",
+        "Belgium",
+        "Croatia",
+        "Cyprus",
+        "Estonia",
+        "Finland",
+        "France",
+        "Germany",
+        "Greece",
+        "Ireland",
+        "Italy",
+        "Latvia",
+        "Lithuania",
+        "Luxembourg",
+        "Malta",
+        "Netherlands",
+        "Portugal",
+        "Slovakia",
+        "Slovenia",
+        "Spain",
+    }
+)
+
+
+def euro_area_hint(countries: Iterable[object], dataset: pd.DataFrame) -> str:
+    """
+    A pointer to the euro area for euro members without data of their own, such as the
+    money supply or an overnight rate, which are published for the area as a whole.
+
+    Args:
+        countries (Iterable[object]): The countries without data.
+        dataset (pd.DataFrame): The indicator, to check whether it has the euro area.
+
+    Returns:
+        str: The hint, or an empty string when it does not apply.
+    """
+    members = [
+        str(country) for country in countries if str(country) in EURO_AREA_MEMBERS
+    ]
+
+    return (
+        f" For {', '.join(members)}, use 'Euro Area', which this indicator covers."
+        if members and "Euro Area" in map(str, dataset.columns.get_level_values(-1))
+        else ""
+    )
+
+
+def normalize_country_name(country: object, known: Iterable[object]) -> object:
+    """
+    The name a source uses for a country written as a short form or in any casing, e.g.
+    "USA" or "united states" for "United States". A name that matches nothing known is
+    returned as it was given.
+
+    Args:
+        country (object): The country as given.
+        known (Iterable[object]): The country names available.
+
+    Returns:
+        object: The matching known name, or the country as given.
+    """
+    by_lowercase = {str(name).lower(): name for name in known}
+    text = str(country).strip()
+
+    return by_lowercase.get(COUNTRY_ALIASES.get(text.lower(), text).lower(), country)
 
 
 def convert_annualized_rate_to_period(
@@ -169,32 +269,182 @@ def finalize_dataset(
     elif not growth:
         dataset = apply_rounding(dataset, rounding)
 
-    if dropna:
-        dataset = dataset.dropna(how="all", axis=0)
+    unsliced = dataset
 
     if apply_slice:
+        had_data = not dataset.empty
+        periods = dataset.index if row_slice else dataset.columns
+        available = (
+            f" The data runs from {periods.min()} to {periods.max()}."
+            if had_data and len(periods)
+            else ""
+        )
         dataset = (
             dataset.loc[start_date:end_date]
             if row_slice
             else dataset.loc[:, start_date:end_date]
         )
 
+        # Data exists, just not in the window, e.g. a weekend, a range not published yet
+        # or a historical dataset that ends long ago; where it does run says what to ask.
+        if had_data and dataset.empty:
+            logger.warning(
+                "There are no %sobservations between %s and %s.%s",
+                f"{indicator_name} " if indicator_name else "",
+                start_date,
+                end_date,
+                available,
+            )
+
+    if countries is not None and not isinstance(countries, str | list | tuple):
+        raise TypeError(
+            "The countries must be a country name or a list of country names, such as "
+            f"'Japan' or ['Japan', 'Germany'], not a {type(countries).__name__} ({countries!r})."
+        )
+
     if countries:
         # Economic indicators are indexed by date with countries as columns.
         if isinstance(countries, str):
             countries = [countries]
+        # Common short forms and any casing resolve to the names the sources use, e.g.
+        # "USA" or "united states" to "United States".
+        selected_countries: list[object] = [
+            normalize_country_name(country, dataset.columns) for country in countries
+        ]
         missing_countries = [
-            country for country in countries if country not in dataset.columns
+            country for country in selected_countries if country not in dataset.columns
         ]
         if missing_countries:
+            suggestions = [
+                (
+                    f"'{country}' (did you mean '{close[0]}'?)"
+                    if (
+                        close := difflib.get_close_matches(
+                            str(country),
+                            [str(column) for column in dataset.columns],
+                            n=1,
+                            cutoff=0.75,
+                        )
+                    )
+                    else f"'{country}'"
+                )
+                for country in missing_countries
+            ]
             logger.warning(
-                f"The following countries are not available for {indicator_name}: {missing_countries}"
+                f"The following countries are not available for {indicator_name}: "
+                f"{', '.join(suggestions)}{euro_area_hint(missing_countries, dataset)}"
             )
         dataset = dataset[
-            [country for country in countries if country not in missing_countries]
+            [
+                country
+                for country in selected_countries
+                if country not in missing_countries
+            ]
         ]
 
+        # Countries that are there but without a value in the window: say where their
+        # data ends (a series that stopped years ago) rather than answer with nothing.
+        if not dataset.empty and bool(dataset.isna().all().all()):
+            available_countries = list(dataset.columns)
+            last = (
+                unsliced[available_countries].last_valid_index()
+                if row_slice and set(available_countries) <= set(unsliced.columns)
+                else None
+            )
+            logger.warning(
+                "There are no %sobservations for %s between %s and %s. %s%s",
+                f"{indicator_name} " if indicator_name else "",
+                ", ".join(map(str, available_countries)),
+                start_date,
+                end_date,
+                (
+                    f"The last one is from {last}."
+                    if last is not None
+                    else "The source has no data for them."
+                ),
+                euro_area_hint(available_countries, unsliced),
+            )
+
+    # After the country selection, so a row that is empty for every selected country goes
+    # too, such as a month only an unselected country has published yet.
+    if dropna:
+        dataset = dataset.dropna(how="all", axis=0)
+
     return dataset
+
+
+def to_period_index(index: pd.Index) -> pd.PeriodIndex:
+    """
+    Returns the given index as a PeriodIndex, which is what every period based
+    calculation in the package expects its historical data to be indexed by.
+
+    Historical data is period indexed from the moment it is collected, so this is a
+    check rather than a conversion: a frame that lost its PeriodIndex somewhere along
+    the way (for example through a reset_index) would otherwise fail deep inside a
+    calculation with an unhelpful AttributeError on `asfreq`.
+
+    Args:
+        index (pd.Index): The index of a historical dataset.
+
+    Returns:
+        pd.PeriodIndex: The same index, narrowed to a PeriodIndex.
+
+    Raises:
+        TypeError: If the index is not a PeriodIndex.
+    """
+    if not isinstance(index, pd.PeriodIndex):
+        raise TypeError(
+            f"Expected a PeriodIndex, got {type(index).__name__}. Historical data must "
+            "be indexed by periods for period based calculations."
+        )
+
+    return index
+
+
+def to_multi_index(index: pd.Index) -> pd.MultiIndex:
+    """
+    Returns the given index as a MultiIndex, for the places that reshape a frame
+    (an unstack, a concat with keys) and then operate on the resulting levels.
+
+    Args:
+        index (pd.Index): The index or columns of a reshaped dataset.
+
+    Returns:
+        pd.MultiIndex: The same index, narrowed to a MultiIndex.
+
+    Raises:
+        TypeError: If the index is not a MultiIndex.
+    """
+    if not isinstance(index, pd.MultiIndex):
+        raise TypeError(
+            f"Expected a MultiIndex but received {type(index).__name__}; the "
+            "reshaping step before this point did not produce the expected levels."
+        )
+
+    return index
+
+
+def to_datetime_index(index: pd.Index) -> pd.DatetimeIndex:
+    """
+    Returns the given index as a DatetimeIndex, the counterpart of `to_period_index`
+    for the within-period helpers that nest each observation under its period.
+
+    Args:
+        index (pd.Index): The index of a historical dataset.
+
+    Returns:
+        pd.DatetimeIndex: The same index, narrowed to a DatetimeIndex.
+
+    Raises:
+        TypeError: If the index is not a DatetimeIndex.
+    """
+    if not isinstance(index, pd.DatetimeIndex):
+        raise TypeError(
+            f"Expected a DatetimeIndex, got {type(index).__name__}. Within-period "
+            "calculations start from timestamp indexed data."
+        )
+
+    return index
 
 
 def apply_rounding(
@@ -212,7 +462,22 @@ def apply_rounding(
     Returns:
         pd.Series | pd.DataFrame: the rounded dataset, or the dataset as-is when rounding is None.
     """
-    return dataset if rounding is None else dataset.round(rounding)
+    if rounding is None:
+        return dataset
+
+    rounded = dataset.round(rounding)
+
+    # A small negative number rounds to -0.0, which prints as "-0"; adding 0.0 turns it
+    # into 0.0 and leaves every other number as it is.
+    if isinstance(rounded, pd.Series):
+        return rounded + 0.0 if pd.api.types.is_float_dtype(rounded) else rounded
+
+    float_columns = rounded.dtypes.map(pd.api.types.is_float_dtype).to_numpy(dtype=bool)
+
+    if float_columns.any():
+        rounded.iloc[:, float_columns] = rounded.iloc[:, float_columns] + 0.0
+
+    return rounded
 
 
 def bounded_ffill(
@@ -225,8 +490,11 @@ def bounded_ffill(
     gap surfaces as a NaN growth/return rather than a fabricated flat one.
     """
     if isinstance(dataset, pd.DataFrame):
-        filled = dataset.ffill(axis=axis, limit=1)
-        has_future_data = dataset.bfill(axis=axis).notna()
+        # pandas accepts the "rows"/"index"/"columns" aliases the callers use, but its
+        # stubs only spell out the numeric form.
+        axis_number = 0 if axis in ("rows", "index") else 1
+        filled = dataset.ffill(axis=axis_number, limit=1)
+        has_future_data = dataset.bfill(axis=axis_number).notna()
     else:
         filled = dataset.ffill(limit=1)
         has_future_data = dataset.bfill().notna()
@@ -243,6 +511,16 @@ def calculate_growth(
     """
     Calculates growth for a given dataset. Defaults to a lag of 1 (i.e. 1 year or 1 quarter).
 
+    The formula is as follows:
+
+        Growth = (Value - Previous Value) / |Previous Value|
+
+    Dividing by the absolute previous value keeps the sign of the growth equal to the sign of
+    the change: a loss narrowing from -100 to -50 is a growth of 0.5 and a profit of 20 after a
+    loss of -50 a growth of 1.4, where dividing by the signed previous value would report both
+    as a decline. For a positive previous value it equals the percentage change. Growth from a
+    previous value of 0 is undefined and reported as missing.
+
     Args:
         dataset (pd.Series | pd.DataFrame): the dataset to calculate the growth values for.
         lag (int | list[int]): the lag or lags to use for the calculation. A list returns one row or
@@ -255,74 +533,96 @@ def calculate_growth(
     Returns:
         pd.Series | pd.DataFrame: the period over period growth of the dataset.
     """
-    # pandas 2.1 warns about pct_change fill even though the code handles it.
-    warnings.simplefilter(action="ignore", category=FutureWarning)
-
     if isinstance(lag, list):
-        new_index = []
+        # Each row (axis="columns") or column (axis="rows") is an entity, and every lag
+        # becomes an extra index level after it: (entity, "Lag 1"), (entity, "Lag 2").
         lag_dict = {f"Lag {lag_value}": lag_value for lag_value in lag}
+        entities = dataset.index if axis == "columns" else dataset.columns
+        new_index = pd.MultiIndex.from_tuples(
+            [
+                (*entity, lag_key) if isinstance(entity, tuple) else (entity, lag_key)
+                for entity in entities
+                for lag_key in lag_dict
+            ]
+        )
+
+        filled = bounded_ffill(dataset, axis=axis)
+        growth_per_lag = pd.concat(
+            {
+                lag_key: calculate_change_over_absolute_base(filled, lag_value, axis)
+                for lag_key, lag_value in lag_dict.items()
+            },
+            axis=0 if axis == "columns" else 1,
+        )
+
+        # The lag is the first level after the concat and moves to the last, so the
+        # labels match new_index, which also orders the lags per entity.
+        stacked_axis = (
+            growth_per_lag.index if axis == "columns" else growth_per_lag.columns
+        )
+        stacked_axis = stacked_axis.reorder_levels(
+            list(range(1, stacked_axis.nlevels)) + [0]
+        )
 
         if axis == "columns":
-            for old_index in dataset.index:
-                for lag_value in lag_dict:
-                    new_index.append(
-                        (*old_index, lag_value)
-                        if isinstance(old_index, tuple)
-                        else (old_index, lag_value)
-                    )
-
-            dataset_lag = pd.DataFrame(
-                index=pd.MultiIndex.from_tuples(new_index),
-                columns=dataset.columns,
-                dtype=np.float64,
+            dataset_lag = growth_per_lag.set_axis(stacked_axis, axis=0).reindex(
+                new_index
             )
-
-            for new_index in dataset_lag.index:
-                lag_key = new_index[-1]
-                other_indices = new_index[:-1]
-                if len(other_indices) == 1:
-                    other_indices = other_indices[0]
-
-                dataset_lag.loc[new_index] = (
-                    bounded_ffill(dataset.loc[other_indices])
-                    .pct_change(periods=lag_dict[lag_key])  # type: ignore
-                    .to_numpy()
-                    .reshape(-1)
-                )
         else:
-            for old_index in dataset.columns:
-                for lag_value in lag_dict:
-                    new_index.append(
-                        (*old_index, lag_value)
-                        if isinstance(old_index, tuple)
-                        else (old_index, lag_value)
-                    )
-
-            dataset_lag = pd.DataFrame(
-                columns=pd.MultiIndex.from_tuples(new_index),
-                index=dataset.index,
-                dtype=np.float64,
+            dataset_lag = growth_per_lag.set_axis(stacked_axis, axis=1).reindex(
+                new_index, axis=1
             )
 
-            for new_index in dataset_lag.columns:
-                lag_key = new_index[-1]
-                other_indices = new_index[:-1]
-                if len(other_indices) == 1:
-                    other_indices = other_indices[0]
-
-                dataset_lag.loc[:, new_index] = (
-                    bounded_ffill(dataset.loc[:, other_indices])
-                    .pct_change(periods=lag_dict[lag_key])  # type: ignore
-                    .to_numpy()
-                    .reshape(-1)
-                )
-
-        return apply_rounding(dataset_lag, rounding)
+        return apply_rounding(
+            drop_infinite_growth(dataset_lag.astype(np.float64)), rounding
+        )
 
     # The forward fill has to run along the same axis as the pct_change, since a statement or ratio DataFrame is indexed by ticker with the periods as columns, so filling along the default axis would carry the previous ticker's value into the gap.  # noqa: E501
     dataset = bounded_ffill(dataset, axis=axis)
 
-    return apply_rounding(dataset.pct_change(periods=lag, axis=axis), rounding)
+    return apply_rounding(
+        drop_infinite_growth(calculate_change_over_absolute_base(dataset, lag, axis)),
+        rounding,
+    )
+
+
+def calculate_change_over_absolute_base(
+    dataset: pd.Series | pd.DataFrame, periods: int = 1, axis: str = "columns"
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculates the change over a number of periods relative to the absolute value at the
+    start, (Value - Previous Value) / |Previous Value|, so a negative base does not flip
+    the sign of the change.
+
+    Args:
+        dataset (pd.Series | pd.DataFrame): the dataset to calculate the change for.
+        periods (int): the number of periods to compare against. Defaults to 1.
+        axis (str): the axis to compute the change over for a DataFrame ("columns" or
+            "rows"). Defaults to "columns".
+
+    Returns:
+        pd.Series | pd.DataFrame: the change relative to the absolute previous value.
+    """
+    if isinstance(dataset, pd.DataFrame):
+        axis_number = 0 if axis in ("rows", "index") else 1
+        previous = dataset.shift(periods, axis=axis_number)
+    else:
+        previous = dataset.shift(periods)
+
+    return (dataset - previous) / previous.abs()
+
+
+def drop_infinite_growth(growth: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
+    """
+    Growth from a value of 0 is undefined, not infinite, so it is reported as missing.
+
+    Args:
+        growth (pd.Series | pd.DataFrame): The growth values.
+
+    Returns:
+        pd.Series | pd.DataFrame: The growth values with infinities replaced by NaN.
+    """
+    return growth.replace([np.inf, -np.inf], np.nan)
 
 
 def calculate_standardization(

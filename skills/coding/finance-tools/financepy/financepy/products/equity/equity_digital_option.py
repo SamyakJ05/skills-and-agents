@@ -4,11 +4,9 @@
 
 from typing import Union
 
-from enum import Enum
 import numpy as np
 
 
-from ...utils.global_vars import G_DAYS_IN_YEAR, G_SMALL
 from ...utils.error import FinError
 from ...utils.global_types import OptionTypes
 from ...utils.global_types import DigitalOptionTypes
@@ -17,8 +15,9 @@ from ...utils.helpers import label_to_string, check_argument_types
 from ...utils.date import Date
 from ...market.curves.discount_curve import DiscountCurve
 from ...models.bs_digital_option import bs_digital_option_value
-from ...utils.math import normcdf_vect
-
+from ...utils.check_values import check_curve_dt
+from ...utils.helpers import option_years
+from ...models.model import Model
 
 ########################################################################################
 
@@ -37,7 +36,7 @@ class EquityDigitalOption(EquityOption):
         barrier: float,
         call_put_type: OptionTypes,
         digital_type: DigitalOptionTypes,
-    ):
+    ) -> None:
         """Create the digital option by specifying the expiry date, the
         barrier price and the type of option which is either a EUROPEAN_CALL
         or a EUROPEAN_PUT or an AMERICAN_CALL or AMERICAN_PUT. There are two
@@ -64,116 +63,45 @@ class EquityDigitalOption(EquityOption):
         stock_price: Union[float, np.ndarray],
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
     ):
         """Digital Option valuation using the Black-Scholes model assuming a
         barrier at expiry. Handles both cash-or-nothing and asset-or-nothing
         options."""
 
-        if not isinstance(value_dt, Date):
-            raise FinError("Valuation date is not a Date")
+        t_exp = option_years(value_dt, self.expiry_dt)
 
-        if value_dt > self.expiry_dt:
-            raise FinError("Valuation date after expiry date.")
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
 
-        if discount_curve.value_dt != value_dt:
-            raise FinError(
-                "Discount Curve valuation date not same as option value date"
-            )
+        if t_exp == 0.0:
+            scalar_input = np.isscalar(stock_price)
+            stock_price = np.asarray(stock_price, dtype=float)
+            if self.call_put_type == OptionTypes.EUROPEAN_CALL:
+                event = stock_price > self.barrier
+            else:
+                event = stock_price < self.barrier
 
-        if dividend_curve.value_dt != value_dt:
-            raise FinError(
-                "Dividend Curve valuation date not same as option value date"
-            )
+            if self.digital_type == DigitalOptionTypes.CASH_OR_NOTHING:
+                payoff = event.astype(float)
+            elif self.digital_type == DigitalOptionTypes.ASSET_OR_NOTHING:
+                payoff = stock_price * event
+            else:
+                raise FinError("Unknown digital option type.")
 
-        t = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        t = max(t, 1e-6)
+            if scalar_input:
+                return float(payoff)
+            return payoff
 
-        df = discount_curve.df(self.expiry_dt)
-        r = -np.log(df) / t
+        r = discount_curve.zero_rate_cc(self.expiry_dt)
+        q = dividend_curve.zero_rate_cc(self.expiry_dt)
 
-        dq = dividend_curve.df(self.expiry_dt)
-        q = -np.log(dq) / t
-
-        v = bs_digital_option_value(stock_price, t, self.barrier, r, q,
-                                    model.volatility,
-                                    self.call_put_type.value,
-                                    self.digital_type.value)
+        v = bs_digital_option_value(
+            stock_price, t_exp, self.barrier, r, q, model.volatility, self.call_put_type.value, self.digital_type.value
+        )
 
         return v
 
-    ###########################################################################
-
-    def value_old(
-        self,
-        value_dt: Date,
-        stock_price: Union[float, np.ndarray],
-        discount_curve: DiscountCurve,
-        dividend_curve: DiscountCurve,
-        model,
-    ):
-        """Digital Option valuation using the Black-Scholes model assuming a
-        barrier at expiry. Handles both cash-or-nothing and asset-or-nothing
-        options."""
-
-        if not isinstance(value_dt, Date):
-            raise FinError("Valuation date is not a Date")
-
-        if value_dt > self.expiry_dt:
-            raise FinError("Valuation date after expiry date.")
-
-        if discount_curve.value_dt != value_dt:
-            raise FinError(
-                "Discount Curve valuation date not same as option value date"
-            )
-
-        if dividend_curve.value_dt != value_dt:
-            raise FinError(
-                "Dividend Curve valuation date not same as option value date"
-            )
-
-        t = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        t = max(t, 1e-6)
-
-        s0 = stock_price
-        x = self.barrier
-        ln_s0_k = np.log(s0 / x)
-        sqrt_t = np.sqrt(t)
-
-        df = discount_curve.df(self.expiry_dt)
-        r = -np.log(df) / t
-
-        dq = dividend_curve.df(self.expiry_dt)
-        q = -np.log(dq) / t
-
-        volatility = model.volatility
-
-        if abs(volatility) < G_SMALL:
-            volatility = G_SMALL
-
-        d1 = ln_s0_k + (r - q + volatility * volatility / 2.0) * t
-        d1 = d1 / volatility / sqrt_t
-        d2 = d1 - volatility * sqrt_t
-        v = None
-
-        if self.digital_type == DigitalOptionTypes.CASH_OR_NOTHING:
-
-            if self.call_put_type == OptionTypes.EUROPEAN_CALL:
-                v = np.exp(-r * t) * normcdf_vect(d2)
-            elif self.call_put_type == OptionTypes.EUROPEAN_PUT:
-                v = np.exp(-r * t) * normcdf_vect(-d2)
-
-        elif self.digital_type == DigitalOptionTypes.ASSET_OR_NOTHING:
-
-            if self.call_put_type == OptionTypes.EUROPEAN_CALL:
-                v = s0 * np.exp(-q * t) * normcdf_vect(d1)
-            elif self.call_put_type == OptionTypes.EUROPEAN_PUT:
-                v = s0 * np.exp(-q * t) * normcdf_vect(-d1)
-
-        else:
-            raise FinError("Unknown underlying type.")
-
-        return v
     ###########################################################################
 
     def value_mc(
@@ -182,7 +110,7 @@ class EquityDigitalOption(EquityOption):
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
-        model,
+        model: Model,
         num_paths: int = 10000,
         seed: int = 4242,
     ):
@@ -190,24 +118,38 @@ class EquityDigitalOption(EquityOption):
         Carlo simulation. Product assumes a barrier only at expiry. Monte Carlo
         handles both a cash-or-nothing and an asset-or-nothing option."""
 
+        t_exp = option_years(value_dt, self.expiry_dt)
+
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, dividend_curve)
+
+        if t_exp == 0.0:
+            if self.call_put_type == OptionTypes.EUROPEAN_CALL:
+                event = stock_price > self.barrier
+            else:
+                event = stock_price < self.barrier
+
+            if self.digital_type == DigitalOptionTypes.CASH_OR_NOTHING:
+                return float(event)
+            if self.digital_type == DigitalOptionTypes.ASSET_OR_NOTHING:
+                return float(stock_price if event else 0.0)
+            raise FinError("Unknown digital option type.")
+
         np.random.seed(seed)
-        t = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        t = max(t, G_SMALL)
 
         df = discount_curve.df(self.expiry_dt)
-        r = -np.log(df) / t
-
-        dq = dividend_curve.df(self.expiry_dt)
-        q = -np.log(dq) / t
+        r = discount_curve.zero_rate_cc(self.expiry_dt)
+        q = dividend_curve.zero_rate_cc(self.expiry_dt)
+        mu = r - q
 
         volatility = model.volatility
         k = self.barrier
-        sqrt_dt = np.sqrt(t)
+        sqrt_t_exp = np.sqrt(t_exp)
 
         # Use Antithetic variables
         g = np.random.normal(0.0, 1.0, size=num_paths)
-        s = stock_price * np.exp((r - q - volatility * volatility / 2.0) * t)
-        m = np.exp(g * sqrt_dt * volatility)
+        s = stock_price * np.exp((mu - volatility * volatility / 2.0) * t_exp)
+        m = np.exp(g * sqrt_t_exp * volatility)
 
         s_1 = s * m
         s_2 = s / m

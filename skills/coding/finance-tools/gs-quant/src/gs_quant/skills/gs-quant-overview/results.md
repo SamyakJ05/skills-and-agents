@@ -1,6 +1,6 @@
 # Result Extraction
 
-Extracting and working with gs_quant calculation results: FloatWithInfo, SeriesWithInfo, DataFrameWithInfo, ErrorValue, MultipleRiskMeasureResult, PortfolioRiskResult. Covers futures, slicing portfolio results by instrument/measure/date, historical results, to_frame(), error handling, and arithmetic."
+Extracting and working with gs_quant calculation results: FloatWithInfo, SeriesWithInfo, DataFrameWithInfo, ErrorValue, MultipleRiskMeasureResult, PortfolioRiskResult. Covers futures, slicing portfolio results by instrument/measure/date, historical results, to_frame(), error handling, and arithmetic.
 
 Calculation results in gs_quant are rich typed objects that carry metadata (risk key, unit, error info) alongside the actual values.
 
@@ -119,6 +119,10 @@ jan_15 = result[dt.date(2025, 1, 15)]  # PortfolioRiskResult for that single dat
 # Available dates
 result.dates  # tuple of dt.date
 ```
+
+**Failed dates.** If the calculation fails on some dates, the series leaves those dates out and
+keeps their `ErrorValue`s in `series.error`, a dict keyed by date. If it fails on every date,
+`.result()` returns the first date's `ErrorValue` instead of a series.
 
 ## Converting to DataFrames
 

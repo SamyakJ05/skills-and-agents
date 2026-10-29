@@ -15,13 +15,13 @@ from ...utils.frequency import FrequencyTypes, annual_frequency
 from ...utils.calendar import CalendarTypes, DateGenRuleTypes
 from ...utils.calendar import Calendar, BusDayAdjustTypes
 from ...utils.helpers import check_argument_types, label_to_string
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.global_types import SwapTypes
 from ...market.curves.discount_curve import DiscountCurve
+from ...utils.check_values import check_curve_dt
 
 from .swap_fixed_leg import SwapFixedLeg
 from .swap_float_leg import SwapFloatLeg
-
 
 ##########################################################################
 
@@ -52,10 +52,11 @@ class IborSwap:
         float_spread: float = 0.0,
         float_freq_type: FrequencyTypes = FrequencyTypes.QUARTERLY,
         float_dc_type: DayCountTypes = DayCountTypes.THIRTY_E_360,
-        cal_type: CalendarTypes | list | tuple = CalendarTypes.WEEKEND,
+        cal_type: CalendarTypes = CalendarTypes.WEEKEND,
         bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
-    ):
+        end_of_month: bool = False,
+    ) -> None:
         """Create an interest rate swap contract giving the contract start
         date, its maturity, fixed cpn, fixed leg frequency, fixed leg day
         count convention and notional. The floating leg parameters have default
@@ -100,6 +101,7 @@ class IborSwap:
             cal_type,
             bd_type,
             dg_type,
+            end_of_month,
         )
 
         self.float_leg = SwapFloatLeg(
@@ -115,6 +117,7 @@ class IborSwap:
             cal_type,
             bd_type,
             dg_type,
+            end_of_month,
         )
 
     ###########################################################################
@@ -139,7 +142,7 @@ class IborSwap:
 
     def set_fixed_rate_to_atm(
         self,
-        valuation_date: Date,
+        value_dt: Date,
         discount_curve: DiscountCurve,
         index_curve: DiscountCurve = None,
         first_fixing: float = None,
@@ -147,9 +150,7 @@ class IborSwap:
         """
         Reset fixed rate to atm given curve(s). returns the new atm
         """
-        atm = self.swap_rate(
-            valuation_date, discount_curve, index_curve, first_fixing
-        )
+        atm = self.swap_rate(value_dt, discount_curve, index_curve, first_fixing)
         self.set_fixed_rate(atm)
         return atm
 
@@ -160,7 +161,7 @@ class IborSwap:
         value_dt: Date,
         discount_curve: DiscountCurve,
         index_curve: DiscountCurve = None,
-        first_fixing_rate=None,
+        first_fixing_rate: float=None,
         pv_only=True,
     ):
         """Value the interest rate swap on a value date given a single Ibor
@@ -169,9 +170,10 @@ class IborSwap:
         if index_curve is None:
             index_curve = discount_curve
 
-        fixed_leg_results = self.fixed_leg.value(
-            value_dt, discount_curve, pv_only=pv_only
-        )
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, index_curve)
+
+        fixed_leg_results = self.fixed_leg.value(value_dt, discount_curve, pv_only=pv_only)
 
         float_leg_results = self.float_leg.value(
             value_dt,
@@ -186,9 +188,7 @@ class IborSwap:
             return value
         else:
             value = fixed_leg_results[0] + float_leg_results[0]
-            cashflow_report = pd.concat(
-                [fixed_leg_results[1], float_leg_results[1]], ignore_index=True
-            )
+            cashflow_report = pd.concat([fixed_leg_results[1], float_leg_results[1]], ignore_index=True)
 
             return value, cashflow_report
 
@@ -196,10 +196,10 @@ class IborSwap:
 
     def valuation_details(
         self,
-        valuation_date: Date,
+        value_dt: Date,
         discount_curve: DiscountCurve,
         index_curve: DiscountCurve = None,
-        first_fixing_rate=None,
+        first_fixing_rate: float=None,
     ):
         """
         A long-hand method that returns various details relevant to valuation in
@@ -210,36 +210,25 @@ class IborSwap:
         (depos, fras, swaps) because we want to present them together so please
         do not stick new outputs into one of them only
         """
+
         if index_curve is None:
             index_curve = discount_curve
 
-        fixed_leg_value = self.fixed_leg.value(valuation_date, discount_curve)
+        check_curve_dt(value_dt, discount_curve)
+        check_curve_dt(value_dt, index_curve)
 
-        float_leg_value = self.float_leg.value(
-            valuation_date, discount_curve, index_curve, first_fixing_rate
-        )
+        fixed_leg_value = self.fixed_leg.value(value_dt, discount_curve)
+
+        float_leg_value = self.float_leg.value(value_dt, discount_curve, index_curve, first_fixing_rate)
 
         value = fixed_leg_value + float_leg_value
-        pv01 = np.abs(
-            fixed_leg_value / self.fixed_leg.cpn / self.fixed_leg.notional
-        )
-        pay_receive_float = (
-            -1 if self.float_leg.leg_type == SwapTypes.PAY else 1
-        )
-        swap_rate = (
-            float_leg_value
-            / self.float_leg.notional
-            / pv01
-            / pay_receive_float
-        )
+        pv01 = self.pv01(value_dt, discount_curve)
+        pay_receive_float = -1 if self.float_leg.leg_type == SwapTypes.PAY else 1
+        swap_rate = float_leg_value / self.float_leg.notional / pv01 / pay_receive_float
 
         # VP: There is significant amount of confusion here with swap_type vs notional.
-        is_payers = (
-            self.fixed_leg.leg_type == SwapTypes.PAY
-            and self.fixed_leg.notional > 0
-        ) or (
-            self.fixed_leg.leg_type == SwapTypes.RECEIVE
-            and self.fixed_leg.notional < 0
+        is_payers = (self.fixed_leg.leg_type == SwapTypes.PAY and self.fixed_leg.notional > 0) or (
+            self.fixed_leg.leg_type == SwapTypes.RECEIVE and self.fixed_leg.notional < 0
         )
 
         pvbp_sign = 1 if is_payers else -1
@@ -255,9 +244,7 @@ class IborSwap:
             "contract_rate": self.fixed_leg.cpn,
             "market_rate": swap_rate,
             "spot_pvbp": pv01 * pvbp_sign,
-            "fwd_pvbp": pv01
-            * pvbp_sign
-            / discount_curve.df(self.effective_dt),
+            "fwd_pvbp": pv01 * pvbp_sign / discount_curve.df(self.effective_dt),
             "unit_value": value / self.fixed_leg.notional,
             "value": value,
             # ignoring bus day adj type, calendar, etc for now
@@ -266,14 +253,10 @@ class IborSwap:
 
     ###########################################################################
 
-    def pv01(self, value_dt, discount_curve):
+    def pv01(self, value_dt: Date, discount_curve: DiscountCurve):
         """Calculate the value of 1 basis point coupon on the fixed leg."""
 
-        pv = self.fixed_leg.value(value_dt, discount_curve)
-        pv01 = pv / self.fixed_leg.cpn / self.fixed_leg.notional
-        # Needs to be positive even if it is a payer leg
-        pv01 = np.abs(pv01)
-        return pv01
+        return self.fixed_leg.pv01(value_dt, discount_curve)
 
     ###########################################################################
 
@@ -293,14 +276,17 @@ class IborSwap:
         approach but in this case the first fixing on the floating leg is
         needed."""
 
+        check_curve_dt(value_dt, discount_curve)
+
+        if index_curve is not None:
+            check_curve_dt(value_dt, index_curve)
+
         pv01 = self.pv01(value_dt, discount_curve)
 
         if abs(pv01) < G_SMALL:
             raise FinError("PV01 is zero. Cannot compute swap rate.")
 
-        float_leg_pv = self.float_leg.value(
-            value_dt, discount_curve, index_curve, first_fixing
-        )
+        float_leg_pv = self.float_leg.value(value_dt, discount_curve, index_curve, first_fixing)
 
         float_leg_pv /= self.float_leg.notional
 
@@ -313,7 +299,7 @@ class IborSwap:
 
     ###########################################################################
 
-    def cash_settled_pv01(self, value_dt, flat_swap_rate, freq_type):
+    def cash_settled_pv01(self, value_dt: Date, flat_swap_rate: float, freq_type):
         """Calculate the forward value of an annuity of a forward starting
         swap using a single flat discount rate equal to the swap rate. This is
         used in the pricing of a cash-settled swaption in the IborSwaption
@@ -330,10 +316,8 @@ class IborSwap:
         while self.fixed_leg.payment_dts[start_index] < value_dt:
             start_index += 1
 
-        # If the swap has yet to settle then we do not include the
-        # start date of the swap as a cpn payment date.
-        if value_dt <= self.effective_dt:
-            start_index = 1
+        # payment_dts contains coupon dates only; the effective date is
+        # not a payment to skip for a forward-starting swap.
 
         # Now PV fixed leg flows.
         flat_pv01 = 0.0
@@ -370,6 +354,96 @@ class IborSwap:
 
         self.fixed_leg.print_payments()
         self.float_leg.print_payments()
+
+    ###########################################################################
+
+    def macaulay_duration(self, value_dt: Date, discount_curve: DiscountCurve, swap_type, payment_periods: float):
+        """Calculation of the Macaulay Duration in an Interest Rate Swap
+        Based on Bond Math: The Theory Behind the Formulas, Second Edition by
+        Donald J. Smith
+        """
+        # Get coupon frequency
+        coupon_frequency = self.fixed_leg.freq_type.value
+
+        # Get swap rate
+        swap_rate_val = self.swap_rate(value_dt, discount_curve)
+
+        y = swap_rate_val / coupon_frequency
+        # payment_periods is the number of periods to maturity as of the beginning of the period;
+        # for instance, If the start date of the interest rate swap is 2024-01-01,
+        # the end date is 2025-12-31, the valuation date is 2024-03-31,
+        # and the frequency type is QUARTERLY,
+        # then the number of payment periods is 8; it is independent of the valuation date.
+        N = payment_periods
+        c = swap_rate_val / coupon_frequency
+        md1 = (1 + y) / y
+        md2 = 1 + y + (N * (c - y))
+        md3 = c * ((1 + y) ** N - 1) + y
+
+        """
+        The party who pays the fixed rate(ie,SwapTypes.PAY) is known as the payer 
+        and the party who receives the fixed rate is known as the receiver. 
+        The fixed‐rate payer and floating‐rate receiver, 
+        sometimes is said to be the “buyer” of the swap, or is “long” the swap.             
+        """
+        if swap_type == SwapTypes.PAY:
+            mac_duration = 1 - (md1 - md2 / md3)
+
+        elif swap_type == SwapTypes.RECEIVE:
+            mac_duration = (1 - (md1 - md2 / md3)) * (-1)
+
+        return mac_duration
+
+    ###########################################################################
+
+    def modified_duration(self, value_dt: Date, discount_curve: DiscountCurve, swap_type, payment_periods: float):
+        """Computation of the Modified Duration for the Fixed-Rate
+        Payer's Perspective in Interest Rate Swap
+        """
+        # Get coupon frequency
+        coupon_frequency = self.fixed_leg.freq_type.value
+
+        # Get swap rate
+        swap_rate_val = self.swap_rate(value_dt, discount_curve)
+
+        modified_duration = (self.macaulay_duration(value_dt, discount_curve, swap_type, payment_periods) /
+                             (1 + swap_rate_val / coupon_frequency))
+
+        return modified_duration
+
+    ###########################################################################
+
+    def change_in_market_value(self,
+                               value_dt: Date, discount_curve: DiscountCurve, swap_type, payment_periods: float,
+                               swap_rate_changes: float):
+        """Computation of the Profits for the Fixed-Rate Payer's Perspective in Interest Rate Swap
+        """
+        # Get coupon frequency
+        coupon_frequency = self.fixed_leg.freq_type.value
+
+        annualized_modi_dur = self.modified_duration(value_dt, discount_curve, swap_type,
+                                                     payment_periods) / coupon_frequency
+
+        delta_mv = (-1) * (annualized_modi_dur * self.fixed_leg.notional * swap_rate_changes)
+
+        return delta_mv
+
+    ###########################################################################
+
+    def basis_point_value(self, value_dt: Date, discount_curve: DiscountCurve, swap_type, payment_periods: float):
+        """
+        calculate the basis‐point‐value (BPV) of the swap,
+        which is swap's modified duration times the notional principal,
+        times one basis point (0.0001)
+        """
+        bp = 0.0001
+        # Get coupon frequency
+        coupon_frequency = self.fixed_leg.freq_type.value
+        modi_dur = self.modified_duration(value_dt, discount_curve, swap_type, payment_periods)
+        annualized_modi_dur = modi_dur / coupon_frequency
+        BPV = annualized_modi_dur * self.fixed_leg.notional * bp
+
+        return BPV
 
     ###########################################################################
 

@@ -3,16 +3,16 @@
 __docformat__ = "google"
 
 import warnings
+from collections.abc import Callable
+from functools import cached_property
 
+import numpy as np
 import pandas as pd
 
-from financetoolkit.helpers import handle_portfolio
+from financetoolkit.helpers import LazyDict, handle_portfolio
 from financetoolkit.performance import performance_model
-from financetoolkit.performance.helpers import (
-    determine_within_dataset,
-    determine_within_historical_data,
-    handle_errors,
-)
+from financetoolkit.performance.helpers import determine_within_dataset
+from financetoolkit.risk.helpers import determine_within_historical_data
 from financetoolkit.risk.risk_model import (
     get_kurtosis,
     get_max_drawdown,
@@ -23,16 +23,24 @@ from financetoolkit.risk.risk_model import (
     get_volatility,
 )
 from financetoolkit.utilities.dataframe_model import filter_columns
+from financetoolkit.utilities.error_model import handle_errors
 from financetoolkit.utilities.logger_model import get_logger
 from financetoolkit.utilities.statistics_model import (
+    PERIOD_TRANSLATION,
+    PERIODS_PER_YEAR,
+    apply_rounding,
     convert_annualized_rate_to_period,
     finalize_dataset,
+    to_multi_index,
+    to_period_index,
 )
 
 # Division by zero is normal in these calculations, not a bug.
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # pylint: disable=too-many-instance-attributes,too-few-public-methods,too-many-lines,too-many-locals
+# The examples' output tables are wider than the line length.
+# ruff: noqa: E501
 
 logger = get_logger()
 
@@ -46,9 +54,9 @@ class Performance:
 
     def __init__(
         self,
-        tickers: str | list[str],
+        tickers: list[str] | Callable[[], list[str]],
         historical_data: dict[str, pd.DataFrame],
-        risk_free_rate_data: pd.DataFrame,
+        risk_free_rate_data: dict[str, pd.Series],
         quarterly: bool | None = None,
         rounding: int | None = 4,
         start_date: str | None = None,
@@ -59,10 +67,14 @@ class Performance:
         """
         Initializes the Performance Controller Class.
 
+        The Toolkit passes the tickers as a function without arguments and the period
+        dictionaries as a LazyDict (financetoolkit.helpers), so a metric retrieves the data of
+        the period it is calculated over when it is first needed, and nothing else.
+
         Args:
-            tickers (str | list[str]): The tickers to use for the calculations.
+            tickers (list[str] | Callable[[], list[str]]): The tickers to use for the calculations.
             historical_data (dict[str, pd.DataFrame]): The historical data to use for the calculations.
-            risk_free_rate_data (pd.DataFrame): The risk free rate data to use for the calculations.
+            risk_free_rate_data (dict[str, pd.Series]): The annualized risk free rate per period frequency.
             quarterly (bool | None, optional): Whether to use quarterly data. Defaults to None.
             rounding (int | None, optional): The number of decimals to round the results to. Defaults to 4.
             start_date (str | None, optional): The start date to use for the calculations. Defaults to None.
@@ -76,7 +88,12 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_capital_asset_pricing_model(period='quarterly')
         ```
@@ -85,69 +102,219 @@ class Performance:
 
         | Date   |    AAPL |    TSLA |
         |:-------|--------:|--------:|
-        | 2022Q3 | -0.0684 | -0.1047 |
-        | 2022Q4 |  0.0857 |  0.0828 |
-        | 2023Q1 |  0.075  |  0.1121 |
-        | 2023Q2 |  0.0922 |  0.1342 |
-        | 2023Q3 |  0.0052 | -0.0482 |
+        | 2021Q2 |  0.1157 |  0.1366 |
+        | 2021Q3 |  0.0064 |  0.0053 |
+        | 2021Q4 |  0.1214 |  0.1869 |
+        | 2022Q1 | -0.0577 | -0.1017 |
+        | 2022Q2 | -0.2135 | -0.3321 |
+        | 2022Q3 | -0.0597 | -0.0828 |
+        | 2022Q4 |  0.1059 |  0.0998 |
+        | 2023Q1 |  0.0831 |  0.152  |
+        | 2023Q2 |  0.1032 |  0.1756 |
+        | 2023Q3 | -0.0416 | -0.1029 |
+        | 2023Q4 |  0.102  |  0.2474 |
+        | 2024Q1 |  0.1038 |  0.1406 |
+        | 2024Q2 |  0.0525 |  0.0589 |
+        | 2024Q3 |  0.0571 |  0.1525 |
+        | 2024Q4 |  0.0217 |  0.0516 |
+        | 2025Q1 | -0.0386 | -0.1499 |
+        | 2025Q2 |  0.1473 |  0.2038 |
+        | 2025Q3 |  0.1031 |  0.1768 |
+        | 2025Q4 |  0.0236 |  0.0495 |
         """
-        self._tickers = tickers
-        self._tickers_without_portfolio = [
-            ticker for ticker in tickers if ticker != "Portfolio"
-        ]
+        self._tickers_source = tickers
         self._benchmark_name = "Benchmark"
         self._quarterly: bool | None = quarterly
         self._rounding: int | None = rounding
         self._start_date: str | None = start_date
         self._end_date: str | None = end_date
         self._progress_bar: bool = progress_bar
+        self._intraday_period: str | None = intraday_period
         self._portfolio_weights: dict | None = None
 
         # Historical Data
         self._historical_data = historical_data
         # The risk free rate is quoted as an annualized yield, so it is converted to the matching frequency. Without this, a daily return would have a full year of risk free rate subtracted from it.  # noqa: E501
-        self._risk_free_rate_data = {
-            frequency: convert_annualized_rate_to_period(rate, frequency)
-            for frequency, rate in risk_free_rate_data.items()
-        }
+        self._risk_free_rate_data = LazyDict(
+            lambda frequency: convert_annualized_rate_to_period(
+                risk_free_rate_data[frequency], frequency
+            )
+        )
 
         # Fama and French
-        self._fama_and_french_dataset: pd.DataFrame = pd.DataFrame()
+        # The Fama and French factors per region, retrieved once each.
+        self._fama_and_french_datasets: dict[str, pd.DataFrame] = {}
         self._fama_and_french_model: pd.DataFrame = pd.DataFrame()
         self._fama_and_french_residuals: pd.DataFrame = pd.DataFrame()
         self._carhart_four_factor_model: pd.DataFrame = pd.DataFrame()
         self._factor_asset_correlations: pd.DataFrame = pd.DataFrame()
         self._factor_correlations: pd.DataFrame = pd.DataFrame()
 
-        # Within Period Calculations
-        daily_historical_data = self._historical_data["daily"].copy()
+        # The daily and intraday data with their excess returns, and the within period data
+        # built from them, each made when a metric first asks for it.
+        self._excess_historical_data = LazyDict(self._add_excess_return)
+        self._within_historical_data = LazyDict(
+            lambda period: determine_within_historical_data(
+                period, self._excess_historical_data, self._intraday_period
+            )
+        )
 
+        # Memo for the column slices handed to the calculations, keyed by (period,
+        # column, within_period, benchmark): nearly every metric starts from the same
+        # few slices and the MCP server collects many metrics per session. Neither
+        # frame is mutated after this point and callers treat the slices as read-only.
+        self._data_cache: dict[
+            tuple[str, str, bool, bool], pd.DataFrame | pd.Series
+        ] = {}
+
+    @cached_property
+    def _tickers(self) -> list[str]:
+        """The tickers, retrieved when first needed."""
+        return (
+            self._tickers_source()
+            if callable(self._tickers_source)
+            else self._tickers_source
+        )
+
+    @cached_property
+    def _tickers_without_portfolio(self) -> list[str]:
+        """The tickers other than the Portfolio."""
+        return [ticker for ticker in self._tickers if ticker != "Portfolio"]
+
+    def _add_excess_return(self, period: str) -> pd.DataFrame:
+        """
+        The daily or intraday historical data with an "Excess Return" block, the data the
+        within-period calculations nest.
+
+        Args:
+            period (str): "daily" or "intraday".
+
+        Returns:
+            pd.DataFrame: The historical data with its "Excess Return" columns; intraday data
+            stays empty without intraday bars.
+        """
+        if period == "intraday":
+            intraday_historical_data = self._historical_data["intraday"]
+            if intraday_historical_data.empty:
+                return intraday_historical_data
+            return self._add_intraday_excess_return(intraday_historical_data.copy())
+
+        daily_historical_data = self._historical_data["daily"]
         excess_return = performance_model.get_excess_return(
             daily_historical_data["Return"], self._risk_free_rate_data["daily"]
         )
         excess_return.columns = pd.MultiIndex.from_product(
             [["Excess Return"], excess_return.columns]
         )
-        daily_historical_data = pd.concat(
-            [daily_historical_data, excess_return], axis=1
+
+        return pd.concat([daily_historical_data, excess_return], axis=1)
+
+    def _add_intraday_excess_return(self, intraday_data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add an "Excess Return" block to the intraday data, the return of each bar minus
+        the risk free rate earned over one bar, so the within-period ratios (Sharpe,
+        Sortino, ...) also work on the intraday bars within a day.
+
+        The per-bar rate spreads the daily risk free rate of the bar's day over the
+        median number of bars in a trading day:
+
+            - Bar Risk Free Rate = (1 + Daily Risk Free Rate)^(1 / Bars per Day) - 1
+
+        Days without a daily rate (e.g. a bar on a day the treasury data has no
+        quote) take the most recent earlier rate.
+
+        Args:
+            intraday_data (pd.DataFrame): The intraday historical data, PeriodIndexed.
+
+        Returns:
+            pd.DataFrame: The intraday data with its "Excess Return" columns.
+        """
+        intraday_data = intraday_data.drop(
+            columns="Excess Return", level=0, errors="ignore"
+        )
+        bars = to_period_index(intraday_data.index)
+        bar_days = bars.asfreq("D")
+        bars_per_day = float(pd.Series(1, index=bars).groupby(bar_days).size().median())
+
+        daily_rate = self._risk_free_rate_data["daily"].sort_index()
+        daily_rate = daily_rate[~daily_rate.index.duplicated(keep="last")]
+        bar_rate = (1 + daily_rate.reindex(bar_days, method="ffill")) ** (
+            1 / bars_per_day
+        ) - 1
+
+        excess_return = intraday_data["Return"].sub(bar_rate.to_numpy(), axis=0)
+        excess_return.columns = pd.MultiIndex.from_product(
+            [["Excess Return"], excess_return.columns]
         )
 
-        intraday_historical_data = self._historical_data["intraday"].copy()
+        return pd.concat([intraday_data, excess_return], axis=1)
 
-        daily_historical_data.index = pd.DatetimeIndex(
-            daily_historical_data.to_timestamp().index
+    def _get_observations_per_year(self, period: str) -> float:
+        """
+        The number of observations in a year of the returns nested within `period`, used to
+        annualize a ratio computed from them. Those are daily returns (252 a year), except
+        for period="daily" and "intraday", which nest the intraday bars: a year then holds
+        252 trading days times the median number of bars per day.
+
+        Args:
+            period (str): The period whose within-period observations are annualized.
+
+        Returns:
+            float: The number of within-period observations per year.
+        """
+        if (
+            period not in ("daily", "intraday")
+            or self._historical_data["intraday"].empty
+        ):
+            return PERIODS_PER_YEAR["daily"]
+
+        bars = self._get_within_historical_data(period).index.get_level_values(1)
+        bars_per_day = (
+            pd.Series(1, index=bars).groupby(bars.asfreq("D")).size().median()
         )
 
-        if not self._historical_data["intraday"].empty:
-            intraday_historical_data.index = pd.DatetimeIndex(
-                intraday_historical_data.to_timestamp().index
+        return PERIODS_PER_YEAR["daily"] * float(bars_per_day)
+
+    def _get_within_historical_data(self, period: str) -> pd.DataFrame:
+        """
+        The within-period historical data for `period`, with the one impossible
+        combination turned into a clear error: a single day only nests observations
+        when intraday data was fetched, so without it the daily entry does not exist
+        and a plain lookup would surface as an unhelpful KeyError. Guarding at the
+        access point (rather than per method) keeps the rolling code paths, which
+        read the regular historical data, free to use period="daily".
+        """
+        if period == "daily" and self._historical_data["intraday"].empty:
+            raise ValueError(
+                "Intraday data is required for within-period daily calculations. "
+                "Initialise the Toolkit with an intraday_period to use period='daily' here."
             )
 
-        self._within_historical_data = determine_within_historical_data(
-            daily_historical_data=daily_historical_data,
-            intraday_historical_data=intraday_historical_data,
-            intraday_period=intraday_period,
-        )
+        return self._within_historical_data[period]
+
+    def _get_column(
+        self, period: str, column: str, within_period: bool, benchmark: bool = False
+    ) -> pd.DataFrame | pd.Series:
+        """
+        The `column` slice for the tickers (a DataFrame) or the benchmark (a Series),
+        memoized per (period, column, within_period, benchmark) pair -- see
+        `_data_cache` in `__init__`. Within-period lookups go through
+        `_get_within_historical_data` so the daily-without-intraday error still
+        surfaces from the call site that asked for it.
+        """
+        key = (period, column, within_period, benchmark)
+
+        if key not in self._data_cache:
+            frame = (
+                self._get_within_historical_data(period)
+                if within_period
+                else self._historical_data[period]
+            )
+            self._data_cache[key] = frame.loc[:, column][
+                self._benchmark_name if benchmark else self._tickers_without_portfolio
+            ]
+
+        return self._data_cache[key]
 
     @handle_errors
     def collect_all_metrics(
@@ -166,7 +333,7 @@ class Performance:
                 Toolkit is initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -187,24 +354,28 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "TSLA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.collect_all_metrics().xs("AAPL", level=1, axis=1)
         ```
 
         Which returns:
 
-        |      |   Win Rate |   Upside Capture Ratio |   Downside Capture Ratio |   M2 Ratio |   Tracking Error |
-        |:-----|-----------:|-----------------------:|-------------------------:|-----------:|-----------------:|
-        | 2021 |     0.5253 |                 1.4003 |                   1.1039 |     0.0065 |           0.0108 |
-        | 2022 |     0.4781 |                 1.3096 |                   1.3186 |    -0.1669 |           0.0115 |
-        | 2023 |     0.576  |                 1.1815 |                   0.9655 |     0.3293 |           0.009  |
-        | 2024 |     0.5    |                 1.117  |                   1.0492 |     0.1905 |           0.0121 |
-        | 2025 |     0.472  |                 1.0324 |                   1.1132 |     0.0709 |           0.0139 |
-        | 2026 |     0.5099 |                 0.678  |                   0.5418 |     0.0919 |           0.0169 |
+        |      |    Alpha |   Beta |     CAPM |   Jensen's Alpha |   Treynor Ratio |   Sharpe Ratio |   Sortino Ratio |   Ulcer Performance Index |   Calmar Ratio |   Sterling Ratio |   Burke Ratio |   Omega Ratio |   Kappa Ratio |   Gain to Pain Ratio |   Win Rate |   Upside Capture Ratio |   Downside Capture Ratio |   M2 Ratio |   Tracking Error |   Information Ratio |   Appraisal Ratio |   STARR Ratio |   Rachev Ratio |   Returns |   Excess Return |
+        |:-----|---------:|-------:|---------:|-----------------:|----------------:|---------------:|----------------:|--------------------------:|---------------:|-----------------:|--------------:|--------------:|--------------:|---------------------:|-----------:|-----------------------:|-------------------------:|-----------:|-----------------:|--------------------:|------------------:|--------------:|---------------:|----------:|----------------:|
+        | 2022 |  -0.0822 | 1.3025 |  -0.2458 |          -0.0182 |         -0.2254 |        -0.0482 |         -0.0675 |                   -4.4186 |        -0.8706 |          -1.0669 |       -0.1137 |        0.8943 |       -0.052  |              -0.1057 |     0.4781 |                 1.3036 |                   1.3242 |    -0.1698 |           0.0115 |             -0.025  |           -0.1098 |       -0.4128 |         1.0788 |   -0.2638 |         -0.2934 |
+        | 2023 |   0.2283 | 1.1148 |   0.2873 |           0.2028 |          0.4041 |         0.1189 |          0.1839 |                   13.8927 |         3.2719 |           3.3669 |        0.5152 |        1.4099 |        0.1284 |               0.4099 |     0.576  |                 1.1755 |                   0.9726 |     0.3296 |           0.009  |              0.0794 |            1.44   |        1.0736 |         1.0726 |    0.489  |          0.4494 |
+        | 2024 |   0.0583 | 0.9686 |   0.2423 |           0.0648 |          0.2736 |         0.07   |          0.1071 |                    7.7225 |         1.9958 |           1.9699 |        0.2621 |        1.2509 |        0.0767 |               0.2509 |     0.5    |                 1.1049 |                   1.0583 |     0.189  |           0.0121 |              0.0207 |            0.3386 |        0.5644 |         1.1443 |    0.3069 |          0.2648 |
+        | 2025 |  -0.0867 | 1.2551 |   0.2115 |          -0.121  |          0.0379 |         0.0188 |          0.0283 |                    0.9488 |         0.2913 |           0.445  |        0.0249 |        1.0903 |        0.0186 |               0.0903 |     0.472  |                 1.0147 |                   1.1139 |     0.0714 |           0.0139 |             -0.0127 |           -0.5668 |        0.0659 |         1.0729 |    0.0904 |          0.0475 |
+        | 2021 | nan      | 1.3196 | nan      |         nan      |        nan      |         0.0859 |          0.129  |                  nan      |       nan      |         nan      |      nan      |        1.2632 |        0.0943 |               0.2632 |     0.4921 |                 1.3706 |                   1.432  |   nan      |           0.0118 |              0.0266 |          nan      |      nan      |         0.9957 |    0.3811 |          0.3667 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-        rounding = rounding if rounding else self._rounding
+        rounding = rounding if rounding is not None else self._rounding
 
         performance_metrics = {
             "Alpha": self.get_alpha(
@@ -424,6 +595,13 @@ class Performance:
             - Beta = Monthly Covariance of Asset Returns and Benchmark Returns
             / Monthly Variance of Benchmark Returns
 
+        Beta is read against 1, the benchmark's own beta: above 1 the asset tends to amplify market moves,
+        below 1 to dampen them. Each period's Beta comes from the daily returns within that period, so a yearly
+        figure rests on about 250 observations and can swing with a single turbulent month; a rolling window
+        (for example period='monthly' with rolling=36) gives a steadier estimate for cost of capital work. A Beta
+        close to zero can come from a low correlation with the market rather than from low volatility, so it is
+        worth checking both before calling a stock defensive.
+
         See definition: https://en.wikipedia.org/wiki/Beta_(finance)
 
         Also known as: market sensitivity, systematic risk.
@@ -431,11 +609,11 @@ class Performance:
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
                 initialised with quarterly=True, otherwise "yearly".
-            rolling (int, optional): The rolling period to use for the calculation. If you select
-            period = 'monthly' and set rolling to 12 you obtain the rolling 12-month Sharpe Ratio.
+            rolling (int, optional): The rolling window size to use for the calculation. If you select
+                period = 'monthly' and set rolling to 12 you obtain the rolling 12-month Beta. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -447,7 +625,6 @@ class Performance:
         - Daily Beta is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
         not give any useful insights.
         - The method retrieves historical data and calculates the Beta for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -455,32 +632,32 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "AMZN"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["NVDA", "TSLA", "JPM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_beta()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   AMZN |
-        |:-------|-------:|-------:|
-        | 2021   | 1.3093 | 1.0276 |
-        | 2022   | 1.2989 | 1.6292 |
-        | 2023   | 1.1    | 1.5133 |
-        | 2024   | 0.9656 | 1.5442 |
-        | 2025   | 1.2485 | 1.3264 |
-        | 2026   | 0.7887 | 1.281  |
+        | Date   |   NVDA |   TSLA |    JPM |
+        |:-------|-------:|-------:|-------:|
+        | 2021   | 2.0429 | 1.9542 | 0.8378 |
+        | 2022   | 2.2015 | 1.7398 | 0.8813 |
+        | 2023   | 2.0247 | 2.2485 | 0.8724 |
+        | 2024   | 2.659  | 2.3803 | 0.8013 |
+        | 2025   | 1.8732 | 2.2343 | 0.9478 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        historical_data = (
-            self._within_historical_data[period]
-            if not rolling
-            else self._historical_data[period]
+        returns = self._get_column(period, "Return", within_period=not rolling)
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=not rolling, benchmark=True
         )
-
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
 
         if rolling:
             beta = performance_model.get_rolling_beta(
@@ -541,6 +718,13 @@ class Performance:
 
         - Capital Asset Pricing Model = Risk Free Rate + Beta * (Benchmark Returns — Risk Free Rate)
 
+        The CAPM here uses the benchmark's realised return of each period, so the result is the return the asset
+        should have earned given what the market actually did. That makes it a yardstick for Jensen's Alpha rather
+        than a forward-looking expected return. For a cost of equity, practitioners use an expected market risk
+        premium instead of the realised one (see the Toolkit's `get_market_risk_premium`) together with a longer-run
+        Beta. In periods in which the benchmark returns less than the risk-free rate, a high-Beta asset gets a lower
+        required return than a low-Beta one.
+
         See definition: https://en.wikipedia.org/wiki/Capital_asset_pricing_model
 
         Also known as: CAPM, expected return model.
@@ -553,7 +737,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -565,7 +749,9 @@ class Performance:
         - Daily CAPM is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
         not give any useful insights.
         - The method retrieves historical data and calculates the CAPM for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -573,43 +759,49 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["JPM", "GS", "MS"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_capital_asset_pricing_model()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.3494 |  0.4914 |
-        | 2022   | -0.2646 | -0.3666 |
-        | 2023   |  0.2633 |  0.4905 |
-        | 2024   |  0.2266 |  0.4924 |
-        | 2025   |  0.1938 |  0.3135 |
-        | 2026   |  0.0822 |  0.1364 |
+        | Date   |     JPM |      GS |      MS |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.2426 |  0.2808 |  0.3177 |
+        | 2022   | -0.1567 | -0.173  | -0.1915 |
+        | 2023   |  0.2334 |  0.276  |  0.3055 |
+        | 2024   |  0.2077 |  0.28   |  0.2632 |
+        | 2025   |  0.1702 |  0.221  |  0.2174 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             beta = performance_model.get_rolling_beta(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_data = self._within_historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             beta = performance_model.get_beta(returns, benchmark_returns)
 
         risk_free_rate = self._risk_free_rate_data[period]
-        benchmark_returns = self._historical_data[period].loc[:, "Return"][
-            self._benchmark_name
-        ]
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
 
         capm = performance_model.get_capital_asset_pricing_model(
             risk_free_rate, beta, benchmark_returns
@@ -629,11 +821,28 @@ class Performance:
             dropna=True,
         )
 
+    def _get_fama_and_french_dataset(self, region: str) -> pd.DataFrame:
+        """
+        The Fama and French 5 factors of a region, retrieved once per region.
+
+        Args:
+            region (str): The region, see performance_model.FACTOR_REGIONS.
+
+        Returns:
+            pd.DataFrame: The daily factors as decimals.
+        """
+        if region not in self._fama_and_french_datasets:
+            self._fama_and_french_datasets[region] = (
+                performance_model.obtain_fama_and_french_dataset(region=region)
+            )
+        return self._fama_and_french_datasets[region]
+
     @handle_errors
     def get_factor_asset_correlations(
         self,
         period: str | None = None,
         factors_to_calculate: list[str] | None = None,
+        region: str = "United States",
         rounding: int | None = None,
         show_columns: list[str] | None = None,
     ):
@@ -652,6 +861,12 @@ class Performance:
         However, since the results are closely related and tend to point into the same direction it could
         be fine to use correlations as well depending on the level of accuracy required.
 
+        The formula is as follows:
+
+        - Excess Return = Daily Asset Return - Daily Risk Free Rate (RF)
+        - Factor Asset Correlation = Pearson Correlation (Daily Excess Return, Daily Factor Return), using the
+          daily Fama and French 5 Factor returns within each period (e.g. each year)
+
         Also known as: factor exposure, asset correlations.
 
         Args:
@@ -659,6 +874,13 @@ class Performance:
                 initialised with quarterly=True, otherwise "yearly".
             factors_to_calculate (list of str, optional): List of factors to calculate scores and residuals for.
                 Defaults to ["Mkt-RF", "SMB", "HML", "RMW", "CMA"].
+            region (str, optional): The region whose factors to use: "United States", "Developed",
+                "Developed ex US", "Europe", "Japan", "Asia Pacific ex Japan" or "North America" (the
+                factors of Ken French's library for that region's stocks). Every region's factors are
+                U.S. dollar returns with the U.S. one-month Treasury bill as the risk-free rate (RF),
+                so a ticker quoted in another currency is best analysed with its U.S. dollar returns;
+                otherwise the exchange rate's moves end up in the factor loadings, mostly the market
+                beta. Defaults to "United States".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             show_columns (list of str, optional): Restrict the result to these top level columns.
                 Defaults to None, which returns every column.
@@ -672,21 +894,21 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["CAT", "PFE", "ORCL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_factor_asset_correlations()["AAPL"]
+        toolkit.performance.get_factor_asset_correlations()["CAT"]
         ```
 
         Which returns:
 
-        |      |   Mkt-RF |     SMB |     HML |     RMW |     CMA |
-        |:-----|---------:|--------:|--------:|--------:|--------:|
-        | 2021 |   0.6626 | -0.0091 | -0.3248 | -0.0655 | -0.0029 |
-        | 2022 |   0.8796 |  0.0561 | -0.5479 | -0.2577 | -0.4763 |
-        | 2023 |   0.6988 | -0.0083 | -0.2833 | -0.1014 | -0.463  |
-        | 2024 |   0.5184 |  0.0358 | -0.3171 | -0.0563 | -0.0977 |
-        | 2025 |   0.7408 |  0.0646 | -0.2085 | -0.1108 |  0.0761 |
-        | 2026 |   0.4609 |  0.0502 | -0.1759 | -0.0847 | -0.0546 |
+        |      |   Mkt-RF |    SMB |     HML |     RMW |     CMA |
+        |:-----|---------:|-------:|--------:|--------:|--------:|
+        | 2025 |    0.698 | 0.2883 | -0.2279 | -0.2868 | -0.0246 |
         """
 
         factors_to_calculate = (
@@ -702,19 +924,12 @@ class Performance:
                 )
 
         period = period if period else "quarterly" if self._quarterly else "yearly"
+        returns = self._get_column(period, "Return", within_period=True)
 
-        historical_data_within = self._within_historical_data[period]
-        returns = historical_data_within.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
-
-        if self._fama_and_french_dataset.empty:
-            self._fama_and_french_dataset = (
-                performance_model.obtain_fama_and_french_dataset()
-            )
+        fama_and_french_dataset = self._get_fama_and_french_dataset(region)
 
         fama_and_french_period = determine_within_dataset(
-            dataset=self._fama_and_french_dataset, period=period, correlation=False
+            dataset=fama_and_french_dataset, period=period, correlation=False
         )
 
         merged_df = fama_and_french_period.merge(
@@ -760,8 +975,9 @@ class Performance:
             .reindex(self._tickers_without_portfolio, level=0, axis=1)
         )
 
-        self._factor_asset_correlations = factor_asset_correlations.round(
-            rounding if rounding else self._rounding
+        self._factor_asset_correlations = apply_rounding(
+            factor_asset_correlations,
+            rounding if rounding is not None else self._rounding,
         ).loc[self._start_date : self._end_date]
 
         return filter_columns(self._factor_asset_correlations, show_columns)
@@ -772,6 +988,7 @@ class Performance:
         period: str | None = None,
         factors_to_calculate: list[str] | None = None,
         exclude_risk_free: bool = True,
+        region: str = "United States",
         rounding: int | None = None,
     ):
         """
@@ -789,6 +1006,11 @@ class Performance:
 
         Optionally, it is also possible to see the correlation between the risk-free rate and each factor.
 
+        The formula is as follows:
+
+        - Factor Correlation = Pearson Correlation (Daily Factor A Return, Daily Factor B Return), using the
+          daily Fama and French 5 Factor returns within each period (e.g. each year)
+
         Also known as: factor model correlations.
 
         Args:
@@ -797,6 +1019,11 @@ class Performance:
             factors_to_calculate (list of str, optional): List of factors to calculate scores and residuals for.
                 Defaults to ["Mkt-RF", "SMB", "HML", "RMW", "CMA"].
             exclude_risk_free (bool, optional): Whether to exclude the risk-free rate from the results. Defaults to True.
+            region (str, optional): The region whose factors to use: "United States", "Developed",
+                "Developed ex US", "Europe", "Japan", "Asia Pacific ex Japan" or "North America" (the
+                factors of Ken French's library for that region's stocks). Every region's factors are
+                U.S. dollar returns with the U.S. one-month Treasury bill as the risk-free rate (RF).
+                Defaults to "United States".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
 
         Returns:
@@ -809,20 +1036,26 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY", start_date="2023-01-01")
+        toolkit = Toolkit(
+            ["SPY"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+            benchmark_ticker=None,
+        )
 
         toolkit.performance.get_factor_correlations()
         ```
 
         Which returns:
 
-        |                 |   Mkt-RF |     SMB |     HML |     RMW |     CMA |
-        |:----------------|---------:|--------:|--------:|--------:|--------:|
-        | (2026, 'Mkt-RF')|   1      |  0.1702 | -0.4054 | -0.5902 | -0.4198 |
-        | (2026, 'SMB')   |   0.1702 |  1      |  0.2113 | -0.1127 |  0.2437 |
-        | (2026, 'HML')   |  -0.4054 |  0.2113 |  1      |  0.3432 |  0.7051 |
-        | (2026, 'RMW')   |  -0.5902 | -0.1127 |  0.3432 |  1      |  0.4182 |
-        | (2026, 'CMA')   |  -0.4198 |  0.2437 |  0.7051 |  0.4182 |  1      |
+        |                    |   Mkt-RF |     SMB |     HML |     RMW |    CMA |
+        |:-------------------|---------:|--------:|--------:|--------:|-------:|
+        | ('2025', 'Mkt-RF') |   1      |  0.1744 | -0.3814 | -0.4273 | 0.0586 |
+        | ('2025', 'SMB')    |   0.1744 |  1      |  0.2143 | -0.2924 | 0.2143 |
+        | ('2025', 'HML')    |  -0.3814 |  0.2143 |  1      |  0.3573 | 0.2218 |
+        | ('2025', 'RMW')    |  -0.4273 | -0.2924 |  0.3573 |  1      | 0.0657 |
+        | ('2025', 'CMA')    |   0.0586 |  0.2143 |  0.2218 |  0.0657 | 1      |
         """
         factors_to_calculate = (
             factors_to_calculate
@@ -844,20 +1077,39 @@ class Performance:
             else factors_to_calculate
         )
 
-        if self._fama_and_french_dataset.empty:
-            self._fama_and_french_dataset = (
-                performance_model.obtain_fama_and_french_dataset()
-            )
+        fama_and_french_dataset = self._get_fama_and_french_dataset(region)
+
+        # The correlations are calculated for the whole periods within the date range
+        # only, rather than for every period since 1963 and then sliced.
+        period_symbol = PERIOD_TRANSLATION[period]
+        first_period_start = (
+            pd.Period(self._start_date, freq=period_symbol).start_time
+            if self._start_date
+            else None
+        )
+        last_period_end = (
+            pd.Period(self._end_date, freq=period_symbol).end_time
+            if self._end_date
+            else None
+        )
+        factor_dataset = fama_and_french_dataset[factors_to_calculate]
+        factor_dates = factor_dataset.index.to_timestamp()
+        within_range = np.ones(len(factor_dataset), dtype=bool)
+
+        if first_period_start is not None:
+            within_range &= factor_dates >= first_period_start
+        if last_period_end is not None:
+            within_range &= factor_dates <= last_period_end
 
         fama_and_french_period = determine_within_dataset(
-            self._fama_and_french_dataset[factors_to_calculate],
+            factor_dataset.loc[within_range],
             period,
             correlation=True,
         )
 
         # The Ken French dataset starts in 1963, so without this slice the result covers six decades regardless of the date range the Toolkit was initialised with.  # noqa: E501
-        self._factor_correlations = fama_and_french_period.round(
-            rounding if rounding else self._rounding
+        self._factor_correlations = apply_rounding(
+            fama_and_french_period, rounding if rounding is not None else self._rounding
         ).loc[self._start_date : self._end_date]
 
         return self._factor_correlations
@@ -869,6 +1121,7 @@ class Performance:
         method: str = "multi",
         factors_to_calculate: list[str] | None = None,
         include_daily_residuals: bool = False,
+        region: str = "United States",
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -921,6 +1174,13 @@ class Performance:
         (Mkt-RF) factor as this is the main factor that explains the stock return (as also prevalent in the CAPM).
         The other factors can fluctuate greatly between stocks depending on which stocks you look at.
 
+        The slopes are read as tilts: a positive HML slope is a value tilt and a negative one a growth tilt, a
+        negative SMB slope marks a large-cap profile, and RMW and CMA show exposure to profitable and conservatively
+        investing firms. With about 250 daily observations per year the slopes of the smaller factors are noisy, so
+        only loadings that are large and persist across periods say much about a stock or fund. The R Squared shows
+        how much of the daily excess return the factors explain; a low value leaves most of the return to
+        stock-specific news.
+
         Also known as: Fama-French model, three-factor model, five-factor model, FF3, FF5.
 
         Args:
@@ -931,6 +1191,13 @@ class Performance:
                 Defaults to ["Mkt-RF", "SMB", "HML", "RMW", "CMA"].
             include_daily_residuals (bool, optional): Whether to also return the pointwise (daily)
                 regression residuals as a second DataFrame. Defaults to False.
+            region (str, optional): The region whose factors to use: "United States", "Developed",
+                "Developed ex US", "Europe", "Japan", "Asia Pacific ex Japan" or "North America" (the
+                factors of Ken French's library for that region's stocks). Every region's factors are
+                U.S. dollar returns with the U.S. one-month Treasury bill as the risk-free rate (RF),
+                so a ticker quoted in another currency is best analysed with its U.S. dollar returns;
+                otherwise the exchange rate's moves end up in the factor loadings, mostly the market
+                beta. Defaults to "United States".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratio values. Defaults to False.
             lag (int or list of int, optional): The lag to use for the growth calculation. Defaults to 1.
@@ -959,22 +1226,26 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["IWM", "VTV", "MTUM"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         # Calculate Fama and French 5 Factor model scores
-        toolkit.performance.get_fama_and_french_model()["AAPL"]
+        toolkit.performance.get_fama_and_french_model()["IWM"].drop(columns="Mean Squared Error (MSE)")
         ```
 
-        Which returns (the MSE column is omitted here for brevity):
+        Which returns:
 
         |      |   Intercept |   Mkt-RF Slope |   SMB Slope |   HML Slope |   RMW Slope |   CMA Slope |   R Squared |
         |:-----|------------:|---------------:|------------:|------------:|------------:|------------:|------------:|
-        | 2021 |      0.0002 |         1.1928 |     -0.174  |     -1.1611 |      0.3114 |      1.9876 |      0.7193 |
-        | 2022 |     -0.0001 |         1.2569 |     -0.2956 |     -0.6153 |      0.2337 |      0.6806 |      0.8178 |
-        | 2023 |      0.0003 |         1.1335 |     -0.0897 |     -0.4493 |      0.4512 |      0.0025 |      0.5908 |
-        | 2024 |      0.0002 |         0.8749 |      0.2648 |     -0.5816 |      0.729  |      0.0359 |      0.3496 |
-        | 2025 |     -0.0001 |         1.4494 |     -0.0714 |      0.1007 |      0.8112 |      0.0136 |      0.6031 |
-        | 2026 |      0.0004 |         1.1722 |     -0.1766 |     -0.3145 |      0.463  |      0.7267 |      0.2918 |
+        | 2021 |     -0.0003 |         1.0529 |      0.8267 |      0.0728 |     -0.1204 |     -0.0334 |      0.9868 |
+        | 2022 |     -0.0001 |         1.0343 |      0.893  |      0.0645 |     -0.0553 |      0.0654 |      0.9917 |
+        | 2023 |     -0.0001 |         1.0292 |      0.8647 |      0.141  |     -0.0731 |      0.0794 |      0.9871 |
+        | 2024 |      0      |         1.0396 |      0.8723 |      0.1568 |     -0.0685 |      0.0143 |      0.9838 |
+        | 2025 |      0      |         0.9702 |      0.8649 |      0.1317 |     -0.1871 |     -0.0235 |      0.9826 |
         """
         if method not in ["simple", "multi"]:
             raise ValueError(
@@ -996,17 +1267,12 @@ class Performance:
                 )
 
         period = period if period else "quarterly" if self._quarterly else "yearly"
+        returns = self._get_column(period, "Return", within_period=True)
 
-        historical_data_within = self._within_historical_data[period]
-        returns = historical_data_within.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        fama_and_french_dataset = self._get_fama_and_french_dataset(region)
 
-        self._fama_and_french_dataset = (
-            performance_model.obtain_fama_and_french_dataset()
-        )
         fama_and_french_period = determine_within_dataset(
-            self._fama_and_french_dataset, period, correlation=False
+            fama_and_french_dataset, period, correlation=False
         )
 
         merged_df = fama_and_french_period.merge(
@@ -1088,9 +1354,10 @@ class Performance:
                 orient="index",
             )
 
-            fama_and_french_model = fama_and_french_model.unstack(
-                level=0, sort=False
-            ).swaplevel(0, 1, axis=1)
+            fama_and_french_model = fama_and_french_model.unstack(level=0, sort=False)
+            fama_and_french_model.columns = to_multi_index(
+                fama_and_french_model.columns
+            ).swaplevel(0, 1)
 
             # Sort the DataFrame with respect to the original column order
             tickers_column_order = fama_and_french_model.columns.get_level_values(
@@ -1136,8 +1403,8 @@ class Performance:
                 .reindex(ticker_column_order, level=0, axis=1)
             )
 
-        self._fama_and_french_model = fama_and_french_model.round(
-            rounding if rounding else self._rounding
+        self._fama_and_french_model = apply_rounding(
+            fama_and_french_model, rounding if rounding is not None else self._rounding
         ).loc[self._start_date : self._end_date]
 
         if include_daily_residuals:
@@ -1180,8 +1447,8 @@ class Performance:
                 .reset_index(level=0, drop=True)
             )
 
-            self._fama_and_french_residuals = daily_residuals_df.round(
-                rounding if rounding else self._rounding
+            self._fama_and_french_residuals = apply_rounding(
+                daily_residuals_df, rounding if rounding is not None else self._rounding
             ).loc[self._start_date : self._end_date]
 
             return (
@@ -1210,6 +1477,7 @@ class Performance:
     def get_carhart_four_factor_model(
         self,
         period: str | None = None,
+        region: str = "United States",
         rounding: int | None = None,
         growth: bool = False,
         lag: int | list[int] = 1,
@@ -1228,10 +1496,14 @@ class Performance:
             - Value Premium (HML): The historical excess return of value stocks over growth stocks.
             - Momentum (MOM): The historical excess return of prior winner stocks over prior loser stocks.
 
-        The model performs a Multi Linear Regression on all four factors and defines the regression
-        parameters for each asset over time based on its exposure to these factors:
+        The model performs a Multi Linear Regression (ordinary least squares) on all four factors and defines
+        the regression parameters for each asset over time based on its exposure to these factors.
 
-            - Excess Return = Intercept + Beta1 * Mkt-RF + Beta2 * SMB + Beta3 * HML + Beta4 * MOM + Residuals
+        The formula is as follows:
+
+        - Excess Return = Daily Asset Return - Daily Risk Free Rate (RF, from the Fama and French dataset)
+        - Excess Return = Intercept + Beta1 * Mkt-RF + Beta2 * SMB + Beta3 * HML + Beta4 * MOM + Residuals,
+          fitted on the daily returns within each period (e.g. each quarter)
 
         For more information about the method, see the following paper:
 
@@ -1243,6 +1515,13 @@ class Performance:
         Args:
             period (str, optional): The period for the calculation (e.g., "weekly", "monthly", "quarterly", "yearly").
                 Defaults to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
+            region (str, optional): The region whose factors to use: "United States", "Developed",
+                "Developed ex US", "Europe", "Japan", "Asia Pacific ex Japan" or "North America" (the
+                factors of Ken French's library for that region's stocks). Every region's factors are
+                U.S. dollar returns with the U.S. one-month Treasury bill as the risk-free rate (RF),
+                so a ticker quoted in another currency is best analysed with its U.S. dollar returns;
+                otherwise the exchange rate's moves end up in the factor loadings, mostly the market
+                beta. Defaults to "United States".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratio values. Defaults to False.
             lag (int or list of int, optional): The lag to use for the growth calculation. Defaults to 1.
@@ -1273,31 +1552,37 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XOM", "HD", "ADBE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_carhart_four_factor_model(period="quarterly")["AMZN"]
+        toolkit.performance.get_carhart_four_factor_model(period="quarterly")["XOM"].drop(
+            columns="Mean Squared Error (MSE)"
+        )
         ```
 
-        Which returns (columns are Intercept, Mkt-RF/SMB/HML/MOM Slope, MSE and R Squared, per ticker):
+        Which returns:
 
         |        |   Intercept |   Mkt-RF Slope |   SMB Slope |   HML Slope |   MOM Slope |   R Squared |
         |:-------|------------:|---------------:|------------:|------------:|------------:|------------:|
-        | 2025Q4 |      0.0004 |         1.0218 |     -0.2372 |      0.2779 |     -0.2565 |      0.417  |
-        | 2026Q1 |     -0.0004 |         1.1562 |     -0.6432 |      0.3531 |      0.0224 |      0.3379 |
-        | 2026Q2 |      0.0009 |         0.8212 |      0.1163 |     -0.151  |     -0.1926 |      0.1799 |
+        | 2025Q1 |      0.0021 |         0.7335 |      0.2739 |      0.4818 |     -0.7225 |      0.317  |
+        | 2025Q2 |     -0.0002 |         0.8881 |     -0.7307 |      1.6062 |     -0.7248 |      0.6805 |
+        | 2025Q3 |      0.0003 |         0.3232 |     -0.1805 |      0.6496 |     -0.2369 |      0.2179 |
+        | 2025Q4 |      0.0005 |         0.4852 |     -0.2193 |      0.6778 |     -0.0933 |      0.1938 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data_within = self._within_historical_data[period]
-        returns = historical_data_within.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        returns = self._get_column(period, "Return", within_period=True)
 
         # Carhart (1997) extends the *three* factor model. The three and five factor files share Mkt-RF, HML and RF but their SMB series differ, so the three factor file is the correct source here.  # noqa: E501
         three_factor_dataset = (
-            performance_model.obtain_fama_and_french_three_factor_dataset()
+            performance_model.obtain_fama_and_french_three_factor_dataset(region=region)
         )
-        momentum_dataset = performance_model.obtain_carhart_momentum_dataset()
+        momentum_dataset = performance_model.obtain_carhart_momentum_dataset(
+            region=region
+        )
 
         carhart_dataset = three_factor_dataset[["Mkt-RF", "SMB", "HML", "RF"]].merge(
             momentum_dataset, left_index=True, right_index=True
@@ -1349,9 +1634,8 @@ class Performance:
             orient="index",
         )
 
-        carhart_model = carhart_model.unstack(level=0, sort=False).swaplevel(
-            0, 1, axis=1
-        )
+        carhart_model = carhart_model.unstack(level=0, sort=False)
+        carhart_model.columns = to_multi_index(carhart_model.columns).swaplevel(0, 1)
 
         tickers_column_order = carhart_model.columns.get_level_values(0).unique()
         parameters_column_order = carhart_model.columns.get_level_values(1).unique()
@@ -1362,8 +1646,8 @@ class Performance:
             .reindex(parameters_column_order, level=1, axis=1)
         )
 
-        self._carhart_four_factor_model = carhart_model.round(
-            rounding if rounding else self._rounding
+        self._carhart_four_factor_model = apply_rounding(
+            carhart_model, rounding if rounding is not None else self._rounding
         ).loc[self._start_date : self._end_date]
 
         return filter_columns(
@@ -1380,6 +1664,146 @@ class Performance:
                 row_slice=True,
             ),
             show_columns,
+        )
+
+    @handle_errors
+    def get_style_analysis(
+        self,
+        style_tickers: str | list[str],
+        period: str = "monthly",
+        window: int | None = None,
+        rounding: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Calculate the returns-based style analysis (Sharpe, 1992) of every ticker: the mix of
+        style indices, such as growth and value, large and small caps or bonds, whose returns
+        track the ticker's returns most closely. The weights are found by minimizing the
+        variance of the difference between the ticker's return and the weighted style returns,
+        with every weight between 0 and 1 and the weights adding up to 1, so they read as the
+        effective asset mix of a fund without knowing its holdings.
+
+        The R Squared is the share of the ticker's variance the styles explain; what they do
+        not explain is the Selection Return (the return of the manager's own choices, annualized)
+        with its volatility, the Tracking Error. These three are in-sample: they are measured
+        over the same returns the weights are fitted to, which flatters the fit, as the weights
+        are chosen to explain exactly those returns.
+
+        A window estimates the weights over a rolling number of periods instead, which shows how
+        a fund's style drifts over time, and adds Sharpe's out-of-sample measure of selection:
+        the Out-of-Sample Selection Return of a date is the ticker's return of that period minus
+        the return of that period of the style mix estimated over the window that ends one
+        period earlier (Sharpe uses the previous 60 months). It is a return per period, not
+        annualized, and NaN for the first window, which has no earlier estimate. Its average
+        shows whether the manager added value beyond a passive mix of the styles the fund was
+        known to follow.
+
+        The style indices are tickers of the Toolkit as well (an ETF per style works well, for
+        example IWF, IWD, IWO and IWN for US large and small cap growth and value and AGG for
+        bonds), and every other ticker is analyzed against them. "Benchmark" can be one of them.
+
+        For more information, see the following paper:
+
+        - Sharpe, W.F. (1992). "Asset Allocation: Management Style and Performance
+          Measurement." The Journal of Portfolio Management, 18(2), 7-19.
+
+        Also known as: returns-based style analysis, RBSA, style regression, effective asset mix,
+        selection return.
+
+        Args:
+            style_tickers (str | list[str]): The tickers of the style indices, as a list or a
+                comma-separated string.
+            period (str, optional): The return frequency (daily, weekly, monthly, quarterly or
+                yearly). Defaults to "monthly".
+            window (int | None, optional): The number of periods to estimate the weights over on a
+                rolling basis, which adds the Out-of-Sample Selection Return. Defaults to None,
+                which uses every period.
+            rounding (int | None, optional): The number of decimals to round the results to.
+                Defaults to None, which uses the rounding of the Toolkit.
+
+        Returns:
+            pd.DataFrame: Per ticker the weight of every style, the R Squared, the Selection Return
+            and the Tracking Error, or with a window the same and the Out-of-Sample Selection
+            Return per date (the last date of every window) and ticker. A ticker with no more
+            returns than there are styles (in a window) is NaN.
+
+        As an example:
+
+        ```python
+        from financetoolkit import Toolkit
+
+        toolkit = Toolkit(
+            ["ARKK", "IWF", "IWD", "IWO", "IWN", "AGG"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2019-01-01",
+            end_date="2025-12-31",
+        )
+
+        toolkit.performance.get_style_analysis(["IWF", "IWD", "IWO", "IWN", "AGG"])
+        ```
+
+        Which returns:
+
+        |      |    IWF |   IWD |    IWO |   IWN |   AGG |   R Squared |   Selection Return |   Tracking Error |
+        |:-----|-------:|------:|-------:|------:|------:|------------:|-------------------:|-----------------:|
+        | ARKK | 0.0091 |     0 | 0.9909 |     0 |     0 |      0.6123 |             0.0638 |           0.2632 |
+        """
+        if period not in PERIODS_PER_YEAR:
+            raise ValueError(
+                "Period must be daily, weekly, monthly, quarterly or yearly."
+            )
+        # A comma-separated string (as the MCP server passes a list) is split.
+        style_tickers = (
+            [ticker.strip() for ticker in style_tickers.split(",") if ticker.strip()]
+            if isinstance(style_tickers, str)
+            else list(style_tickers)
+        )
+        returns = self._historical_data[period].loc[:, "Return"]
+        if missing := [ticker for ticker in style_tickers if ticker not in returns]:
+            raise ValueError(
+                f"The style tickers {', '.join(missing)} are not part of the Toolkit; add "
+                "them to its tickers."
+            )
+        funds = [
+            ticker
+            for ticker in self._tickers_without_portfolio
+            if ticker not in style_tickers
+        ]
+        if not funds:
+            raise ValueError(
+                "Every ticker is a style ticker, so there is nothing to analyze."
+            )
+
+        returns = returns.loc[
+            self._start_date : self._end_date, [*funds, *style_tickers]
+        ]
+        # When the prices start within the range, their first period has no prior close and so no return for any ticker; leaving it in would give the first window one observation fewer than `window`.  # noqa: E501
+        if (first_return := returns.first_valid_index()) is not None:
+            returns = returns.loc[first_return:]
+        periods_per_year = PERIODS_PER_YEAR[period]
+
+        # A fund with too few returns (a recent listing, say) comes back as NaN in the model, so it does not empty the result of every other fund.  # noqa: E501
+        if window is None:
+            result = pd.DataFrame(
+                {
+                    fund: performance_model.get_style_analysis(
+                        returns[fund], returns[style_tickers], periods_per_year
+                    )
+                    for fund in funds
+                }
+            ).T
+        else:
+            result = pd.concat(
+                {
+                    fund: performance_model.get_rolling_style_analysis(
+                        returns[fund], returns[style_tickers], window, periods_per_year
+                    )
+                    for fund in funds
+                },
+                axis=1,
+            )
+
+        return apply_rounding(
+            result, rounding if rounding is not None else self._rounding
         )
 
     @handle_portfolio
@@ -1410,12 +1834,14 @@ class Performance:
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
                 initialised with quarterly=True, otherwise "yearly".
+            show_full_results (bool, optional): Whether to show the actual and benchmark returns next to the
+                Alpha. Defaults to False.
             rolling (int, optional): The rolling window size to use for the calculation. If set,
             Alpha is calculated as the rolling mean excess return over this many periods across
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -1432,27 +1858,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["COST", "WMT", "TGT"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_alpha()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.0678 |  0.2272 |
-        | 2022   | -0.0735 | -0.4555 |
-        | 2023   |  0.2389 |  0.7743 |
-        | 2024   |  0.0677 |  0.3922 |
-        | 2025   | -0.0779 | -0.0499 |
-        | 2026   |  0.0431 | -0.2173 |
+        | Date   |    COST |     WMT |     TGT |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.2309 | -0.2676 |  0.0418 |
+        | 2022   | -0.0087 |  0.1772 | -0.1606 |
+        | 2023   |  0.2282 | -0.133  | -0.2753 |
+        | 2024   |  0.1474 |  0.4911 | -0.2715 |
+        | 2025   | -0.2311 |  0.0677 | -0.4221 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data = self._historical_data[period]
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+        returns = self._get_column(period, "Return", within_period=False)
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
 
         if rolling:
             alpha = performance_model.get_rolling_alpha(
@@ -1461,9 +1891,9 @@ class Performance:
         else:
             alpha = performance_model.get_alpha(returns, benchmark_returns)
 
-        alpha = alpha.round(rounding if rounding else self._rounding).loc[
-            self._start_date : self._end_date
-        ]
+        alpha = apply_rounding(
+            alpha, rounding if rounding is not None else self._rounding
+        ).loc[self._start_date : self._end_date]
 
         alpha = alpha.dropna(how="all", axis=0)
 
@@ -1529,7 +1959,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -1541,7 +1971,9 @@ class Performance:
         - Daily Jensen's Alpha is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
         not give any useful insights.
         - The method retrieves historical data and calculates the CAPM for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -1549,51 +1981,51 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["UNH", "JNJ", "PFE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_jensens_alpha()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   | -0.0112 |  0.0062 |
-        | 2022   | -0.0037 | -0.2837 |
-        | 2023   |  0.2185 |  0.5267 |
-        | 2024   |  0.0741 |  0.1328 |
-        | 2025   | -0.1082 | -0.1999 |
-        | 2026   |  0.0531 | -0.2615 |
+        | Date   |     UNH |     JNJ |     PFE |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.2601 | -0.0093 |  0.6493 |
+        | 2022   |  0.1608 |  0.0945 | -0.0261 |
+        | 2023   | -0.0951 | -0.2013 | -0.5539 |
+        | 2024   | -0.0911 | -0.0803 | -0.1158 |
+        | 2025   | -0.4155 |  0.4249 | -0.0976 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             beta = performance_model.get_rolling_beta(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_within_data = self._within_historical_data[period]
-            returns = historical_within_data.loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
-            benchmark_returns = historical_within_data.loc[:, "Return"][
-                self._benchmark_name
-            ]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             beta = performance_model.get_beta(returns, benchmark_returns)
 
-        historical_data = self._historical_data[period]
-
-        period_returns = historical_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
 
         risk_free_rate = self._risk_free_rate_data[period]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
 
         jensens_alpha = performance_model.get_jensens_alpha(
             period_returns, risk_free_rate, beta, benchmark_returns
@@ -1625,7 +2057,7 @@ class Performance:
         standardize: bool = False,
     ):
         """
-        The Treynor Ratio, also known as Treynor's Measure or the Reward-to-Variability Ratio, is a
+        The Treynor Ratio, also known as Treynor's Measure or the Reward-to-Volatility Ratio, is a
         financial metric used to assess the risk-adjusted performance of an investment portfolio or
         asset. It measures the excess return generated by the portfolio per unit of systematic or market
         risk, often represented by Beta. The Treynor Ratio is a valuable tool for evaluating the
@@ -1647,7 +2079,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -1659,7 +2091,9 @@ class Performance:
         - Daily Treynor Ratio is not an option as the standard deviation for 1 day is close to zero. Therefore,
         it does not give any useful insights.
         - The method retrieves historical data and calculates the TR for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -1667,48 +2101,46 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["UNP", "UPS", "FDX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_treynor_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.2468 |  0.2586 |
-        | 2022   | -0.2364 | -0.3971 |
-        | 2023   |  0.4028 |  0.4422 |
-        | 2024   |  0.2641 |  0.243  |
-        | 2025   |  0.0352 |  0.0323 |
-        | 2026   |  0.1146 | -0.0879 |
+        | Date   |     UNP |     UPS |     FDX |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.2344 |  0.3677 | -0.0077 |
+        | 2022   | -0.2789 | -0.2134 | -0.3426 |
+        | 2023   |  0.2003 | -0.0898 |  0.4279 |
+        | 2024   | -0.163  | -0.3386 |  0.1571 |
+        | 2025   | -0.0065 | -0.2648 |  0.008  |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             beta = performance_model.get_rolling_beta(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_within_data = self._within_historical_data[period]
-            returns = historical_within_data.loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
-            benchmark_returns = historical_within_data.loc[:, "Return"][
-                self._benchmark_name
-            ]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             beta = performance_model.get_beta(returns, benchmark_returns)
 
-        historical_data = self._historical_data[period]
-
-        period_returns = historical_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
         risk_free_rate = self._risk_free_rate_data[period]
 
         treynor_ratio = performance_model.get_treynor_ratio(
@@ -1743,6 +2175,7 @@ class Performance:
         growth: bool = False,
         lag: int | list[int] = 1,
         standardize: bool = False,
+        annualize: bool = False,
     ):
         """
         Calculate the Sharpe ratio, a measure of risk-adjusted return that evaluates the excess return
@@ -1769,13 +2202,17 @@ class Performance:
 
             - Sharpe Ratio = Average Rolling Excess Return / Standard Deviation of Rolling Excess Returns
 
-        Note that this is explicitly already subtracts the Risk Free Rate.
+        Note that the Risk Free Rate is already subtracted from these returns. The Toolkit's
+        risk free rate is the 10-year US Treasury yield by default, while Sharpe (1994) and the
+        Ken French factor files use a short-term Treasury bill. Initialise the Toolkit with
+        risk_free_rate="13w" (the 13-week Treasury bill; "5y", "10y" and "30y" are the other
+        options) to use a short rate instead.
 
-        The result is **not annualized**: it is a per-observation Sharpe ratio, so a value
-        computed from daily returns is roughly SQRT(252) smaller than the annualized figure
+        By default the result is **not annualized**: it is a per-observation Sharpe ratio, so a
+        value computed from daily returns is roughly SQRT(252) smaller than the annualized figure
         usually quoted in the literature (SQRT(52), SQRT(12) and SQRT(4) for weekly, monthly
-        and quarterly returns respectively). Multiply by that factor before comparing against
-        published annualized Sharpe ratios.
+        and quarterly returns respectively). Set annualize=True to multiply by that factor, to
+        compare against published annualized Sharpe ratios.
 
         The plain Sharpe ratio only looks at the mean and standard deviation of returns, implicitly
         assuming Gaussian, i.i.d. returns and ignoring how much uncertainty surrounds the estimate
@@ -1818,7 +2255,10 @@ class Performance:
         documented approximation, `Var[SR_trials]` is estimated from the variance of an auxiliary
         *rolling* Sharpe ratio series (see `get_rolling_sharpe_ratio`) computed over a
         `trials_window`-sized window across the full return history, and `n_trials` defaults to the
-        number of valid (non-NaN) values in that same rolling series. This treats each rolling
+        number of valid (non-NaN) values in that same rolling series. That series is built from the
+        same returns as the Sharpe ratio being deflated, so both are on the same scale: the daily
+        excess returns (the observations within each period) for the Sharpe ratio per period, and
+        the excess returns of `period` itself for a rolling Sharpe ratio. This treats each rolling
         window as if it were one "trial" — a reasonable proxy for how dispersed the Sharpe ratio
         could plausibly have been under different choices, but not a substitute for passing the
         actual number of variations tried (via `n_trials`) when that is known, since the quality of
@@ -1840,11 +2280,14 @@ class Performance:
             benchmark_sharpe_ratio (float, optional): The hypothesized or benchmark Sharpe ratio
             (SR*) to test the observed Sharpe ratio against. Only used when method="probabilistic".
             Defaults to 0.0, i.e. testing whether the strategy has any skill at all above doing nothing.
-            trials_window (int, optional): The window size (in units of `period`) used for the
-            auxiliary rolling Sharpe ratio series that approximates `Var[SR_trials]` and the
-            default `n_trials`, see above. Only used when method="deflated". Defaults to None, which
-            uses half of the available return history so that enough overlapping windows exist
-            regardless of `period` or date range.
+            trials_window (int, optional): The window size of the auxiliary rolling Sharpe ratio
+            series that approximates `Var[SR_trials]` and the default `n_trials`, see above. Only
+            used when method="deflated". It counts observations of the returns the Sharpe ratio is
+            computed from: daily (or intraday) observations for the Sharpe ratio per period, and
+            observations of `period` when `rolling` is set. Defaults to None, which uses the median
+            number of observations per period (so each trial spans about one period) for the Sharpe
+            ratio per period, and half of the available return history for a rolling Sharpe ratio
+            so that enough overlapping windows exist regardless of `period` or date range.
             n_trials (int, optional): The number of independent (or effectively independent)
             strategy variations, parameter combinations, or lookback windows tried before
             arriving at the reported Sharpe ratio. Only used when method="deflated". Defaults to
@@ -1853,75 +2296,76 @@ class Performance:
             is known.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
+            annualize (bool, optional): Whether to annualize the Sharpe ratio, multiplying it by
+                the square root of the number of observations in a year: 252 for the daily
+                returns within each period, 252 times the median number of bars per day for the
+                intraday returns within a day (period="daily" with an intraday_period), or the
+                periods in a year for a rolling Sharpe ratio (e.g. 12 for monthly). Only for method="standard" and "adjusted", since the other
+                methods return probabilities. Defaults to False.
 
         Returns:
             pd.DataFrame: Sharpe ratio values. For method="probabilistic" and method="deflated"
             these are probabilities between 0 and 1 rather than ratios.
 
         Notes:
-        - Daily Sharpe Ratio is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
-        not give any useful insights.
+        - period="daily" needs intraday data (initialise the Toolkit with an intraday_period): the ratio per day
+        is then computed from the intraday bars within each day, with the daily risk free rate spread over the
+        bars of a day. Without intraday data a single day holds one return, so the result is empty and logs why.
         - The method retrieves historical data and calculates the Sharpe ratio for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default; choose
+        risk_free_rate="13w" when initialising the Toolkit for the short-term rate Sharpe (1994) uses.
         - The "adjusted", "probabilistic" and "deflated" variants use the **non-excess (raw)** kurtosis
         convention, i.e. a Normal distribution has a kurtosis of 3, not 0. Internally this calls
         `risk_model.get_kurtosis(..., fisher=False)`.
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
+        - `get_sharpe_ratio(method="probabilistic")` returns the probability that each Sharpe ratio is genuine,
+        i.e. above `benchmark_sharpe_ratio` once the sample length, skewness and kurtosis are accounted for.
 
         As an example:
 
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["SPY", "TLT", "GLD", "BTCUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+            benchmark_ticker=None,
+        )
 
-        toolkit.performance.get_sharpe_ratio()
+        toolkit.performance.get_sharpe_ratio(annualize=True)
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.1277 |  0.1334 |
-        | 2022   | -0.0482 | -0.0812 |
-        | 2023   |  0.1189 |  0.095  |
-        | 2024   |  0.07   |  0.0637 |
-        | 2025   |  0.0188 |  0.0263 |
-        | 2026   |  0.0475 | -0.0604 |
-
-        And, asking for the probability that these Sharpe ratios are genuine instead:
-
-        ```python
-        toolkit.performance.get_sharpe_ratio(method="probabilistic")
-        ```
-
-        Which returns:
-
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2021   | 0.8922 | 0.9022 |
-        | 2022   | 0.225  | 0.0998 |
-        | 2023   | 0.9684 | 0.9323 |
-        | 2024   | 0.8693 | 0.8496 |
-        | 2025   | 0.618  | 0.6618 |
-        | 2026   | 0.7167 | 0.2264 |
+        | Date   |     SPY |     TLT |     GLD |   BTCUSD |
+        |:-------|--------:|--------:|--------:|---------:|
+        | 2021   |  1.9355 | -0.2283 | -0.6241 |   0.6316 |
+        | 2022   | -0.608  | -0.9215 |  0.4971 |  -1.1891 |
+        | 2023   |  1.1567 |  0.7714 |  0.8362 |   1.6139 |
+        | 2024   |  1.5203 | -0.6917 |  1.4238 |   1.3959 |
+        | 2025   |  0.3606 |  0.2664 |  1.7105 |  -0.1906 |
         """
         if method not in ("standard", "adjusted", "probabilistic", "deflated"):
             raise ValueError(
                 "Method must be standard, adjusted, probabilistic, or deflated."
             )
 
+        if annualize and method not in ("standard", "adjusted"):
+            raise ValueError(
+                "Only a standard or adjusted Sharpe ratio can be annualized, since the "
+                "probabilistic and deflated ones are probabilities."
+            )
+
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        # The deflated variant needs the full (non within period) return history to approximate how dispersed the Sharpe ratio is across trials, regardless of whether the ratio being tested is itself a rolling one.  # noqa: E501
-        if rolling or method == "deflated":
-            period_returns = self._historical_data[period].loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
+        if rolling:
+            period_returns = self._get_column(period, "Return", within_period=False)
             full_excess_return = performance_model.get_excess_return(
                 period_returns, self._risk_free_rate_data[period]
             )
@@ -1932,9 +2376,9 @@ class Performance:
                 excess_return, rolling
             )
         else:
-            excess_return = self._within_historical_data[period].loc[
-                :, "Excess Return"
-            ][self._tickers_without_portfolio]
+            excess_return = self._get_column(
+                period, "Excess Return", within_period=True
+            )
             sharpe_ratio = performance_model.get_sharpe_ratio(excess_return)
 
         if method == "standard":
@@ -1964,13 +2408,22 @@ class Performance:
                     n_observations=n_observations,
                 )
             else:
-                trials_window = (
-                    trials_window
-                    if trials_window is not None
-                    else max(2, len(full_excess_return) // 2)
-                )
+                # The trials are built from the same returns as the Sharpe ratio being
+                # deflated: comparing a daily-scale Sharpe ratio with the dispersion of
+                # Sharpe ratios of period returns (a much larger scale) would push the
+                # expected maximum far above it and the deflated ratio to 0.
+                if rolling:
+                    trials_returns = full_excess_return
+                    default_window = max(2, len(trials_returns) // 2)
+                else:
+                    trials_returns = excess_return.droplevel(0)
+                    default_window = max(
+                        2, int(excess_return.groupby(level=0).size().median())
+                    )
+
                 trials_sharpe_ratio = performance_model.get_rolling_sharpe_ratio(
-                    full_excess_return, trials_window
+                    trials_returns,
+                    trials_window if trials_window is not None else default_window,
                 )
                 trials = (
                     n_trials if n_trials is not None else trials_sharpe_ratio.count()
@@ -1984,6 +2437,15 @@ class Performance:
                     skewness=skewness,
                     kurtosis=kurtosis,
                 )
+
+        if annualize:
+            # The rolling ratio uses the returns of each period, the one per period the
+            # observations within it: daily returns, or intraday bars within a day.
+            result = result * np.sqrt(
+                PERIODS_PER_YEAR[period]
+                if rolling
+                else self._get_observations_per_year(period)
+            )
 
         return finalize_dataset(
             dataset=result,
@@ -2036,7 +2498,12 @@ class Performance:
 
             - Sortino Ratio = Average Rolling Excess Return / Rolling Downside Deviation
 
-        Note that this is explicitly already subtracts the Risk Free Rate.
+        Note that the Risk Free Rate is already subtracted from these returns. It is the Toolkit's
+        risk_free_rate, the 10-year US Treasury yield by default; initialise the Toolkit with
+        risk_free_rate="13w" for a short-term Treasury bill rate instead.
+
+        A period needs at least two observations for a Sortino ratio, with a single one the ratio
+        would only show its sign, so such periods are left out.
 
         As with the Sharpe Ratio, the result is **not annualized**: it is a per-observation
         ratio, so multiply by SQRT(252), SQRT(52), SQRT(12) or SQRT(4) for daily, weekly,
@@ -2053,7 +2520,7 @@ class Performance:
             full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2062,10 +2529,13 @@ class Performance:
             pd.DataFrame: Sortino ratio values.
 
         Notes:
-        - Daily Sortino Ratio is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
-        not give any useful insights.
+        - period="daily" needs intraday data (initialise the Toolkit with an intraday_period): the ratio per day
+        is then computed from the intraday bars within each day, with the daily risk free rate spread over the
+        bars of a day. Without intraday data a single day holds one return, so the result is empty and logs why.
         - The method retrieves historical data and calculates the Sortino ratio for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -2073,28 +2543,30 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["V", "MA", "AXP"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_sortino_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.197  |  0.2049 |
-        | 2022   | -0.0675 | -0.1069 |
-        | 2023   |  0.1839 |  0.1462 |
-        | 2024   |  0.1071 |  0.1044 |
-        | 2025   |  0.0283 |  0.0391 |
-        | 2026   |  0.0665 | -0.0789 |
+        | Date   |       V |      MA |     AXP |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.0058 |  0.0163 |  0.1221 |
+        | 2022   | -0.0049 | -0.001  | -0.0138 |
+        | 2023   |  0.129  |  0.1007 |  0.0922 |
+        | 2024   |  0.0911 |  0.1065 |  0.1909 |
+        | 2025   |  0.038  |  0.0273 |  0.0726 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            period_returns = self._historical_data[period].loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
+            period_returns = self._get_column(period, "Return", within_period=False)
             excess_return = performance_model.get_excess_return(
                 period_returns, self._risk_free_rate_data[period]
             )
@@ -2102,10 +2574,9 @@ class Performance:
                 excess_return, rolling
             )
         else:
-            historical_data = self._within_historical_data[period]
-            excess_return = historical_data.loc[:, "Excess Return"][
-                self._tickers_without_portfolio
-            ]
+            excess_return = self._get_column(
+                period, "Excess Return", within_period=True
+            )
 
             sortino_ratio = performance_model.get_sortino_ratio(excess_return)
 
@@ -2138,9 +2609,15 @@ class Performance:
         Calculate the Ulcer Performance Index (UPI), alternatively called Martin ratio, a measure of risk-adjusted
         return that evaluates the excess return of an investment portfolio or asset per unit of risk taken.
 
-        It can be used to compare volatilities in different stocks or show stocks go into Ulcer territory.
-        Similar to the Sharpe Ratio, a higher UPI is better than a lower one (since investors prefer more return
-        for less risk).
+        The formula is as follows:
+
+        - Ulcer Performance Index = (Period Return - Risk-Free Rate) / Ulcer Index
+        - Ulcer Index = SQRT(MEAN(Drawdown^2)), with each day's drawdown measured from the highest value of the
+        trailing `rolling` days within the period
+
+        It measures the excess return earned per unit of drawdown pain: the depth and the duration of the declines
+        both weigh in, where the Sharpe Ratio treats upward and downward swings alike. Similar to the Sharpe Ratio,
+        a higher UPI is better than a lower one (since investors prefer more return for less risk).
 
         Also known as: UPI, Martin ratio.
 
@@ -2150,7 +2627,7 @@ class Performance:
             rolling (int): The rolling period to use to calculate the Ulcer Index. Defaults to 14.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2160,7 +2637,9 @@ class Performance:
 
         Notes:
         - The method retrieves historical data and calculates the UPI for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -2168,31 +2647,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["VZ", "T", "TMUS"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_ulcer_performance_index()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   | -0.4626 | -0.2002 |
-        | 2022   | -4.5193 | -5.0182 |
-        | 2023   | 13.6486 | 11.6618 |
-        | 2024   |  7.6983 |  6.3795 |
-        | 2025   |  0.9945 |  0.7159 |
-        | 2026   |  2.2021 | -3.5198 |
+        | Date   |      VZ |       T |    TMUS |
+        |:-------|--------:|--------:|--------:|
+        | 2021   | -3.7069 | -2.0886 | -3.7462 |
+        | 2022   | -4.3869 |  0.7109 |  4.3646 |
+        | 2023   | -0.3236 | -1.4171 |  3.5546 |
+        | 2024   |  2.6617 | 15.933  | 13.5977 |
+        | 2025   |  1.4725 |  2.6824 | -2.3337 |
         """
 
         period = period if period else "quarterly" if self._quarterly else "yearly"
+        returns = self._get_column(period, "Return", within_period=True)
 
-        historical_data = self._within_historical_data[period]
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-
-        period_returns = self._historical_data[period].loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
         excess_return = (
             period_returns
             if period == "intraday"
@@ -2235,9 +2714,10 @@ class Performance:
         """
         Calculate the Calmar Ratio of an investment portfolio or asset's returns.
 
-        The Calmar Ratio is a risk-adjusted return metric that divides the (annualized) return
-        of an investment portfolio or asset by its Maximum Drawdown, providing insight into the
-        return achieved per unit of the worst historical loss of value.
+        The Calmar Ratio is a risk-adjusted return metric that divides the return of an investment
+        portfolio or asset over each period (a calendar-year return for period='yearly', a quarterly
+        return for period='quarterly') by its Maximum Drawdown, providing insight into the return
+        achieved per unit of the worst historical loss of value.
 
         The formula is as follows:
 
@@ -2256,7 +2736,7 @@ class Performance:
             Defaults to True.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2275,35 +2755,33 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["VTI", "VEA", "VWO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_calmar_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  1.8052 |  1.3727 |
-        | 2022   | -0.8734 | -0.8942 |
-        | 2023   |  3.1929 |  3.1074 |
-        | 2024   |  1.9404 |  1.461  |
-        | 2025   |  0.2834 |  0.2356 |
-        | 2026   |  1.0648 | -0.5212 |
+        | Date   |     VTI |     VEA |     VWO |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  4.9482 |  1.643  |  0.0948 |
+        | 2022   | -0.7709 | -0.5338 | -0.6106 |
+        | 2023   |  2.4416 |  1.483  |  0.7946 |
+        | 2024   |  2.7771 |  0.3321 |  1.1734 |
+        | 2025   |  0.8851 |  2.6195 |  1.7646 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
+        returns = self._get_column(period, "Return", within_period=within_period)
 
         maximum_drawdown = get_max_drawdown(returns)
 
-        period_returns = self._historical_data[period].loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
 
         calmar_ratio = performance_model.get_calmar_ratio(
             period_returns, maximum_drawdown
@@ -2338,14 +2816,19 @@ class Performance:
         """
         Calculate the Sterling Ratio of an investment portfolio or asset's returns.
 
-        The Sterling Ratio is a risk-adjusted return metric that divides the (annualized) return
-        of an investment portfolio or asset by its Average Drawdown plus a fixed adjustment
+        The Sterling Ratio is a risk-adjusted return metric that divides the return of an investment
+        portfolio or asset over each period (a calendar-year return for period='yearly', a quarterly
+        return for period='quarterly') by its Average Drawdown plus a fixed adjustment
         (conventionally 10%), providing insight into the return achieved relative to the typical
         depth of its drawdowns rather than only the single worst one (as with the Calmar Ratio).
 
         The formula is as follows:
 
         - Sterling Ratio = Return / (|Average Drawdown| + Adjustment)
+
+        Where the Average Drawdown is the mean drawdown from the running peak over all observations
+        on which the asset is below that peak (by default every such day within the period), not the
+        average of the largest drawdowns.
 
         Also known as: Sterling-Calmar ratio.
 
@@ -2360,7 +2843,7 @@ class Performance:
             conventionally 0.1 (10%). Defaults to 0.1.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2379,35 +2862,33 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["NEE", "DUK", "SO"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_sterling_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  2.0094 |  1.7258 |
-        | 2022   | -1.074  | -1.4667 |
-        | 2023   |  3.2891 |  4.193  |
-        | 2024   |  1.9286 |  2.1544 |
-        | 2025   |  0.4371 |  0.3785 |
-        | 2026   |  0.886  | -0.6097 |
+        | Date   |     NEE |     DUK |     SO |
+        |:-------|--------:|--------:|-------:|
+        | 2021   |  1.2842 |  1.4182 | 1.2009 |
+        | 2022   | -0.3726 |  0.1186 | 0.4819 |
+        | 2023   | -0.8979 | -0.0838 | 0.1342 |
+        | 2024   |  1.307  |  1.1541 | 1.5685 |
+        | 2025   |  0.9868 |  0.9407 | 0.6777 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
+        returns = self._get_column(period, "Return", within_period=within_period)
 
         average_drawdown = performance_model.get_average_drawdown(returns)
 
-        period_returns = self._historical_data[period].loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
 
         sterling_ratio = performance_model.get_sterling_ratio(
             period_returns, average_drawdown, adjustment
@@ -2448,7 +2929,12 @@ class Performance:
 
         The formula is as follows:
 
-        - Burke Ratio = (Return — Risk-Free Rate) / SQRT(SUM(Drawdowns^2))
+        - Burke Ratio = (Return — Risk-Free Rate) / SQRT(SUM(Drawdown_d^2))
+
+        Where Drawdown_d is the drawdown from the running peak at every observation d on which the
+        asset is below that peak, which by default is every such day within the period. This weighs
+        the time spent under water as well as the depth, so the ratio differs from the version that
+        sums one drawdown per episode.
 
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
@@ -2458,7 +2944,7 @@ class Performance:
             year (if period = 'yearly') or look at the entirety of all years. Defaults to True.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2469,8 +2955,9 @@ class Performance:
         Notes:
         - The method retrieves historical data and calculates the Burke Ratio for each asset in
         the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as
-        a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using
         the specified `lag`.
 
@@ -2479,35 +2966,33 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["BA", "LMT", "RTX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_burke_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.2606 |  0.1513 |
-        | 2022   | -0.1172 | -0.1172 |
-        | 2023   |  0.502  |  0.4155 |
-        | 2024   |  0.2519 |  0.1765 |
-        | 2025   |  0.0246 |  0.0195 |
-        | 2026   |  0.1417 | -0.1284 |
+        | Date   |      BA |     LMT |     RTX |
+        |:-------|--------:|--------:|--------:|
+        | 2021   | -0.0305 |  0.014  |  0.3334 |
+        | 2022   | -0.0181 |  0.3247 |  0.109  |
+        | 2023   |  0.2136 | -0.0588 | -0.0744 |
+        | 2024   | -0.0697 |  0.0508 |  0.6619 |
+        | 2025   |  0.1203 | -0.0134 |  1.0527 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
+        returns = self._get_column(period, "Return", within_period=within_period)
 
         burke_drawdown_measure = performance_model.get_burke_drawdown_measure(returns)
 
-        period_returns = self._historical_data[period].loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
         excess_return = performance_model.get_excess_return(
             period_returns, self._risk_free_rate_data[period]
         )
@@ -2573,7 +3058,7 @@ class Performance:
             return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2585,7 +3070,9 @@ class Performance:
         - Daily M2 is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
         not give any useful insights.
         - The method retrieves historical data and calculates the M2 for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -2593,31 +3080,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["HD", "LOW"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_m2_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
+        | Date   |      HD |     LOW |
         |:-------|--------:|--------:|
-        | 2021   |  0.0065 |  0.0112 |
-        | 2022   | -0.1669 | -0.2118 |
-        | 2023   |  0.3293 |  0.2753 |
-        | 2024   |  0.1905 |  0.1604 |
-        | 2025   |  0.0709 |  0.0637 |
-        | 2026   |  0.0919 | -0.0461 |
+        | 2021   |  0.39   |  0.3481 |
+        | 2022   | -0.1634 | -0.1482 |
+        | 2023   |  0.0932 |  0.0955 |
+        | 2024   |  0.1083 |  0.0921 |
+        | 2025   | -0.0718 |  0.0055 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_period_data = self._historical_data[period]
-        period_returns = historical_period_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
-        benchmark_period_returns = historical_period_data.loc[:, "Return"][
-            self._benchmark_name
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
+        benchmark_period_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
         risk_free_rate = self._risk_free_rate_data[period]
 
         if rolling:
@@ -2625,12 +3112,10 @@ class Performance:
                 period_returns, risk_free_rate, benchmark_period_returns, rolling
             )
         else:
-            daily_returns = self._historical_data["daily"].loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
-            benchmark_daily_returns = self._historical_data["daily"].loc[:, "Return"][
-                self._benchmark_name
-            ]
+            daily_returns = self._get_column("daily", "Return", within_period=False)
+            benchmark_daily_returns = self._get_column(
+                "daily", "Return", within_period=False, benchmark=True
+            )
             period_standard_deviation = get_volatility(daily_returns, period)
             benchmark_standard_deviation = get_volatility(
                 benchmark_daily_returns, period
@@ -2680,6 +3165,10 @@ class Performance:
 
             - Tracking Error (TE) = Standard Deviation of (Portfolio Returns — Benchmark Returns)
 
+        By default one Tracking Error is reported per `period`, computed from the daily returns within that
+        period, so it is a daily figure: multiply by SQRT(252) to compare it with the annualized tracking error
+        funds report. With `rolling`, the returns of `period` itself are used instead.
+
         See definition: https://en.wikipedia.org/wiki/Tracking_error
 
         Also known as: active risk, benchmark deviation.
@@ -2692,7 +3181,7 @@ class Performance:
             full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2704,7 +3193,6 @@ class Performance:
         - Daily Tracking Error is not an option as the standard deviation for 1 day is close to zero. Therefore, it does
         not give any useful insights.
         - The method retrieves historical data and calculates the TE for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -2712,36 +3200,42 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["VOO", "RSP", "QQQ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_tracking_error()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2021   | 0.0118 | 0.0317 |
-        | 2022   | 0.0115 | 0.0344 |
-        | 2023   | 0.009  | 0.0304 |
-        | 2024   | 0.0121 | 0.0369 |
-        | 2025   | 0.0139 | 0.0328 |
-        | 2026   | 0.0154 | 0.0226 |
+        | Date   |    VOO |    RSP |    QQQ |
+        |:-------|-------:|-------:|-------:|
+        | 2021   | 0.0002 | 0.0038 | 0.0059 |
+        | 2022   | 0.0003 | 0.0034 | 0.0067 |
+        | 2023   | 0.0002 | 0.0038 | 0.005  |
+        | 2024   | 0.0003 | 0.0046 | 0.0047 |
+        | 2025   | 0.001  | 0.0051 | 0.0041 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             tracking_error = performance_model.get_rolling_tracking_error(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_data = self._within_historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             tracking_error = performance_model.get_tracking_error(
                 returns, benchmark_returns
@@ -2773,10 +3267,10 @@ class Performance:
         standardize: bool = False,
     ):
         """
-        The Information Ratio (IR), also known as the Information Coefficient, is a financial
-        metric that assesses the risk-adjusted performance of a portfolio or investment
-        strategy relative to a benchmark index. It quantifies how much excess return the
-        portfolio generates for each unit of tracking error (volatility of tracking error).
+        The Information Ratio (IR) is a financial metric that assesses the risk-adjusted
+        performance of a portfolio or investment strategy relative to a benchmark index. It
+        quantifies how much active return (the return above the benchmark) the portfolio
+        generates per unit of tracking error, the volatility of that active return.
         The Information Ratio is commonly used by portfolio managers, financial analysts, and
         investors to evaluate the skill of a portfolio manager in generating returns beyond
         what would be expected based on the risk taken.
@@ -2791,7 +3285,11 @@ class Performance:
 
         The formula is as follows:
 
-            - Information Ratio (IR) = (Portfolio's Excess Return — Benchmark's Excess Return) / Tracking Error
+            - Information Ratio (IR) = Mean(Portfolio Return — Benchmark Return) / Tracking Error
+
+        By default it is computed from the daily returns within each period and is not annualized: multiply by
+        SQRT(252) to compare it with the annualized figures in the literature, where an IR of 0.5 is considered
+        good. With `rolling`, the returns of `period` itself are used instead.
 
         See definition: https://en.wikipedia.org/wiki/Information_ratio
 
@@ -2805,7 +3303,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2817,7 +3315,6 @@ class Performance:
         - Daily Information Ratio is not an option as the standard deviation for 1 day is close to zero.
         Therefore, it does not give any useful insights.
         - The method retrieves historical data and calculates the IR for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
         - If `growth` is set to True, the method calculates the growth of the ratio values using the specified `lag`.
 
         As an example:
@@ -2825,36 +3322,42 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XLK", "XLE", "XLV"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_information_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.0253 |  0.0381 |
-        | 2022   | -0.0212 | -0.0739 |
-        | 2023   |  0.0833 |  0.0817 |
-        | 2024   |  0.0231 |  0.0499 |
-        | 2025   | -0.0106 |  0.0164 |
-        | 2026   |  0.0269 | -0.0641 |
+        | Date   |     XLK |     XLE |     XLV |
+        |:-------|--------:|--------:|--------:|
+        | 2021   |  0.0377 |  0.047  | -0.0204 |
+        | 2022   | -0.0557 |  0.1406 |  0.0776 |
+        | 2023   |  0.147  | -0.0655 | -0.1316 |
+        | 2024   | -0.0053 | -0.0549 | -0.1084 |
+        | 2025   |  0.042  | -0.0246 | -0.0114 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             information_ratio = performance_model.get_rolling_information_ratio(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_data = self._within_historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             information_ratio = performance_model.get_information_ratio(
                 returns, benchmark_returns
@@ -2893,14 +3396,26 @@ class Performance:
 
         The formula is as follows:
 
-        - Upside Capture Ratio = Average Return in Up Periods / Average Benchmark Return in Up Periods
+        - Upside Capture Ratio = Geometric Average Return in Up Periods / Geometric Average Benchmark Return in Up Periods
+        - Geometric Average Return = (PRODUCT(1 + Return))^(1 / n) - 1
+
+        Where the up periods are the observations (days within each period) with a positive benchmark
+        return and n is their number, following Morningstar's definition. Geometric rather than arithmetic
+        averages make the ratio reflect the compounded return captured, so it does not depend on how
+        volatile the returns within the up periods were.
+
+        Upside and downside capture (see `get_downside_capture_ratio`) are read together: an upside capture
+        above the downside capture means the asset kept more of the benchmark's gains than of its losses, which
+        is what defensive and low-volatility strategies aim for even with both ratios below 1. Both are computed
+        from the daily returns within each period, while fund factsheets usually use monthly returns over three
+        to five years, so the figures are not directly comparable with published ones.
 
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
                 initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -2919,27 +3434,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["QQQ", "SCHD", "USMV"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_upside_capture_ratio()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2021   | 1.3754 | 2.1079 |
-        | 2022   | 1.3044 | 1.7261 |
-        | 2023   | 1.1783 | 2.3099 |
-        | 2024   | 1.1158 | 2.5976 |
-        | 2025   | 1.0162 | 2.2065 |
-        | 2026   | 0.766  | 1.593  |
+        | Date   |    QQQ |   SCHD |   USMV |
+        |:-------|-------:|-------:|-------:|
+        | 2021   | 1.1827 | 0.832  | 0.6961 |
+        | 2022   | 1.2845 | 0.7129 | 0.7051 |
+        | 2023   | 1.3244 | 0.765  | 0.6077 |
+        | 2024   | 1.3372 | 0.5237 | 0.5323 |
+        | 2025   | 1.2056 | 0.5019 | 0.4674 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data = self._within_historical_data[period]
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+        returns = self._get_column(period, "Return", within_period=True)
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=True, benchmark=True
+        )
 
         upside_capture_ratio = performance_model.get_upside_capture_ratio(
             returns, benchmark_returns
@@ -2978,14 +3497,20 @@ class Performance:
 
         The formula is as follows:
 
-        - Downside Capture Ratio = Average Return in Down Periods / Average Benchmark Return in Down Periods
+        - Downside Capture Ratio = Geometric Average Return in Down Periods / Geometric Average Benchmark Return in Down Periods
+        - Geometric Average Return = (PRODUCT(1 + Return))^(1 / n) - 1
+
+        Where the down periods are the observations (days within each period) with a negative benchmark
+        return and n is their number, following Morningstar's definition. As with the Upside Capture Ratio,
+        both ratios are computed from the daily returns within each period, while fund factsheets usually
+        use monthly returns over three to five years.
 
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
                 initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3004,27 +3529,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["XLU", "SPLV", "ARKK"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_downside_capture_ratio()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2021   | 1.4016 | 2.0639 |
-        | 2022   | 1.3043 | 2.0238 |
-        | 2023   | 0.9486 | 1.8386 |
-        | 2024   | 1.0337 | 2.4414 |
-        | 2025   | 1.0842 | 2.2603 |
-        | 2026   | 0.5691 | 2.2236 |
+        | Date   |    XLU |   SPLV |   ARKK |
+        |:-------|-------:|-------:|-------:|
+        | 2021   | 0.3911 | 0.5358 | 2.0537 |
+        | 2022   | 0.4698 | 0.4991 | 2.5005 |
+        | 2023   | 0.7024 | 0.6177 | 2.3265 |
+        | 2024   | 0.2051 | 0.3127 | 2.5483 |
+        | 2025   | 0.3459 | 0.3223 | 2.0919 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data = self._within_historical_data[period]
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+        returns = self._get_column(period, "Return", within_period=True)
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=True, benchmark=True
+        )
 
         downside_capture_ratio = performance_model.get_downside_capture_ratio(
             returns, benchmark_returns
@@ -3056,8 +3585,17 @@ class Performance:
         """
         Calculate the Win Rate of an investment portfolio or asset's returns.
 
-        The Win Rate is the percentage of periods in which the asset's return exceeds the
+        The Win Rate is the share of days within each period in which the asset's return exceeds the
         benchmark's return.
+
+        The formula is as follows:
+
+        - Win Rate = Number of Days with Asset Return > Benchmark Return / Number of Days with both an Asset
+          and a Benchmark Return, using the daily returns within each period (e.g. each year), as a decimal
+          (0.55 = 55%)
+
+        Days on which the asset or the benchmark has no return are left out of both counts rather than
+        counted as losses.
 
         Also known as: batting average.
 
@@ -3066,7 +3604,7 @@ class Performance:
                 initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3085,27 +3623,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["AAPL", "MSFT", "GOOGL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_win_rate()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2021   | 0.4921 | 0.5    |
-        | 2022   | 0.4821 | 0.498  |
-        | 2023   | 0.576  | 0.532  |
-        | 2024   | 0.504  | 0.4683 |
-        | 2025   | 0.472  | 0.468  |
-        | 2026   | 0.504  | 0.472  |
+        | Date   |   AAPL |   MSFT |   GOOGL |
+        |:-------|-------:|-------:|--------:|
+        | 2021   | 0.494  | 0.5139 |  0.5299 |
+        | 2022   | 0.4781 | 0.4582 |  0.4502 |
+        | 2023   | 0.576  | 0.512  |  0.524  |
+        | 2024   | 0.5    | 0.4881 |  0.5317 |
+        | 2025   | 0.472  | 0.484  |  0.564  |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data = self._within_historical_data[period]
-        returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-        benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+        returns = self._get_column(period, "Return", within_period=True)
+        benchmark_returns = self._get_column(
+            period, "Return", within_period=True, benchmark=True
+        )
 
         win_rate = performance_model.get_win_rate(returns, benchmark_returns)
 
@@ -3142,6 +3684,15 @@ class Performance:
 
         Note that this already subtracts the Risk Free Rate.
 
+        The formula is as follows:
+
+        - Daily Excess Return = Daily Return - Daily Risk Free Rate, with Daily Risk Free Rate =
+          (1 + Annual Risk Free Rate)^(1/252) - 1
+        - Lower Partial Moment (LPM) = MEAN(MAX(-Daily Excess Return, 0)^Order), averaged over all days in the
+          period (days with a non-negative excess return count as 0)
+        - Kappa Ratio = MEAN(Daily Excess Return) / LPM^(1/Order), per period and not annualized, with Order
+          defaulting to 3
+
         Args:
             period (str, optional): The period to use for the calculation. Defaults to "quarterly" if the Toolkit is
                 initialised with quarterly=True, otherwise "yearly".
@@ -3149,7 +3700,7 @@ class Performance:
             Defaults to 3.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3162,8 +3713,9 @@ class Performance:
         Therefore, it does not give any useful insights.
         - The method retrieves historical data and calculates the Kappa Ratio for each asset in
         the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as
-        a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of the ratio values using
         the specified `lag`.
 
@@ -3172,28 +3724,28 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["LLY", "MRK", "ABBV"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_kappa_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2021   |  0.1414 |  0.1382 |
-        | 2022   | -0.052  | -0.0816 |
-        | 2023   |  0.1284 |  0.1026 |
-        | 2024   |  0.0767 |  0.0749 |
-        | 2025   |  0.0186 |  0.0275 |
-        | 2026   |  0.0441 | -0.0538 |
+        | Date   |    LLY |     MRK |    ABBV |
+        |:-------|-------:|--------:|--------:|
+        | 2021   | 0.1248 |  0.0091 |  0.0811 |
+        | 2022   | 0.0844 |  0.1426 |  0.0552 |
+        | 2023   | 0.1351 | -0.004  | -0.0059 |
+        | 2024   | 0.0652 | -0.0191 |  0.0298 |
+        | 2025   | 0.0513 |  0.0193 |  0.064  |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_data = self._within_historical_data[period]
-        excess_return = historical_data.loc[:, "Excess Return"][
-            self._tickers_without_portfolio
-        ]
+        excess_return = self._get_column(period, "Excess Return", within_period=True)
 
         kappa_ratio = performance_model.get_kappa_ratio(excess_return, order)
 
@@ -3250,7 +3802,7 @@ class Performance:
             the threshold between gains and losses. Defaults to 0.0.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3269,37 +3821,35 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["BLK", "SCHW", "BX"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_omega_ratio()
         ```
 
         Which returns:
 
-        |      |   AAPL |   TSLA |
-        |:-----|-------:|-------:|
-        | 2021 | 1.2354 | 1.1945 |
-        | 2022 | 0.892  | 0.8129 |
-        | 2023 | 1.4034 | 1.3043 |
-        | 2024 | 1.2462 | 1.2098 |
-        | 2025 | 1.0873 | 1.0871 |
-        | 2026 | 1.2062 | 0.9358 |
+        |      |    BLK |   SCHW |     BX |
+        |:-----|-------:|-------:|-------:|
+        | 2021 | 1.2446 | 1.3257 | 1.5958 |
+        | 2022 | 0.9272 | 1.0318 | 0.8945 |
+        | 2023 | 1.1525 | 0.9625 | 1.3792 |
+        | 2024 | 1.2732 | 1.094  | 1.2109 |
+        | 2025 | 1.0728 | 1.2867 | 0.9944 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            returns = self._historical_data[period].loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
+            returns = self._get_column(period, "Return", within_period=False)
             omega_ratio = performance_model.get_rolling_omega_ratio(
                 returns, rolling, minimum_acceptable_return
             )
         else:
-            returns = (
-                self._within_historical_data[period]
-                if within_period
-                else self._historical_data[period]
-            ).loc[:, "Return"][self._tickers_without_portfolio]
+            returns = self._get_column(period, "Return", within_period=within_period)
 
             omega_ratio = performance_model.get_omega_ratio(
                 returns, minimum_acceptable_return
@@ -3349,7 +3899,7 @@ class Performance:
             Defaults to True.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3368,29 +3918,29 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["GCUSD", "SIUSD", "HGUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_gain_to_pain_ratio()
         ```
 
         Which returns:
 
-        |      |    AAPL |    TSLA |
-        |:-----|--------:|--------:|
-        | 2021 |  0.2354 |  0.1945 |
-        | 2022 | -0.108  | -0.1871 |
-        | 2023 |  0.4034 |  0.3043 |
-        | 2024 |  0.2462 |  0.2098 |
-        | 2025 |  0.0873 |  0.0871 |
-        | 2026 |  0.2062 | -0.0642 |
+        |      |   GCUSD |   SIUSD |   HGUSD |
+        |:-----|--------:|--------:|--------:|
+        | 2021 | -0.0617 | -0.0653 |  0.1797 |
+        | 2022 |  0.0115 |  0.0413 | -0.0663 |
+        | 2023 |  0.1812 |  0.0233 |  0.0337 |
+        | 2024 |  0.3038 |  0.1403 |  0.0446 |
+        | 2025 |  0.5152 |  0.5701 |  0.2573 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
+        returns = self._get_column(period, "Return", within_period=within_period)
 
         gain_to_pain_ratio = performance_model.get_gain_to_pain_ratio(returns)
 
@@ -3424,7 +3974,19 @@ class Performance:
 
         The formula is as follows:
 
-            - CGR = (Final Value / Initial Value) ^ (1 / Number of Periods) — 1
+            - Years = (Last Date - First Date) / 365.25 days
+            - CAGR = (Final Value / Initial Value) ^ (1 / Years) - 1
+            - Period Rate = (1 + CAGR) ^ (1 / Periods per Year) - 1
+
+        The CAGR is measured on calendar time: each asset from its own first to its own last
+        close between the start and end date, with the years in between counted in calendar
+        days. The rate thereby does not depend on how often an asset trades, so a stock (which
+        trades on weekdays) and a cryptocurrency (which trades every day) in the same Toolkit
+        are measured over the same years, and an asset without a close on the first or last
+        date of the range is measured over the dates it has. The quarterly, monthly, weekly and
+        daily rates follow from the CAGR with 4 quarters, 12 months, 52 weeks and 252 trading
+        days to a year, so the rates are consistent with each other: (1 + CDGR) ^ 252 equals
+        1 + CAGR.
 
         Also known as: CAGR, compound annual growth rate, annualized return.
 
@@ -3446,23 +4008,40 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["BTCUSD", "ETHUSD", "^GSPC"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_compound_growth_rate()
         ```
 
         Which returns:
 
-        |                                       |   AAPL |    TSLA |   Benchmark |
-        |:--------------------------------------|-------:|--------:|------------:|
-        | Compound Annual Growth Rate (CAGR)    | 0.1219 | -0.0124 |      0.1158 |
-        | Compound Quarterly Growth Rate (CQGR) | 0.041  |  0.0124 |      0.0332 |
-        | Compound Monthly Growth Rate (CMGR)   | 0.0123 |  0.005  |      0.0101 |
-        | Compound Weekly Growth Rate (CWGR)    | 0.0029 |  0.0012 |      0.0024 |
-        | Compound Daily Growth Rate (CDGR)     | 0.0006 |  0.0003 |      0.0005 |
+        |                                       |   BTCUSD |   ETHUSD |   ^GSPC |   Benchmark |
+        |:--------------------------------------|---------:|---------:|--------:|------------:|
+        | Compound Annual Growth Rate (CAGR)    |   0.2438 |   0.3236 |  0.1312 |      0.1469 |
+        | Compound Quarterly Growth Rate (CQGR) |   0.0561 |   0.0726 |  0.0313 |      0.0348 |
+        | Compound Monthly Growth Rate (CMGR)   |   0.0183 |   0.0236 |  0.0103 |      0.0115 |
+        | Compound Weekly Growth Rate (CWGR)    |   0.0042 |   0.0054 |  0.0024 |      0.0026 |
+        | Compound Daily Growth Rate (CDGR)     |   0.0009 |   0.0011 |  0.0005 |      0.0005 |
         """
         compound_growth_rates = {}
 
+        prices = (
+            self._historical_data["daily"]
+            .loc[:, "Adj Close"]
+            .loc[self._start_date : self._end_date]
+        )
+
+        # On calendar time and per asset: the rows of the daily data are the union of every ticker's trading days, so counting rows would stretch the years of a stock by the weekends a cryptocurrency in the same Toolkit trades on, and a ticker without a close on the first or last row would get no rate at all.  # noqa: E501
+        compound_annual_growth_rate = performance_model.get_compound_annual_growth_rate(
+            prices
+        )
+
+        # The shorter periods are the CAGR converted geometrically, so that (1 + CDGR) ^ 252 equals 1 + CAGR.  # noqa: E501
         for period, label in [
             ("yearly", "Compound Annual Growth Rate (CAGR)"),
             ("quarterly", "Compound Quarterly Growth Rate (CQGR)"),
@@ -3470,23 +4049,14 @@ class Performance:
             ("weekly", "Compound Weekly Growth Rate (CWGR)"),
             ("daily", "Compound Daily Growth Rate (CDGR)"),
         ]:
-            prices = (
-                self._historical_data[period]
-                .loc[:, "Adj Close"]
-                .loc[self._start_date : self._end_date]
-            )
-
-            # N observations span N - 1 compounding intervals, not N.
-            compound_growth_rates[label] = (
-                performance_model.get_compound_growth_rate(prices, len(prices) - 1)
-                if len(prices) > 1
-                else pd.Series(float("nan"), index=prices.columns)
+            compound_growth_rates[label] = convert_annualized_rate_to_period(
+                compound_annual_growth_rate, period
             )
 
         compound_growth_rate = pd.DataFrame(compound_growth_rates).T
 
-        compound_growth_rate = compound_growth_rate.round(
-            rounding if rounding else self._rounding
+        compound_growth_rate = apply_rounding(
+            compound_growth_rate, rounding if rounding is not None else self._rounding
         )
 
         return compound_growth_rate
@@ -3507,13 +4077,20 @@ class Performance:
         based on the daily historical returns.
 
         The period Return is obtained by compounding the daily returns within each
-        period, following the formula:
+        period. If cumulative is set to True, the period returns within the selected date
+        range are compounded further into a cumulative return (growth of 1) instead.
 
-            - Period Return = ((1 + Return 1) * (1 + Return 2) * ... * (1 + Return N)) - 1
+        The formula is as follows:
 
-        If cumulative is set to True, the period returns are compounded further into
-        a cumulative return over time instead. The cumulative return is always rebased
-        to start at 1 at the beginning of the selected date range.
+        - Period Return = ((1 + Daily Return 1) * (1 + Daily Return 2) * ... * (1 + Daily Return N)) - 1
+        - Cumulative Return = (1 + Period Return 1) * (1 + Period Return 2) * ... * (1 + Period Return N)
+
+        The compounding starts at 1 at the beginning of the date range, so the first value
+        is 1 plus the return of the first period.
+
+        A period without any daily return for a ticker (before it listed, or a gap in its
+        history) is NaN rather than 0, and the cumulative return carries the previous value
+        past such a period.
 
         Also known as: periodic return.
 
@@ -3542,21 +4119,25 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["ASML.AS", "SAP.DE", "MC.PA"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_returns(period="yearly")
+        toolkit.performance.get_returns()
         ```
 
         Which returns:
 
-        | Date   |    AMZN |    TSLA |   Benchmark |
-        |:-------|--------:|--------:|------------:|
-        | 2021   |  0.0236 |  0.4983 |      0.2701 |
-        | 2022   | -0.496  | -0.6503 |     -0.1949 |
-        | 2023   |  0.8089 |  1.0174 |      0.2429 |
-        | 2024   |  0.4449 |  0.6255 |      0.2339 |
-        | 2025   |  0.0516 |  0.1129 |      0.1638 |
-        | 2026   |  0.0508 | -0.1254 |      0.0918 |
+        | Date   |   ASML.AS |   SAP.DE |   MC.PA |   Benchmark |
+        |:-------|----------:|---------:|--------:|------------:|
+        | 2021   |    0.748  |   0.2018 |  0.4345 |      0.3058 |
+        | 2022   |   -0.2789 |  -0.2049 | -0.0478 |     -0.1818 |
+        | 2023   |    0.3664 |   0.4709 |  0.0958 |      0.2615 |
+        | 2024   |    0.0035 |   0.7229 | -0.1179 |      0.2493 |
+        | 2025   |    0.3709 |  -0.115  |  0.0393 |      0.1778 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
@@ -3565,12 +4146,14 @@ class Performance:
 
         returns = self._historical_data["daily"]["Return"]
 
-        period_returns = performance_model.get_returns(
-            returns, period, cumulative=cumulative
-        ).loc[self._start_date : self._end_date]
+        # Compounded only after slicing to the date range, so the cumulative return
+        # starts at 1 before the first period and that period keeps its own return.
+        period_returns = performance_model.get_returns(returns, period).loc[
+            self._start_date : self._end_date
+        ]
 
         if cumulative:
-            period_returns = period_returns / period_returns.iloc[0]
+            period_returns = (1 + period_returns).cumprod()
 
         return finalize_dataset(
             dataset=period_returns,
@@ -3601,11 +4184,24 @@ class Performance:
         Calculate the Excess Return of an investment portfolio or asset for a given period
         based on the daily historical returns.
 
-        The Excess Return is defined as the period Return minus the risk free rate.
+        The Excess Return is defined as the period Return minus the risk free rate earned over
+        that period. If cumulative is set to True, the excess returns within the selected date
+        range are compounded further into a cumulative excess return (growth of 1) instead.
 
-        If cumulative is set to True, the excess returns are compounded further into
-        a cumulative excess return over time instead. The cumulative excess return is
-        always rebased to start at 1 at the beginning of the selected date range.
+        The formula is as follows:
+
+        - Period Return = ((1 + Daily Return 1) * (1 + Daily Return 2) * ... * (1 + Daily Return N)) - 1
+        - Period Risk Free Rate = (1 + Average Annual Risk Free Rate)^(1 / Periods per Year) - 1, with the
+          average taken over the daily Treasury yields within the period
+        - Excess Return = Period Return - Period Risk Free Rate
+        - Cumulative Excess Return = (1 + Excess Return 1) * (1 + Excess Return 2) * ... * (1 + Excess Return N)
+
+        The compounding starts at 1 at the beginning of the date range, so the first value
+        is 1 plus the excess return of the first period.
+
+        A period without any daily return for a ticker (before it listed, or a gap in its
+        history) is NaN rather than 0, and the cumulative excess return carries the previous
+        value past such a period.
 
         Also known as: return minus the risk-free rate.
 
@@ -3628,7 +4224,9 @@ class Performance:
         Notes:
         - The method retrieves the daily historical return data and calculates the Excess Return for
         the specified `period` for each asset in the Toolkit instance.
-        - The risk-free rate is often represented by the return of a risk-free investment, such as a Treasury bond.
+        - The risk-free rate is the Toolkit's risk_free_rate, the 10-year US Treasury yield by default. Many
+        textbook definitions (Sharpe, 1994; the Ken French factors) use a short-term Treasury bill instead, which
+        the Toolkit uses when initialised with risk_free_rate="13w".
         - If `growth` is set to True, the method calculates the growth of Excess Return values using the
         specified `lag`.
 
@@ -3637,21 +4235,25 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["MCD", "SBUX", "CMG"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_excess_return(period="yearly")
+        toolkit.performance.get_excess_return()
         ```
 
         Which returns:
 
-        | Date   |    AMZN |    TSLA |   Benchmark |
-        |:-------|--------:|--------:|------------:|
-        | 2021   |  0.0085 |  0.4832 |      0.255  |
-        | 2022   | -0.5348 | -0.6891 |     -0.2337 |
-        | 2023   |  0.7702 |  0.9787 |      0.2042 |
-        | 2024   |  0.3992 |  0.5798 |      0.1882 |
-        | 2025   |  0.01   |  0.0713 |      0.1222 |
-        | 2026   |  0.0059 | -0.1703 |      0.0469 |
+        | Date   |     MCD |    SBUX |     CMG |   Benchmark |
+        |:-------|--------:|--------:|--------:|------------:|
+        | 2021   |  0.2901 |  0.1399 |  0.3099 |      0.2912 |
+        | 2022   | -0.0255 | -0.1604 | -0.2359 |     -0.2112 |
+        | 2023   |  0.1112 | -0.0511 |  0.6093 |      0.222  |
+        | 2024   | -0.0405 | -0.0669 |  0.2772 |      0.2071 |
+        | 2025   |  0.0359 | -0.0956 | -0.4292 |      0.1347 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
@@ -3662,12 +4264,13 @@ class Performance:
         period_returns = performance_model.get_returns(returns, period)
         risk_free_rate = self._risk_free_rate_data[period]
 
+        # Compounded only after slicing to the date range, see get_returns.
         excess_return = performance_model.get_excess_return(
-            period_returns, risk_free_rate, cumulative=cumulative
+            period_returns, risk_free_rate
         ).loc[self._start_date : self._end_date]
 
         if cumulative:
-            excess_return = excess_return / excess_return.iloc[0]
+            excess_return = (1 + excess_return).cumprod()
 
         return finalize_dataset(
             dataset=excess_return,
@@ -3698,6 +4301,18 @@ class Performance:
         the correlation between every pair of assets at once. This is a prerequisite for
         portfolio variance calculations and any mean-variance optimization work.
 
+        The `period` sets the return frequency, and with it the number of observations: yearly returns over
+        five years give only a handful of points per pair, which makes the correlations close to meaningless,
+        so monthly or weekly returns over the same span are the usual choice for diversification and portfolio
+        work. Correlations between risky assets tend to rise in sell-offs, so a matrix estimated over a calm
+        stretch understates how much assets fall together when it matters.
+
+        The formula is as follows:
+
+        - Correlation (A, B) = Covariance (Return A, Return B) / (Standard Deviation A * Standard Deviation B),
+          the Pearson correlation of the period returns (e.g. monthly) within the Toolkit's date range, using
+          the overlapping (pairwise complete) observations of each pair
+
         Args:
             period (str, optional): The data frequency for returns (weekly, monthly, quarterly, or yearly). Defaults
                 to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
@@ -3712,18 +4327,25 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["TLT", "GLD", "EFA", "VNQ"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_correlation_matrix()
+        toolkit.performance.get_correlation_matrix(period="monthly")
         ```
 
         Which returns:
 
-        |           |   AMZN |   TSLA |   Benchmark |
-        |:----------|-------:|-------:|------------:|
-        | AMZN      | 1      | 0.935  |      0.7751 |
-        | TSLA      | 0.935  | 1      |      0.8982 |
-        | Benchmark | 0.7751 | 0.8982 |      1      |
+        |           |    TLT |    GLD |    EFA |    VNQ |   Benchmark |
+        |:----------|-------:|-------:|-------:|-------:|------------:|
+        | TLT       | 1      | 0.3747 | 0.6185 | 0.6626 |      0.5646 |
+        | GLD       | 0.3747 | 1      | 0.3918 | 0.2266 |      0.1283 |
+        | EFA       | 0.6185 | 0.3918 | 1      | 0.781  |      0.7999 |
+        | VNQ       | 0.6626 | 0.2266 | 0.781  | 1      |      0.8282 |
+        | Benchmark | 0.5646 | 0.1283 | 0.7999 | 0.8282 |      1      |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
@@ -3733,7 +4355,9 @@ class Performance:
 
         correlation_matrix = performance_model.get_correlation_matrix(returns)
 
-        return correlation_matrix.round(rounding if rounding else self._rounding)
+        return apply_rounding(
+            correlation_matrix, rounding if rounding is not None else self._rounding
+        )
 
     @handle_errors
     def get_covariance_matrix(
@@ -3751,6 +4375,12 @@ class Performance:
         prerequisite for portfolio variance calculations and any mean-variance
         optimization work.
 
+        The formula is as follows:
+
+        - Covariance (A, B) = SUM((Return A - Mean Return A) * (Return B - Mean Return B)) / (N - 1), the sample
+          covariance (ddof=1) of the period returns (e.g. monthly) within the Toolkit's date range, per period
+          and not annualized, using the overlapping (pairwise complete) observations of each pair
+
         Args:
             period (str, optional): The data frequency for returns (weekly, monthly, quarterly, or yearly). Defaults
                 to "quarterly" if the Toolkit is initialised with quarterly=True, otherwise "yearly".
@@ -3765,18 +4395,25 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AMZN", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["^GSPC", "EURUSD", "GCUSD", "CLUSD"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_covariance_matrix()
+        toolkit.performance.get_covariance_matrix(period="monthly")
         ```
 
         Which returns:
 
-        |           |   AMZN |   TSLA |   Benchmark |
-        |:----------|-------:|-------:|------------:|
-        | AMZN      | 0.1944 | 0.2418 |      0.0592 |
-        | TSLA      | 0.2418 | 0.344  |      0.0913 |
-        | Benchmark | 0.0592 | 0.0913 |      0.0301 |
+        |           |   ^GSPC |   EURUSD |   GCUSD |   CLUSD |   Benchmark |
+        |:----------|--------:|---------:|--------:|--------:|------------:|
+        | ^GSPC     |  0.0019 |   0.0003 |  0.0003 |  0.0003 |      0.0019 |
+        | EURUSD    |  0.0003 |   0.0005 |  0.0005 | -0.0001 |      0.0003 |
+        | GCUSD     |  0.0003 |   0.0005 |  0.0018 | -0.0007 |      0.0003 |
+        | CLUSD     |  0.0003 |  -0.0001 | -0.0007 |  0.0067 |      0.0003 |
+        | Benchmark |  0.0019 |   0.0003 |  0.0003 |  0.0003 |      0.0019 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
@@ -3786,7 +4423,9 @@ class Performance:
 
         covariance_matrix = performance_model.get_covariance_matrix(returns)
 
-        return covariance_matrix.round(rounding if rounding else self._rounding)
+        return apply_rounding(
+            covariance_matrix, rounding if rounding is not None else self._rounding
+        )
 
     @handle_portfolio
     @handle_errors
@@ -3832,7 +4471,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -3853,27 +4492,33 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["ADBE", "CRM", "ORCL"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_appraisal_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2022   | -0.0946 | -0.5928 |
-        | 2023   |  1.4422 |  1.0563 |
-        | 2024   |  0.3371 |  0.1716 |
-        | 2025   | -0.5687 | -0.5019 |
-        | 2026   |  0.1411 | -1.8633 |
+        | Date   |    ADBE |     CRM |    ORCL |
+        |:-------|--------:|--------:|--------:|
+        | 2021   | -1.1711 | -0.8087 |  0.5274 |
+        | 2022   | -0.4641 | -0.6351 |  0.5198 |
+        | 2023   |  1.5758 |  2.7157 |  0.1366 |
+        | 2024   | -1.6901 | -0.1944 |  0.9946 |
+        | 2025   | -1.4152 | -1.4877 | -0.1032 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             beta = performance_model.get_rolling_beta(
                 returns, benchmark_returns, rolling
@@ -3891,37 +4536,30 @@ class Performance:
                 within_excess_return, 0.0, beta, within_benchmark_excess_return
             )
         else:
-            historical_within_data = self._within_historical_data[period]
-            returns = historical_within_data.loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
-            benchmark_returns = historical_within_data.loc[:, "Return"][
-                self._benchmark_name
-            ]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             beta = performance_model.get_beta(returns, benchmark_returns)
 
-            within_excess_return = historical_within_data.loc[:, "Excess Return"][
-                self._tickers_without_portfolio
-            ]
-            within_benchmark_excess_return = historical_within_data.loc[
-                :, "Excess Return"
-            ][self._benchmark_name]
+            within_excess_return = self._get_column(
+                period, "Excess Return", within_period=True
+            )
+            within_benchmark_excess_return = self._get_column(
+                period, "Excess Return", within_period=True, benchmark=True
+            )
 
             capm_residuals = performance_model.get_capm_residuals(
                 within_excess_return, beta, within_benchmark_excess_return
             )
 
-        historical_data = self._historical_data[period]
-
-        period_returns = historical_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
 
         risk_free_rate = self._risk_free_rate_data[period]
-        benchmark_period_returns = historical_data.loc[:, "Return"][
-            self._benchmark_name
-        ]
+        benchmark_period_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
 
         jensens_alpha = performance_model.get_jensens_alpha(
             period_returns, risk_free_rate, beta, benchmark_period_returns
@@ -3993,7 +4631,7 @@ class Performance:
             the full return history instead of per `period`. Defaults to None.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -4015,59 +4653,55 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["QQQ", "IWM", "XLE"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_fama_decomposition().xs("AAPL", level=0, axis=1)
+        toolkit.performance.get_fama_decomposition().xs("Selectivity", level=1, axis=1)
         ```
 
         Which returns:
 
-        | Date   |   Selectivity |   Diversification |
-        |:-------|--------------:|------------------:|
-        | 2021   |        0.0113 |           -0.0084 |
-        | 2022   |        0.022  |           -0.0375 |
-        | 2023   |        0.1048 |            0.0979 |
-        | 2024   |       -0.1053 |            0.1698 |
-        | 2025   |       -0.1774 |            0.056  |
-        | 2026   |       -0.0958 |            0.1246 |
+        | Date   |     QQQ |     IWM |     XLE |
+        |:-------|--------:|--------:|--------:|
+        | 2021   | -0.123  | -0.3304 | -0.1035 |
+        | 2022   | -0.0751 |  0.0106 |  0.9216 |
+        | 2023   |  0.2052 | -0.2125 | -0.4352 |
+        | 2024   | -0.0824 | -0.2697 | -0.28   |
+        | 2025   |  0.0022 | -0.0738 | -0.1338 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
         if rolling:
-            historical_data = self._historical_data[period]
-            returns = historical_data.loc[:, "Return"][self._tickers_without_portfolio]
-            benchmark_returns = historical_data.loc[:, "Return"][self._benchmark_name]
+            returns = self._get_column(period, "Return", within_period=False)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=False, benchmark=True
+            )
 
             beta = performance_model.get_rolling_beta(
                 returns, benchmark_returns, rolling
             )
         else:
-            historical_within_data = self._within_historical_data[period]
-            returns = historical_within_data.loc[:, "Return"][
-                self._tickers_without_portfolio
-            ]
-            benchmark_returns = historical_within_data.loc[:, "Return"][
-                self._benchmark_name
-            ]
+            returns = self._get_column(period, "Return", within_period=True)
+            benchmark_returns = self._get_column(
+                period, "Return", within_period=True, benchmark=True
+            )
 
             beta = performance_model.get_beta(returns, benchmark_returns)
 
-        historical_data = self._historical_data[period]
-
-        period_returns = historical_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        period_returns = self._get_column(period, "Return", within_period=False)
         risk_free_rate = self._risk_free_rate_data[period]
-        benchmark_period_returns = historical_data.loc[:, "Return"][
-            self._benchmark_name
-        ]
+        benchmark_period_returns = self._get_column(
+            period, "Return", within_period=False, benchmark=True
+        )
 
-        daily_returns = self._historical_data["daily"].loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
-        daily_benchmark_returns = self._historical_data["daily"].loc[:, "Return"][
-            self._benchmark_name
-        ]
+        daily_returns = self._get_column("daily", "Return", within_period=False)
+        daily_benchmark_returns = self._get_column(
+            "daily", "Return", within_period=False, benchmark=True
+        )
 
         asset_standard_deviation = get_volatility(daily_returns, period)
         benchmark_standard_deviation = get_volatility(daily_benchmark_returns, period)
@@ -4144,7 +4778,7 @@ class Performance:
             for the worst 5% of outcomes). Defaults to 0.05.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -4168,33 +4802,30 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["CAT", "DE", "HON"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2020-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_starr_ratio()
         ```
 
         Which returns:
 
-        | Date   |    AAPL |    TSLA |
-        |:-------|--------:|--------:|
-        | 2022   | -0.4203 | -0.4759 |
-        | 2023   |  1.0763 |  0.8716 |
-        | 2024   |  0.5566 |  0.4707 |
-        | 2025   |  0.0677 |  0.0554 |
-        | 2026   |  0.1743 | -0.3805 |
+        | Date   |    CAT |      DE |     HON |
+        |:-------|-------:|--------:|--------:|
+        | 2021   | 0.287  |  0.4693 | -0.0376 |
+        | 2022   | 0.2125 |  0.2897 |  0.0386 |
+        | 2023   | 0.3701 | -0.1499 | -0.0915 |
+        | 2024   | 0.3598 |  0.063  |  0.1513 |
+        | 2025   | 0.8327 |  0.1243 | -0.1867 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
-
-        historical_data = self._historical_data[period]
-        period_returns = historical_data.loc[:, "Return"][
-            self._tickers_without_portfolio
-        ]
+        returns = self._get_column(period, "Return", within_period=within_period)
+        period_returns = self._get_column(period, "Return", within_period=False)
         risk_free_rate = self._risk_free_rate_data[period]
 
         excess_return = performance_model.get_excess_return(
@@ -4257,7 +4888,7 @@ class Performance:
             best/worst 5% of outcomes). Defaults to 0.05.
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -4276,28 +4907,29 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["TSLA", "AMD", "PLTR"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
         toolkit.performance.get_rachev_ratio()
         ```
 
         Which returns:
 
-        | Date   |   AAPL |   TSLA |
-        |:-------|-------:|-------:|
-        | 2022   | 1.0788 | 0.9467 |
-        | 2023   | 1.0726 | 1.1169 |
-        | 2024   | 1.1443 | 1.3081 |
-        | 2025   | 1.0729 | 1.0925 |
-        | 2026   | 0.8627 | 0.8404 |
+        |      |   TSLA |    AMD |   PLTR |
+        |:-----|-------:|-------:|-------:|
+        | 2021 | 1.2069 | 1.1556 | 1.2789 |
+        | 2022 | 0.9469 | 0.9396 | 0.9301 |
+        | 2023 | 1.1169 | 1.3483 | 1.6236 |
+        | 2024 | 1.3081 | 0.8908 | 2.0305 |
+        | 2025 | 1.0925 | 1.4024 | 1.0683 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
 
-        returns = (
-            self._within_historical_data[period]
-            if within_period
-            else self._historical_data[period]
-        ).loc[:, "Return"][self._tickers_without_portfolio]
+        returns = self._get_column(period, "Return", within_period=within_period)
 
         rachev_ratio = performance_model.get_rachev_ratio(returns, alpha)
 
@@ -4351,7 +4983,7 @@ class Performance:
                 initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -4372,28 +5004,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["ARKK", "JEPI"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_treynor_mazuy_model().xs("AAPL", level=0, axis=1)
+        toolkit.performance.get_treynor_mazuy_model().xs("ARKK", level=0, axis=1)
         ```
 
         Which returns:
 
-        | Date   |   Alpha |   Beta |   Gamma |   R Squared |
-        |:-------|--------:|-------:|--------:|------------:|
-        | 2024   |  0.0009 | 0.944  | -9.4286 |      0.294  |
-        | 2025   | -0.0005 | 1.2237 |  1.6352 |      0.5693 |
-        | 2026   |  0.0006 | 0.6632 | -2.6122 |      0.1087 |
+        |      |   Alpha |   Beta |    Gamma |   R Squared |
+        |:-----|--------:|-------:|---------:|------------:|
+        | 2021 | -0.0034 | 1.6646 |  12.4821 |      0.2937 |
+        | 2022 | -0.0035 | 2.1567 |   6.9512 |      0.5959 |
+        | 2023 |  0.0015 | 2.2614 | -14.8854 |      0.529  |
+        | 2024 | -0.001  | 2.1368 |  -3.1566 |      0.5658 |
+        | 2025 |  0.0006 | 1.8994 |  -1.3437 |      0.6767 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_within_data = self._within_historical_data[period]
-        excess_return = historical_within_data.loc[:, "Excess Return"][
-            self._tickers_without_portfolio
-        ]
-        benchmark_excess_return = historical_within_data.loc[:, "Excess Return"][
-            self._benchmark_name
-        ]
+        excess_return = self._get_column(period, "Excess Return", within_period=True)
+        benchmark_excess_return = self._get_column(
+            period, "Excess Return", within_period=True, benchmark=True
+        )
 
         logger.info("Calculating Treynor-Mazuy Market Timing Model")
 
@@ -4466,7 +5101,7 @@ class Performance:
                 initialised with quarterly=True, otherwise "yearly".
             rounding (int, optional): The number of decimals to round the results to. Defaults to 4.
             growth (bool, optional): Whether to calculate the growth of the ratios. Defaults to False.
-            lag (int | str, optional): The lag to use for the growth calculation. Defaults to 1.
+            lag (int | list[int], optional): The lag to use for the growth calculation. Defaults to 1.
             standardize (bool, optional): Whether to standardize (Z-Score) the result. When
                 combined with growth=True, standardizes the growth values instead of the raw
                 values. Defaults to False.
@@ -4487,28 +5122,31 @@ class Performance:
         ```python
         from financetoolkit import Toolkit
 
-        toolkit = Toolkit(["AAPL", "TSLA"], api_key="FINANCIAL_MODELING_PREP_KEY")
+        toolkit = Toolkit(
+            ["BRK-B", "FBCG"],
+            api_key="FINANCIAL_MODELING_PREP_KEY",
+            start_date="2021-01-01",
+            end_date="2025-12-31",
+        )
 
-        toolkit.performance.get_henriksson_merton_model().xs("AAPL", level=0, axis=1)
+        toolkit.performance.get_henriksson_merton_model().xs("FBCG", level=0, axis=1)
         ```
 
         Which returns:
 
-        | Date   |   Alpha |   Beta |   Up Market Beta |   R Squared |
-        |:-------|--------:|-------:|-----------------:|------------:|
-        | 2024   |  0.0013 | 1.1387 |          -0.3553 |      0.2926 |
-        | 2025   | -0.0009 | 1.1732 |           0.152  |      0.5673 |
-        | 2026   |  0.0008 | 0.7243 |          -0.1232 |      0.1088 |
+        |      |   Alpha |   Beta |   Up Market Beta |   R Squared |
+        |:-----|--------:|-------:|-----------------:|------------:|
+        | 2021 | -0.0004 | 1.4217 |          -0.064  |      0.7204 |
+        | 2022 | -0.0009 | 1.4208 |           0.0312 |      0.885  |
+        | 2023 |  0.0004 | 1.359  |           0.0602 |      0.8342 |
+        | 2024 |  0      | 1.4674 |           0.0496 |      0.8536 |
+        | 2025 |  0.0002 | 1.3907 |          -0.0759 |      0.8893 |
         """
         period = period if period else "quarterly" if self._quarterly else "yearly"
-
-        historical_within_data = self._within_historical_data[period]
-        excess_return = historical_within_data.loc[:, "Excess Return"][
-            self._tickers_without_portfolio
-        ]
-        benchmark_excess_return = historical_within_data.loc[:, "Excess Return"][
-            self._benchmark_name
-        ]
+        excess_return = self._get_column(period, "Excess Return", within_period=True)
+        benchmark_excess_return = self._get_column(
+            period, "Excess Return", within_period=True, benchmark=True
+        )
 
         logger.info("Calculating Henriksson-Merton Market Timing Model")
 

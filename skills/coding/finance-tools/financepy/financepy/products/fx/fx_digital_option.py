@@ -11,14 +11,28 @@ from ...utils.math import normcdf_vect  # normcdf_prime_vect
 
 from ...utils.global_vars import G_DAYS_IN_YEAR
 from ...utils.error import FinError
+from ...utils.helpers import option_years
 
-# from ...products.equity.EquityOption import FinOption
 from ...utils.date import Date
 
-# from ...products.fx.FinFXModelTypes import FinFXModel
-from ...models.black_scholes import BlackScholes
 from ...utils.helpers import check_argument_types
 from ...utils.global_types import OptionTypes
+from ...utils.check_values import check_curve_dt
+
+from ...models.black_scholes import BlackScholes
+from ...models.model import Model
+from ...market.curves.discount_curve import DiscountCurve
+
+
+def _standardized_distance(numerator, denominator):
+    """Divide by volatility time, using the deterministic zero-variance limit."""
+    numerator, denominator = np.broadcast_arrays(numerator, denominator)
+    result = np.zeros(numerator.shape, dtype=float)
+    np.divide(numerator, denominator, out=result, where=denominator != 0.0)
+    result = np.where((denominator == 0.0) & (numerator > 0.0), np.inf, result)
+    result = np.where((denominator == 0.0) & (numerator < 0.0), -np.inf, result)
+    return result
+
 
 ########################################################################################
 
@@ -35,7 +49,7 @@ class FXDigitalOption:
         notional: float,
         prem_currency: str,
         spot_days: int = 0,
-    ):
+    ) -> None:
         """Create the FX Digital Option object. Inputs include expiry date,
         strike, currency pair, option type (call or put), notional and the
         currency of the notional. And adjustment for spot days is enabled. All
@@ -57,8 +71,8 @@ class FXDigitalOption:
         self.expiry_dt = expiry_dt
         self.delivery_dt = delivery_dt
 
-        if np.any(strike_fx_rate < 0.0):
-            raise FinError("Negative strike.")
+        if np.any(strike_fx_rate <= 0.0):
+            raise FinError("Strike must be greater than zero.")
 
         self.strike_fx_rate = strike_fx_rate
 
@@ -74,7 +88,7 @@ class FXDigitalOption:
         self.notional = notional
 
         if opt_type not in [OptionTypes.DIGITAL_CALL, OptionTypes.DIGITAL_PUT]:
-            raise FinError("Unknown Digital Option Type:" + opt_type)
+            raise FinError("Unknown Digital Option Type:" + str(opt_type))
 
         self.opt_type = opt_type
         self.spot_days = spot_days
@@ -83,11 +97,11 @@ class FXDigitalOption:
 
     def value(
         self,
-        value_dt,
-        spot_fx_rate,  # 1 unit of foreign in domestic
-        domestic_curve,
-        foreign_curve,
-        model,
+        value_dt: Date,
+        spot_fx_rate: float,  # 1 unit of foreign in domestic
+        domestic_curve: DiscountCurve,
+        foreign_curve: DiscountCurve,
+        model: Model,
     ):
         """Valuation of a digital option using Black-Scholes model. This
         allows for 4 cases - first upper barriers that when crossed pay out
@@ -101,16 +115,13 @@ class FXDigitalOption:
         if value_dt > self.expiry_dt:
             raise FinError("Valuation date after expiry date.")
 
-        if domestic_curve.value_dt != value_dt:
-            raise FinError("Domestic Curve valuation date not same as valuation date")
-
-        if foreign_curve.value_dt != value_dt:
-            raise FinError("Foreign Curve valuation date not same as valuation date")
+        check_curve_dt(value_dt, domestic_curve)
+        check_curve_dt(value_dt, foreign_curve)
 
         if isinstance(value_dt, Date):
             spot_dt = value_dt.add_weekdays(self.spot_days)
-            t_del = (self.delivery_dt - spot_dt) / G_DAYS_IN_YEAR
-            t_exp = (self.expiry_dt - value_dt) / G_DAYS_IN_YEAR
+            t_del = option_years(value_dt, self.delivery_dt)
+            t_exp = option_years(value_dt, self.expiry_dt)
         else:
             t_del = value_dt
             t_exp = t_del
@@ -126,47 +137,183 @@ class FXDigitalOption:
         # TODO RESOLVE t_del versus TEXP
         dom_df = domestic_curve.df_t(t_del)
         for_df = foreign_curve.df_t(t_del)
-        r_d = -np.log(dom_df) / t_del
-        r_f = -np.log(for_df) / t_del
 
-        s0 = spot_fx_rate
+        if not isinstance(model, BlackScholes):
+            raise FinError("Model must be BlackScholes.")
+
+        # The time floor above is only for curve evaluation; at expiry the
+        # event is determined by spot, with no forward drift.
+        if t_exp == 0.0:
+            f = spot_fx_rate
+        else:
+            f = spot_fx_rate * for_df / dom_df
         k = self.strike_fx_rate
+        v = model.volatility
+        vol_sqrt_t = v * np.sqrt(t_exp)
 
-        if isinstance(model, BlackScholes):
+        d1_numerator = np.log(f / k) + 0.5 * (v**2) * t_exp
+        d2_numerator = d1_numerator - (v**2) * t_exp
+        d1 = _standardized_distance(d1_numerator, vol_sqrt_t)
+        d2 = _standardized_distance(d2_numerator, vol_sqrt_t)
 
-            volatility = model.volatility
-            ln_s0_k = np.log(s0 / k)
-            den = volatility * np.sqrt(t_exp)
-            v2 = volatility * volatility
-            mu = r_d - r_f
-            d2 = (ln_s0_k + (mu - v2 / 2.0) * t_del) / den
+        if self.opt_type == OptionTypes.DIGITAL_CALL and self.for_name == self.prem_currency:
+            v = spot_fx_rate * for_df * normcdf_vect(d1)
 
-            if (
-                self.opt_type == OptionTypes.DIGITAL_CALL
-                and self.for_name == self.prem_currency
-            ):
-                v = s0 * np.exp(-r_f * t_del) * normcdf_vect(d2)
-            elif (
-                self.opt_type == OptionTypes.DIGITAL_PUT
-                and self.for_name == self.prem_currency
-            ):
-                v = s0 * np.exp(-r_f * t_del) * normcdf_vect(-d2)
-            elif (
-                self.opt_type == OptionTypes.DIGITAL_CALL
-                and self.dom_name == self.prem_currency
-            ):
-                v = np.exp(-r_d * t_del) * normcdf_vect(d2)
-            elif (
-                self.opt_type == OptionTypes.DIGITAL_PUT
-                and self.dom_name == self.prem_currency
-            ):
-                v = np.exp(-r_d * t_del) * normcdf_vect(-d2)
-            else:
-                raise FinError("Unknown option type")
+        elif self.opt_type == OptionTypes.DIGITAL_PUT and self.for_name == self.prem_currency:
+            v = spot_fx_rate * for_df * normcdf_vect(-d1)
 
-            v = v * self.notional
+        elif self.opt_type == OptionTypes.DIGITAL_CALL and self.dom_name == self.prem_currency:
+            v = dom_df * normcdf_vect(d2)
+
+        elif self.opt_type == OptionTypes.DIGITAL_PUT and self.dom_name == self.prem_currency:
+            v = dom_df * normcdf_vect(-d2)
+
+        else:
+            raise FinError("Unknown option type")
+
+        v = v * self.notional
 
         return v
 
 
 ########################################################################################
+
+    def value_mc(
+        self,
+        value_dt: Date,
+        spot_fx_rate: float,
+        domestic_curve: DiscountCurve,
+        foreign_curve: DiscountCurve,
+        model: Model,
+        num_paths: int = 10000,
+        seed: int = 4242,
+    ):
+        """Value the FX digital option using Monte Carlo simulation."""
+
+        if isinstance(value_dt, Date) is False:
+            raise FinError("Valuation date is not a Date")
+
+        if value_dt > self.expiry_dt:
+            raise FinError("Valuation date after expiry date.")
+
+        check_curve_dt(value_dt, domestic_curve)
+        check_curve_dt(value_dt, foreign_curve)
+
+        if spot_fx_rate <= 0.0:
+            raise FinError("spot_fx_rate must be greater than zero.")
+
+        if num_paths <= 0:
+            raise FinError("num_paths must be positive")
+
+        if not isinstance(model, BlackScholes):
+            raise FinError("Model must be BlackScholes.")
+
+        # ------------------------------------------------------------------
+        # Times
+        # ------------------------------------------------------------------
+
+        spot_dt = value_dt.add_weekdays(self.spot_days)
+
+        t_del = option_years(spot_dt, self.delivery_dt)
+        t_exp = option_years(spot_dt, self.expiry_dt)
+
+        # ------------------------------------------------------------------
+        # Market parameters
+        # ------------------------------------------------------------------
+
+        t = max(t_exp, 1.0e-10)
+
+        dom_df = domestic_curve.df_t(t)
+
+        r_d = domestic_curve.zero_rate_cc(self.expiry_dt)
+        r_f = foreign_curve.zero_rate_cc(self.expiry_dt)
+
+        mu = r_d - r_f
+
+        v = model.volatility
+
+        # ------------------------------------------------------------------
+        # Simulate terminal FX rate
+        # ------------------------------------------------------------------
+
+        # Use Antithetic variables
+        # A local RNG makes the Monte Carlo result reproducible for a given seed.
+        rng = np.random.default_rng(seed)
+        g = rng.standard_normal(num_paths)
+
+        s = spot_fx_rate * np.exp((mu - v * v / 2.0) * t)
+        m = np.exp(g * np.sqrt(t) * v)
+
+        s_1 = s * m
+        s_2 = s / m
+
+        payoff_1 = None
+        payoff_2 = None
+        indicator_1 = None
+        indicator_2 = None
+
+        # ------------------------------------------------------------------
+        # Digital event
+        # ------------------------------------------------------------------
+
+        if self.opt_type == OptionTypes.DIGITAL_CALL:
+            indicator_1 = s_1 > self.strike_fx_rate
+            indicator_2 = s_2 > self.strike_fx_rate
+
+        elif self.opt_type == OptionTypes.DIGITAL_PUT:
+            indicator_1 = s_1 < self.strike_fx_rate
+            indicator_2 = s_2 < self.strike_fx_rate
+
+        else:
+            raise FinError(
+                "Unknown Digital Option Type: "
+                + str(self.opt_type)
+            )
+
+        # ------------------------------------------------------------------
+        # Payoff
+        # ------------------------------------------------------------------
+
+        if self.prem_currency == self.dom_name:
+
+            # Domestic cash-or-nothing digital:
+            #
+            #     payoff = N * 1(S_T > K)
+            #
+            # Analytic:
+            #
+            #     N * DF_dom * N(d2)
+
+            payoff_1 = self.notional * indicator_1
+            payoff_2 = self.notional * indicator_2
+
+        elif self.prem_currency == self.for_name:
+
+            # Foreign-currency digital:
+            #
+            #     payoff in foreign currency = N * 1(S_T > K)
+            #
+            # Converted into domestic currency at expiry:
+            #
+            #     payoff = N * S_T * 1(S_T > K)
+            #
+            # Analytic:
+            #
+            #     N * S_0 * DF_for * N(d1)
+
+            payoff_1 = self.notional * s_1 * indicator_1
+            payoff_2 = self.notional * s_2 * indicator_2
+
+        else:
+            raise FinError(
+                "Notional currency not in currency pair."
+            )
+
+        # ------------------------------------------------------------------
+        # Discount domestic-currency payoff
+        # ------------------------------------------------------------------
+
+        payoff = np.mean(payoff_1) + np.mean(payoff_2)
+        value = dom_df * payoff / 2.0
+
+        return value

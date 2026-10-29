@@ -1,0 +1,232 @@
+import numpy as np
+
+
+from .date import Date
+from .error import FinError
+from .currency import g_ccy_names
+
+###########################################################################
+# Validation for specific input types that handles arrays and scalars
+###########################################################################
+
+
+def check_currency(ccy_name: str) -> None:
+    """Check that a currency code is supported."""
+
+    ccy_name = ccy_name.upper()
+
+    if len(ccy_name) != 3:
+        raise FinError("Currency code must be a three letter code")
+
+    if ccy_name not in g_ccy_names:
+        raise FinError(f"Unsupported currency: {ccy_name}")
+
+###########################################################################
+
+
+def check_currency_pair(currency_pair: str) -> None:
+    """Check that an FX currency pair contains two valid currencies."""
+
+    currency_pair = currency_pair.upper()
+
+    if len(currency_pair) != 6:
+        raise FinError("Currency pair must contain six letters.")
+
+    ccy_1 = currency_pair[:3]
+    ccy_2 = currency_pair[3:]
+
+    check_currency(ccy_1)
+    check_currency(ccy_2)
+
+    if ccy_1 == ccy_2:
+        raise FinError("Currencies in pair must be different.")
+
+###########################################################################
+
+
+def check_curve_dt(value_dt: Date, *curves):
+    """Check that all curves share a valid anchor date."""
+
+    if not curves:
+        return
+
+    common_anchor_dt = curves[0].anchor_dt
+
+    for curve in curves:
+        if curve.anchor_dt > value_dt:
+            raise FinError(
+                f"{type(curve).__name__} anchor date "
+                f"{curve.anchor_dt} is after valuation date "
+                f"{value_dt}."
+            )
+
+        if curve.anchor_dt != common_anchor_dt:
+            raise FinError(
+                f"{type(curve).__name__} anchor date "
+                f"{curve.anchor_dt} does not match "
+                f"expected anchor date {common_anchor_dt}."
+            )
+
+
+###########################################################################
+
+def check_num_paths(num_paths: int):
+
+    if num_paths < 4:
+        raise FinError("Number of paths must be at least 4.")
+
+    if num_paths % 2 != 0:
+        raise FinError(
+            "Number of paths must be even when using antithetic variates."
+        )
+
+###########################################################################
+
+
+def check_stock_price(stock_price: float):
+
+    s0 = np.asarray(stock_price, dtype=float)
+
+    if s0.ndim > 1:
+        raise FinError("Stock price must be a scalar or one-dimensional array.")
+
+    if s0.size == 0:
+        raise FinError("Stock price cannot be empty.")
+
+    if not np.all(np.isfinite(s0)):
+        raise FinError("Stock price must be finite.")
+
+    if np.any(s0 <= 0.0):
+        raise FinError("Stock price must be greater than zero.")
+
+
+########################################################################################
+
+
+def check_volatility(volatility: float):
+
+    v = np.asarray(volatility, dtype=float)
+
+    if v.ndim > 1:
+        raise FinError("Volatility must be a scalar or one-dimensional array.")
+
+    if v.size == 0:
+        raise FinError("Volatility cannot be empty.")
+
+    if not np.all(np.isfinite(v)):
+        raise FinError("Volatility must be finite.")
+
+    if np.any(v <= 0.0):
+        raise FinError("Volatility must be greater than zero.")
+
+
+########################################################################################
+
+
+def check_strike_price(strike_price: float):
+
+    k = np.asarray(strike_price, dtype=float)
+
+    if k.ndim > 1:
+        raise FinError("Strike price must be a scalar or one-dimensional array.")
+
+    if k.size == 0:
+        raise FinError("Strike price cannot be empty.")
+
+    if not np.all(np.isfinite(k)):
+        raise FinError("Strike price must be finite.")
+
+    if np.any(k <= 0.0):
+        raise FinError("Strike price must be greater than zero.")
+
+    return strike_price
+
+
+########################################################################################
+
+def check_corr_matrix(
+    corr_matrix: np.ndarray,
+    num_assets: int,
+    tol=1e-12,
+    positive_definite=False,
+):
+    """Check that an array is a valid correlation matrix."""
+
+    if not isinstance(corr_matrix, np.ndarray):
+        raise FinError("Correlation matrix must be a NumPy array.")
+
+    if corr_matrix.ndim != 2:
+        raise FinError("Correlation matrix must be two-dimensional.")
+
+    num_rows, num_cols = corr_matrix.shape
+
+    if num_rows != num_cols:
+        raise FinError("Correlation matrix must be square.")
+
+    if num_rows != num_assets:
+        raise FinError("Correlation matrix incorrect size.")
+
+    if not np.all(np.isfinite(corr_matrix)):
+        raise FinError("Correlation matrix contains non-finite values.")
+
+    if not np.allclose(
+        corr_matrix,
+        corr_matrix.T,
+        atol=tol,
+        rtol=0.0,
+    ):
+        raise FinError("Correlation matrix must be symmetric.")
+
+    if not np.allclose(
+        np.diag(corr_matrix),
+        1.0,
+        atol=tol,
+        rtol=0.0,
+    ):
+        raise FinError("Correlation matrix diagonal must equal one.")
+
+    if np.any(np.abs(corr_matrix) > 1.0 + tol):
+        raise FinError(
+            "Correlation matrix entries must be between -1 and 1."
+        )
+
+    eigenvalues = np.linalg.eigvalsh(corr_matrix)
+    min_eigenvalue = np.min(eigenvalues)
+
+    if positive_definite:
+        if min_eigenvalue <= tol:
+            raise FinError(
+                "Correlation matrix must be positive definite."
+            )
+    elif min_eigenvalue < -tol:
+        raise FinError(
+            "Correlation matrix must be positive semi-definite."
+        )
+
+
+########################################################################################
+
+def check_shapes(*args):
+    """Allow scalars and equal-length vectors."""
+
+    shape = None
+
+    for arg in args:
+
+        ndim = np.ndim(arg)
+
+        if ndim > 1:
+            raise FinError("Arguments must be scalars or one-dimensional arrays.")
+
+        if ndim == 1:
+
+            arg_shape = np.shape(arg)
+
+            if shape is None:
+                shape = arg_shape
+
+            elif arg_shape != shape:
+                raise FinError("Vector arguments must have the same length.")
+
+
+########################################################################################

@@ -12,6 +12,8 @@ from numba import njit, float64, int64
 from ...utils.error import FinError
 from ...utils.global_vars import G_DAYS_IN_YEAR
 from ...utils.math import heaviside
+from ...market.curves.discount_curve import DiscountCurve
+from ...utils.date import Date
 
 ########################################################################################
 
@@ -101,11 +103,11 @@ def _payoff_value(s, payoff_type, payoff_params):
 
 @njit(fastmath=True, cache=True)
 def _value_once(
-    stock_price,
+    stock_price: float,
     r,
     q,
-    volatility,
-    num_steps,
+    volatility: float,
+    num_steps: int,
     time_to_expiry,
     payoff_type,
     exercise_type,
@@ -199,7 +201,7 @@ def _value_once(
 
 class EquityBinomialTree:
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     #        self.m_option_values = np.zeros()
@@ -213,14 +215,14 @@ class EquityBinomialTree:
 
     def value(
         self,
-        stock_price,
-        discount_curve,
-        dividend_curve,
-        volatility,
-        num_steps,
-        value_dt,
+        stock_price: float,
+        discount_curve: DiscountCurve,
+        dividend_curve: DiscountCurve,
+        volatility: float,
+        num_steps: int,
+        value_dt: Date,
         payoff,
-        expiry_dt,
+        expiry_dt: Date,
         payoff_type,
         exercise_type,
         payoff_params,
@@ -228,7 +230,13 @@ class EquityBinomialTree:
 
         # do some validation
         t_exp = (expiry_dt - value_dt) / G_DAYS_IN_YEAR
-        r = discount_curve.zero_rate(expiry_dt)
+        if t_exp <= 0.0:
+            raise FinError("Time to expiry must be positive.")
+
+        if volatility <= 0.0:
+            raise FinError("Volatility must be positive.")
+
+        r = discount_curve.zero_rate_cc(expiry_dt)
 
         dq = dividend_curve.df(expiry_dt)
         q = -np.log(dq) / t_exp

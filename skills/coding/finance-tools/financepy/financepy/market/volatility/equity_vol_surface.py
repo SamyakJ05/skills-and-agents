@@ -24,7 +24,28 @@
 
 ########################################################################################
 
-from typing import Union, Any, Sequence, Optional, Tuple, List
+from ...utils.global_types import SolverTypes
+from ...utils.solver_nm import nelder_mead
+from ...utils.solver_1d import newton_secant
+from ...utils.distribution import FinDistribution
+from ...models.bs_european_analytic import delta
+from ...utils.math import norminvcdf
+from ...models.sabr import vol_function_sabr_beta_half
+from ...models.sabr import vol_function_sabr_beta_one
+from ...models.sabr import vol_function_sabr
+from ...models.volatility_fns import vol_function_ssvi
+from ...models.volatility_fns import vol_function_svi
+from ...models.volatility_fns import vol_function_bloomberg
+from ...models.volatility_fns import vol_function_clark
+from ...utils.global_types import VolFuncTypes
+from ...market.curves.discount_curve import DiscountCurve
+from ...utils.helpers import check_argument_types, label_to_string
+from ...models.option_implied_dbn import option_implied_dbn
+from ...utils.global_types import OptionTypes
+from ...utils.global_vars import G_DAYS_IN_YEAR
+from ...utils.date import Date
+from ...utils.error import FinError
+from typing import Union, Any, Sequence, Tuple, List
 import matplotlib.pyplot as plt
 
 import numpy as np
@@ -32,32 +53,6 @@ from scipy.optimize import minimize
 
 from numba import njit, float64, int64
 
-from ...utils.error import FinError
-from ...utils.date import Date
-from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.global_types import OptionTypes
-from ...models.option_implied_dbn import option_implied_dbn
-from ...utils.helpers import check_argument_types, label_to_string
-from ...market.curves.discount_curve import DiscountCurve
-
-from ...utils.global_types import VolFuncTypes
-from ...models.volatility_fns import vol_function_clark
-from ...models.volatility_fns import vol_function_bloomberg
-from ...models.volatility_fns import vol_function_svi
-from ...models.volatility_fns import vol_function_ssvi
-from ...models.sabr import vol_function_sabr
-from ...models.sabr import vol_function_sabr_beta_one
-from ...models.sabr import vol_function_sabr_beta_half
-
-from ...utils.math import norminvcdf
-
-from ...models.black_scholes_analytic import delta
-
-from ...utils.distribution import FinDistribution
-
-from ...utils.solver_1d import newton_secant
-from ...utils.solver_nm import nelder_mead
-from ...utils.global_types import SolverTypes
 
 ########################################################################################
 # ISSUES
@@ -173,9 +168,7 @@ def _solve_to_horizon(
     cache=True,
     fastmath=True,
 )
-def vol_function(
-    vol_function_type_value: int, params: np.ndarray, f: float, k: float, t: float
-) -> float:
+def vol_function(vol_function_type_value: int, params: np.ndarray, f: float, k: float, t: float) -> float:
     """Return the volatility for a strike using a given polynomial
     interpolation following Section 3.9 of Iain Clark book."""
 
@@ -289,7 +282,7 @@ class EquityVolSurface:
 
     def __init__(
         self,
-        value_dt: Date,
+        anchor_dt: Date,
         stock_price: float,
         discount_curve: DiscountCurve,
         dividend_curve: DiscountCurve,
@@ -304,7 +297,7 @@ class EquityVolSurface:
 
         check_argument_types(self.__init__, locals())
 
-        self.value_dt = value_dt
+        self.anchor_dt = anchor_dt
         self._stock_price = stock_price
 
         self._discount_curve = discount_curve
@@ -345,7 +338,7 @@ class EquityVolSurface:
         interpolation is done in variance space and then converted back to a
         lognormal volatility."""
 
-        t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+        t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
         if t_exp <= 0.0:
             raise FinError("Expiry time must be positive.")
@@ -423,7 +416,7 @@ class EquityVolSurface:
     #     """ Interpolates the strike at a delta and expiry date. Linear
     #     interpolation is used in strike."""
 
-    #     t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+    #     t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
     #     vol_type_value = self._vol_func_type.value
 
@@ -530,7 +523,7 @@ class EquityVolSurface:
         interpolation is done in variance space and then converted back to a
         lognormal volatility."""
 
-        t_exp = (expiry_dt - self.value_dt) / G_DAYS_IN_YEAR
+        t_exp = (expiry_dt - self.anchor_dt) / G_DAYS_IN_YEAR
 
         if t_exp <= 0.0:
             raise FinError("Expiry time must be positive.")
@@ -635,9 +628,7 @@ class EquityVolSurface:
 
     ####################################################################################
 
-    def _build_vol_surface(
-        self, fin_solver_type: Any = SolverTypes.NELDER_MEAD
-    ) -> None:
+    def _build_vol_surface(self, fin_solver_type: Any = SolverTypes.NELDER_MEAD) -> None:
         """Main function to construct the vol surface."""
 
         s = self._stock_price
@@ -687,7 +678,7 @@ class EquityVolSurface:
         # TODO: ADD SPOT DAYS
         #######################################################################
 
-        spot_dt = self.value_dt
+        spot_dt = self.anchor_dt
 
         for i in range(0, num_expiry_dts):
 
@@ -750,7 +741,7 @@ class EquityVolSurface:
         if verbose:
 
             print("==========================================================")
-            print("VALUE DATE:", self.value_dt)
+            print("VALUE DATE:", self.anchor_dt)
             print("STOCK PRICE:", self._stock_price)
             print("==========================================================")
 
@@ -784,9 +775,7 @@ class EquityVolSurface:
 
     ####################################################################################
 
-    def implied_dbns(
-        self, low_s: float, high_s: float, num_intervals: int
-    ) -> List[FinDistribution]:
+    def implied_dbns(self, low_s: float, high_s: float, num_intervals: int) -> List[FinDistribution]:
         """Calculate the pdf for each tenor horizon. Returns a list of
         FinDistribution objects, one for each tenor horizon."""
 
@@ -799,11 +788,8 @@ class EquityVolSurface:
 
             ds = (high_s - low_s) / num_intervals
 
-            dis_df = self._discount_curve.df_t(t)
-            div_df = self._dividend_curve.df_t(t)
-
-            r = -np.log(dis_df) / t
-            q = -np.log(div_df) / t
+            r = self._discount_curve.zero_rate_cc_t(t)
+            q = self._dividend_curve.zero_rate_cc_t(t)
 
             k_s = []
             vols = []
@@ -880,7 +866,7 @@ class EquityVolSurface:
 
     def __repr__(self) -> str:
         s = label_to_string("OBJECT_TYPE", type(self).__name__)
-        s += label_to_string("VALUE DATE", self.value_dt)
+        s += label_to_string("VALUE DATE", self.anchor_dt)
         s += label_to_string("STOCK PRICE", self._stock_price)
         s += label_to_string("VOL FUNCTION", self._vol_func_type)
 

@@ -20,7 +20,7 @@ Main components:
 - `Market` — market summary/status info
 - `Search` — search Yahoo Finance (quotes + news)
 - `Sector` / `Industry` — sector and industry classification data
-- `EquityQuery` / `Screener` — build and run a market screener query
+- `EquityQuery` / `FundQuery` / `ETFQuery` + `screen()` — build and run a market screener query
 - `WebSocket` / `AsyncWebSocket` (`ticker.live()`) — live streaming quote data
 
 ## Installation
@@ -29,10 +29,9 @@ Main components:
 pip install yfinance
 ```
 
-Requires Python 3.9+. `yfinance` depends on `curl_cffi` (to impersonate a browser TLS fingerprint, needed to avoid Yahoo blocking plain `requests` traffic), `pandas`, `numpy`, `requests`, `beautifulsoup4`, `platformdirs`, `pytz`, `frozendict`, `peewee`, `protobuf`, and `websockets`. To install without `curl_cffi` (fallback to plain `requests`, less resilient to blocking):
+`yfinance` depends on `curl_cffi` (to impersonate a browser TLS fingerprint, needed to avoid Yahoo blocking plain `requests` traffic), `pandas`, `numpy`, `requests`, `beautifulsoup4`, `lxml`, `multitasking`, `platformdirs`, `pytz`, `peewee`, `protobuf`, and `websockets` (optional extras: `yfinance[repair]` adds `scipy`/`scikit-learn` for price repair). To install without `curl_cffi` (fallback to plain `requests`, less resilient to blocking), follow upstream's [Advanced ▸ Installation](https://ranaroussi.github.io/yfinance/advanced/install.html) guide — install the dependencies above except `curl_cffi`, then:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ranaroussi/yfinance/main/requirements.txt | grep -vi '^curl_cffi' | pip install -r /dev/stdin
 pip install --no-deps yfinance
 ```
 
@@ -101,7 +100,7 @@ data = yf.download(
     start="2023-01-01", end="2023-12-31",
     interval="1d",          # 1m,2m,5m,15m,30m,60m,90m,1h,1d,5d,1wk,1mo,3mo
     group_by="column",      # or "ticker"
-    auto_adjust=True,       # adjust OHLC for splits/dividends
+    auto_adjust=True,       # adjust OHLC for splits/dividends (default True)
     actions=False,          # include dividends/splits columns
     threads=True,           # parallelize per-ticker requests
     repair=False,           # attempt to fix known Yahoo data errors (100x unit mixups, bad div/split adjustments)
@@ -162,7 +161,7 @@ yf.set_tz_cache_location("custom/cache/location")
 
 ```
 yfinance/
-  __init__.py        # public API surface (Ticker, Tickers, download, Search, Sector, Industry, Market, EquityQuery, Screener, ...)
+  __init__.py        # public API surface (Ticker, Tickers, download, Search, Sector, Industry, Market, EquityQuery, screen, ...)
   ticker.py           # Ticker class (thin wrapper around TickerBase)
   base.py             # TickerBase — the bulk of per-ticker data-fetching logic
   tickers.py          # Tickers — multi-ticker convenience wrapper
@@ -175,6 +174,7 @@ yfinance/
   const.py             # constants: valid periods/intervals, market/exchange metadata
   exceptions.py        # YFException, YFRateLimitError, YFTickerMissingError, etc.
   live.py              # WebSocket / AsyncWebSocket live quote streaming
+  pricing.proto, pricing_pb2.py  # protobuf schema + generated decoder for live price messages (imported by live.py)
   lookup.py            # symbol lookup
   search.py            # Search — Yahoo Finance search (quotes + news)
   shared.py             # shared module-level state (e.g. error tracking across threaded downloads)
@@ -187,6 +187,7 @@ yfinance/
     history.py          # OHLCV price history fetching + price-repair logic (largest file, ~189KB)
     holders.py           # major/institutional/mutualfund holders, insider transactions
     quote.py             # `.info`, fast_info, and quote-summary parsing (~39KB)
+    yahoo-keys.txt       # package data shipped with the scrapers
   domain/
     domain.py            # base classes for Sector/Industry
     sector.py, industry.py, market.py   # Sector, Industry, Market domain objects

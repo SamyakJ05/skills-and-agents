@@ -29,13 +29,14 @@ class Schedule:
         # This is UNADJUSTED (set flag to adjust it)
         termination_dt: Date,
         freq_type: FrequencyTypes = FrequencyTypes.ANNUAL,
-        cal_type: CalendarTypes | list | tuple = CalendarTypes.WEEKEND,        bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
+        cal_type: CalendarTypes | list | tuple = CalendarTypes.WEEKEND,
+        bd_type: BusDayAdjustTypes = BusDayAdjustTypes.FOLLOWING,
         dg_type: DateGenRuleTypes = DateGenRuleTypes.BACKWARD,
         adjust_termination_dt: bool = True,  # Default is to adjust
         end_of_month: bool = False,  # All flow dates are EOM if True
-        first_dt=None,  # First coupon date
-        next_to_last_dt=None,
-    ):  # Penultimate coupon date
+        first_dt: Date | None = None,  # First coupon date
+        next_to_last_dt: Date | None = None,
+    ) -> None:  # Penultimate coupon date
         """Create Schedule object which calculates a sequence of dates
         following the ISDA convention for fixed income products, mainly swaps.
 
@@ -78,6 +79,10 @@ class Schedule:
 
         self.effective_dt = effective_dt
         self.termination_dt = termination_dt
+        # The termination date passed in, before any business day adjustment.
+        # generate() steps back from this date so that it can be called more
+        # than once and always produce the same schedule.
+        self._unadjusted_termination_dt = termination_dt
 
         if first_dt is None:
             self.first_dt = effective_dt
@@ -138,7 +143,16 @@ class Schedule:
 
         calendar = Calendar(self.cal_type)
         frequency = annual_frequency(self.freq_type)
+
+        if frequency == 0 or frequency == 99 or frequency == -1:
+            raise FinError("Frequency must be annual, semi-annual, quarterly or monthly.")
+
         num_months = int(12 / frequency)
+
+        # Always step from the unadjusted termination date. A previous call may
+        # have replaced self.termination_dt with its business day adjusted
+        # version, and stepping from that shifts every unadjusted date.
+        self.termination_dt = self._unadjusted_termination_dt
 
         unadjusted_schedule_dts = []
         self.adjusted_dts = []
@@ -183,20 +197,18 @@ class Schedule:
 
             # This needs checking
             next_dt = self.effective_dt
-            flow_num = 0
-
             unadjusted_schedule_dts.append(next_dt)
-            flow_num = 1
 
             while next_dt < self.termination_dt:
-                unadjusted_schedule_dts.append(next_dt)
-                tot_num_months = num_months * (flow_num)
+                tot_num_months = num_months * len(unadjusted_schedule_dts)
                 next_dt = self.effective_dt.add_months(tot_num_months)
-                flow_num = flow_num + 1
+                if next_dt < self.termination_dt:
+                    unadjusted_schedule_dts.append(next_dt)
 
             # The effective date is not adjusted as it is given
-            for i in range(1, flow_num):
-                dt = calendar.adjust(unadjusted_schedule_dts[i], self.bd_type)
+            self.adjusted_dts.append(self.effective_dt)
+            for dt in unadjusted_schedule_dts[1:]:
+                dt = calendar.adjust(dt, self.bd_type)
 
                 self.adjusted_dts.append(dt)
 

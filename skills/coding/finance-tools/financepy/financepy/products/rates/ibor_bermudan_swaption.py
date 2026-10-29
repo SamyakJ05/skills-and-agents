@@ -11,11 +11,13 @@ from ...utils.calendar import DateGenRuleTypes
 from ...utils.day_count import DayCountTypes
 from ...utils.frequency import FrequencyTypes
 from ...utils.global_vars import G_DAYS_IN_YEAR
-from ...utils.math import ONE_MILLION
+from ...utils.global_vars import ONE_MILLION
 from ...utils.global_types import ExerciseTypes
 from ...utils.global_types import SwapTypes
 from ...utils.error import FinError
 from ...utils.helpers import label_to_string, check_argument_types
+from ...utils.check_values import check_curve_dt
+from ...market.curves.discount_curve import DiscountCurve
 
 from .ibor_swap import IborSwap
 
@@ -49,7 +51,7 @@ class IborBermudanSwaption:
         cal_type=CalendarTypes.WEEKEND,
         bd_type=BusDayAdjustTypes.FOLLOWING,
         dg_type=DateGenRuleTypes.BACKWARD,
-    ):
+    ) -> None:
         """Create a Bermudan swaption contract. This is an option to enter
         into a payer or receiver swap at a fixed coupon on all the fixed
         # leg coupon dates until the exercise date inclusive."""
@@ -94,12 +96,14 @@ class IborBermudanSwaption:
 
     ###################################################################
 
-    def value(self, value_dt, discount_curve, model):
+    def value(self, value_dt: Date, discount_curve: DiscountCurve, model):
         """Value the Bermudan swaption using the specified model and a
         discount curve. The choices of model are the Hull-White model,
         the Black-Karasinski model and the Black-Derman-Toy model."""
 
         float_spread = 0.0
+
+        check_curve_dt(value_dt, discount_curve)
 
         # The underlying is a swap in which we pay the fixed amount
         self.underlying_swap = IborSwap(
@@ -141,7 +145,7 @@ class IborBermudanSwaption:
 
             if flow_dt > self.exercise_dt:
                 cpn_time = (flow_dt - value_dt) / G_DAYS_IN_YEAR
-                cpn_flow = swap.fixed_leg.payments[i_flow - 1] / self.notional
+                cpn_flow = swap.fixed_leg.payments[i_flow] / self.notional
                 cpn_times.append(cpn_time)
                 cpn_flows.append(cpn_flow)
 
